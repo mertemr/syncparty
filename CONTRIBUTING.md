@@ -79,19 +79,38 @@ three native packages in parallel, and publishes the draft only after every
 package is ready. Failed release jobs can be re-run from GitHub Actions; do not
 create a second tag for the same version.
 
+The same tag independently starts `docker.yml`, which publishes the container
+image to `ghcr.io/tahckn/syncparty`. The two share nothing, so one failing does
+not hold up the other — but re-run a tag that produced installers and no image,
+since `docker-compose.yml` points at `:latest`.
+
 ## How the code is arranged
 
 The rule that matters: **`core` must not depend on Tauri.**
 
 ```
 src-tauri/src/
-  ipc/     Tauri commands and the event bridge — thin, delegates to core
-  core/    everything else, testable with plain `cargo test`
+  main.rs           the windowed app
+  bin/syncpartyd.rs the headless host — same core, no window
+  ipc/              Tauri commands and the event bridge — thin, delegates to core
+  core/             everything else, testable with plain `cargo test`
 ```
 
 If you find yourself importing `tauri::` inside `core`, the logic belongs
 somewhere else, or the dependency needs to go behind a trait. `EventBus` and
 `ProgressSink` in `core/events.rs` exist for exactly that reason.
+
+Two feature sets come out of the same crate:
+
+```bash
+cargo clippy --all-targets -- -D warnings                        # desktop
+cargo clippy --no-default-features --features headless \
+      --all-targets -- -D warnings                               # container
+```
+
+The headless set drops Tauri, the webview and the OS keychain, so anything
+added to `core` has to compile without all three. Run the second command
+before opening a PR that touches `core`; CI does the same.
 
 Concretely:
 

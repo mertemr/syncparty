@@ -45,6 +45,51 @@ Everything else — Tailscale, the Syncplay client, mpv, and the Python
 environment the server needs — is detected on first launch and installed for
 you if it is missing.
 
+## An always-on host
+
+The app hosts from whatever machine is running it, so the party ends when that
+laptop sleeps. If you have something that is already on all the time — a NAS, a
+VPS, a Raspberry Pi — there is a container that runs the server half by itself:
+
+```bash
+curl -O https://raw.githubusercontent.com/Tahckn/syncparty/main/docker-compose.yml
+echo "TS_AUTHKEY=tskey-auth-..." > .env
+docker compose up -d
+```
+
+Make the auth key at
+[login.tailscale.com](https://login.tailscale.com/admin/settings/keys) —
+reusable, and **not** ephemeral, or the node disappears with every restart.
+
+The invite is printed by `docker compose logs -f` and written to `invite.txt`
+on the volume. Paste it into syncparty on any machine exactly as a guest would:
+with the server running elsewhere, the host is just another guest of it.
+
+Only the server is containerised. The guest half plays a local file through
+mpv, which needs a screen and the film on disk, so it stays on the desktop.
+
+| Variable | Default | |
+|---|---|---|
+| `TS_AUTHKEY` | — | Without one, a sign-in URL is printed and the daemon waits |
+| `TS_HOSTNAME` | `syncparty` | The name this node appears under in your tailnet |
+| `SYNCPARTY_ROOM` | `MovieNight` | |
+| `SYNCPARTY_PORT` | `8999` | |
+| `SYNCPARTY_MONITOR` | `true` | Logs who is in the room, at the cost of a `syncparty-panel` entry in everyone's user list |
+| `SYNCPARTY_DISCORD_WEBHOOK` | — | Announce the invite in a channel |
+
+Two things are worth getting right:
+
+- **`/data` has to be a real volume.** It holds this node's Tailscale identity,
+  the server password and the salt. Recreating the container without it mints a
+  new password and a new salt, which invalidates every invite already shared
+  and every room operator password derived from the old salt. The container
+  warns at startup if `/data` is not mounted.
+- **`--device=/dev/net/tun --cap-add=NET_ADMIN` are required**, and the compose
+  file sets both. Userspace networking is not an alternative: the server binds
+  to the tailnet address itself, and in userspace mode nothing holds it.
+
+Images are published for amd64 and arm64.
+
 ## How it works
 
 ```
@@ -88,6 +133,14 @@ A few decisions worth knowing about:
   passwords from it; a new salt on every start would silently invalidate them.
 - **Stopping a party does not stop Tailscale.** Your tailnet is used for other
   things.
+- **The container is its own tailnet node, not a tenant of the host's.**
+  Sharing the machine's network namespace would be simpler, but only works on
+  Linux: under Docker Desktop the "host" is a Linux VM whose tailnet address
+  means nothing to Windows or macOS. Joining separately costs an auth key and
+  works everywhere.
+- **The headless host keeps its secrets in a file, not a keychain.** A
+  container has no desktop session to unlock one. The file is `0600` on a
+  volume, which is weaker — put it on a machine you control, not a shared box.
 - **Updates download in the background but never install themselves.**
   syncparty checks on startup and, if there is a new version, downloads it
   silently — there is no reason to make that wait for anyone. Installing
@@ -121,6 +174,8 @@ src/                     React frontend
   features/              onboarding · host · guest · settings
   shared/                ipc wrappers, generated types, UI primitives
 src-tauri/
+  src/main.rs            the windowed app          (--features desktop)
+  src/bin/syncpartyd.rs  the headless host         (--features headless)
   src/ipc/               Tauri commands and the event bridge
   src/core/              all logic, no Tauri dependency
     deps/                dependency detection and installation
@@ -131,7 +186,13 @@ src-tauri/
 ```
 
 `core` never imports from `ipc`, which is what lets the whole of it run under
-`cargo test` without a webview.
+`cargo test` without a webview — and is what `syncpartyd` is built out of. It
+drives the same `PartySession` the host screen does, replacing only where
+events go and where secrets are kept.
+
+```bash
+cargo build --release --no-default-features --features headless --bin syncpartyd
+```
 
 ## Contributing
 

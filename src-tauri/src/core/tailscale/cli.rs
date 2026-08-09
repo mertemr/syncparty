@@ -217,7 +217,7 @@ struct StatusJson {
     auth_url: Option<String>,
     #[serde(rename = "Self")]
     self_node: Option<NodeJson>,
-    #[serde(rename = "Peer", default)]
+    #[serde(rename = "Peer", default, deserialize_with = "null_as_default")]
     peers: std::collections::HashMap<String, NodeJson>,
 }
 
@@ -225,10 +225,26 @@ struct StatusJson {
 struct NodeJson {
     #[serde(rename = "DNSName")]
     dns_name: Option<String>,
-    #[serde(rename = "TailscaleIPs", default)]
+    #[serde(rename = "TailscaleIPs", default, deserialize_with = "null_as_default")]
     tailscale_ips: Vec<String>,
     #[serde(rename = "ShareeNode")]
     sharee_node: Option<bool>,
+}
+
+/// Reads an explicit `null` as an empty collection.
+///
+/// `#[serde(default)]` covers a *missing* key, and the daemon emits
+/// present-but-null for `TailscaleIPs` and `Peer` while logged out. Without
+/// this the status fails to parse in exactly that state, and since the caller
+/// reads an unparseable status as "no answer yet", a host who had never signed
+/// in waits out the connect timeout and is told Tailscale is down — instead of
+/// getting the sign-in URL sitting in the document that failed to parse.
+fn null_as_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl NodeJson {
@@ -345,6 +361,41 @@ mod tests {
 
         assert_eq!(sharees.len(), 1);
         assert_eq!(sharees[0].tailscale_ips[0], "100.64.0.9");
+    }
+
+    /// Captured from a real daemon that had never been signed in.
+    /// `TailscaleIPs` and `Peer` are present and null rather than absent,
+    /// which is the whole point of the test.
+    const LOGGED_OUT_STATUS: &str = r#"{
+        "BackendState": "NeedsLogin",
+        "AuthURL": "https://login.tailscale.com/a/78e2cfb01c2ef",
+        "Self": {
+            "DNSName": "",
+            "TailscaleIPs": null,
+            "ShareeNode": false
+        },
+        "Peer": null
+    }"#;
+
+    #[test]
+    fn a_logged_out_daemon_still_yields_its_sign_in_url() {
+        let status: StatusJson = serde_json::from_str(LOGGED_OUT_STATUS)
+            .expect("a logged-out status must parse; failing here loses the sign-in URL");
+
+        assert_eq!(
+            status.auth_url.as_deref(),
+            Some("https://login.tailscale.com/a/78e2cfb01c2ef")
+        );
+        assert_eq!(status.backend_state, "NeedsLogin");
+        assert!(status.peers.is_empty());
+
+        let self_node = status.self_node.expect("self node");
+        assert!(self_node.tailscale_ips.is_empty());
+        assert_eq!(
+            self_node.clean_dns_name(),
+            None,
+            "an empty name is not a name"
+        );
     }
 
     #[test]

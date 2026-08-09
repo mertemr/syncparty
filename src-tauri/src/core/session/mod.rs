@@ -389,12 +389,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
 
-        let settings = Arc::new(ConfigStore::load(AppPaths::rooted_at(dir)).expect("settings"));
+        let settings = Arc::new(ConfigStore::load(AppPaths::rooted_at(&dir)).expect("settings"));
         settings
             .update(|s| s.mode = Some(AppMode::Host))
             .expect("update");
 
-        let secrets = Arc::new(SecretStore::new());
+        // A file backend so these tests leave no credentials behind on
+        // whoever's machine ran them.
+        let secrets = Arc::new(SecretStore::file(dir.join("secrets.json")));
         let bus = Arc::new(RecordingEventBus::default());
 
         let session = PartySession::new(

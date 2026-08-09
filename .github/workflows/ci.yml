@@ -70,6 +70,38 @@ jobs:
             exit 1
           fi
 
+  # What the container image builds. Keeps `core` free of Tauri and the
+  # keychain, and is the only leg that compiles syncpartyd's signal handling.
+  headless:
+    name: Headless
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: headless
+
+      # No dist/index.html needed: without Tauri there is no
+      # generate_context! to satisfy.
+      - name: Lint
+        working-directory: src-tauri
+        run: cargo clippy --no-default-features --features headless --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --no-default-features --features headless
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

@@ -6,16 +6,26 @@
 //! protocol code and settings, which is why they are not two apps.
 
 pub mod core;
+
+/// The Tauri bridge. Absent from a headless build, along with everything
+/// below it in this file.
+#[cfg(feature = "desktop")]
 pub mod ipc;
 
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
 
+#[cfg(feature = "desktop")]
 use tauri::Manager;
 
+#[cfg(feature = "desktop")]
 use crate::core::events::{AppEvent, EventBus};
+#[cfg(feature = "desktop")]
 use crate::core::invite::Invite;
+#[cfg(feature = "desktop")]
 use crate::ipc::{commands, AppState};
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -85,6 +95,7 @@ pub fn run() {
 ///
 /// Both entry points are covered: a link that started the app cold, and one
 /// that arrives while it is already open.
+#[cfg(feature = "desktop")]
 fn register_deep_links(app: &tauri::AppHandle, bus: Arc<dyn EventBus>) {
     use tauri_plugin_deep_link::DeepLinkExt;
 
@@ -103,6 +114,7 @@ fn register_deep_links(app: &tauri::AppHandle, bus: Arc<dyn EventBus>) {
 /// A malformed link is dropped rather than surfaced: these arrive from
 /// outside the app, and a stray `syncparty://` from anywhere should not be
 /// able to put an error in front of the user.
+#[cfg(feature = "desktop")]
 fn publish_first_invite(urls: &[url::Url], bus: &dyn EventBus) {
     let invite = urls
         .iter()
@@ -113,6 +125,7 @@ fn publish_first_invite(urls: &[url::Url], bus: &dyn EventBus) {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();

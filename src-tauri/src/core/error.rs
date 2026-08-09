@@ -154,6 +154,8 @@ impl From<reqwest::Error> for SyncPartyError {
     }
 }
 
+/// Only the desktop build talks to a keychain.
+#[cfg(feature = "desktop")]
 impl From<keyring::Error> for SyncPartyError {
     fn from(value: keyring::Error) -> Self {
         Self::Secret(value.to_string())

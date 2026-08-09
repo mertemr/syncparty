@@ -1,0 +1,45 @@
+# Always-on syncparty host.
+#
+#   1. Make a reusable, non-ephemeral auth key:
+#      https://login.tailscale.com/admin/settings/keys
+#   2. echo "TS_AUTHKEY=tskey-auth-..." > .env
+#   3. docker compose up -d && docker compose logs -f
+#
+# Paste the invite code from the log into syncparty like any other guest.
+
+services:
+  syncparty:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # image: ghcr.io/tahckn/syncparty:latest
+    container_name: syncparty
+    restart: unless-stopped
+
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+
+    init: true
+
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      TS_HOSTNAME: ${TS_HOSTNAME:-syncparty}
+
+      SYNCPARTY_PORT: ${SYNCPARTY_PORT:-8999}
+      SYNCPARTY_ROOM: ${SYNCPARTY_ROOM:-MovieNight}
+      # Logs who is in the room, at the cost of a syncparty-panel entry in
+      # everyone's user list.
+      SYNCPARTY_MONITOR: ${SYNCPARTY_MONITOR:-true}
+      SYNCPARTY_DISCORD_WEBHOOK: ${SYNCPARTY_DISCORD_WEBHOOK:-}
+      SYNCPARTY_LANGUAGE: ${SYNCPARTY_LANGUAGE:-en}
+
+    volumes:
+      # Holds the Tailscale identity, the server password and the salt.
+      - syncparty-data:/data
+
+    # No ports: publishing one would put the server on the local network.
+
+volumes:
+  syncparty-data:

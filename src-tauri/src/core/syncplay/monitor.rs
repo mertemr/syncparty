@@ -1,7 +1,7 @@
 //! A read-only Syncplay client that reports who is in the room.
 //!
 //! The PowerShell prototype counted TCP connections and guessed at names with
-//! `tailscale whois`, which told you an IP and a port number. Attaching a real
+//! peer addresses, which told you an IP and a port number. Attaching a real
 //! client instead gives the panel what the server already knows: nicknames,
 //! the file each person has open, and whether they are ready.
 //!

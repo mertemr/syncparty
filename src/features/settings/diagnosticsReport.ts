@@ -1,6 +1,6 @@
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
 
-/** Removes local paths and private tailnet addresses from copied reports. */
+/** Removes local paths and this machine's address from copied reports. */
 export function safeToShare(report: DiagnosticsReport) {
   return {
     appVersion: report.appVersion,
@@ -11,15 +11,9 @@ export function safeToShare(report: DiagnosticsReport) {
       status: item.status.state,
       version: item.status.state === "installed" ? item.status.version : null,
     })),
-    tailnet: report.tailnet
-      ? {
-          backendState: report.tailnet.backendState,
-          isRunning: report.tailnet.isRunning,
-          hasAddress: report.tailnet.ipv4 != null,
-          hasDnsName: report.tailnet.dnsName != null,
-        }
-      : null,
-    tailnetError: report.tailnetError ? "unavailable" : null,
+    // Whether this machine has an endpoint at all is useful; which endpoint
+    // it is names the machine, and an invite naming it may still be live.
+    hasEndpoint: report.endpoint != null,
     session: { phase: report.session.phase },
   };
 }

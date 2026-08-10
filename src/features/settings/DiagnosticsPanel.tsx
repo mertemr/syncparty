@@ -32,15 +32,15 @@ export function DiagnosticsPanel() {
       .length ?? 0;
   const dependencyTotal = report?.dependencies.items.length ?? 0;
   const dependenciesReady = dependencyTotal > 0 && installed === dependencyTotal;
-  const tailnetReady = report?.tailnet?.isRunning === true;
+
 
   return (
     <Card
       title={t("settings.diagnostics.title")}
       action={
         report && (
-          <Badge tone={tailnetReady && dependenciesReady ? "good" : "warn"}>
-            {tailnetReady && dependenciesReady
+          <Badge tone={dependenciesReady ? "good" : "warn"}>
+            {dependenciesReady
               ? t("settings.diagnostics.healthy")
               : t("settings.diagnostics.attention")}
           </Badge>
@@ -54,12 +54,13 @@ export function DiagnosticsPanel() {
       {report && (
         <div className="mt-4 divide-y divide-line/60 rounded-xl border border-line/70 bg-canvas/35 px-4">
           <HealthRow
-            label="Tailscale"
-            good={tailnetReady}
+            label={t("settings.diagnostics.endpoint")}
+            good={report.endpoint != null}
+            neutral={report.endpoint == null}
             detail={
-              report.tailnet
-                ? report.tailnet.backendState
-                : t("settings.diagnostics.unavailable")
+              report.endpoint
+                ? `${report.endpoint.slice(0, 8)}…`
+                : t("settings.diagnostics.endpointUnset")
             }
           />
           <HealthRow
@@ -101,9 +102,6 @@ export function DiagnosticsPanel() {
       </div>
 
       {problem && <p className="mt-3 text-sm text-bad">{problem}</p>}
-      {report?.tailnetError && (
-        <p className="mt-3 text-xs text-ink-faint">{report.tailnetError}</p>
-      )}
     </Card>
   );
 }

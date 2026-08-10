@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::core::config::{AppMode, ConfigStore};
 use crate::core::deps::{
     Dependency, DependencyId, MpvDependency, PreflightItem, PreflightReport,
-    ServerRuntimeDependency, SyncplayClientDependency, TailscaleDependency,
+    ServerRuntimeDependency, SyncplayClientDependency,
 };
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{DependencyProgress, EventBus, ProgressSink};
@@ -22,8 +22,8 @@ impl DependencyManager {
     pub fn standard(paths: AppPaths, settings: Arc<ConfigStore>) -> Self {
         Self::with(
             vec![
-                Box::new(TailscaleDependency::new()) as Box<dyn Dependency>,
-                Box::new(SyncplayClientDependency::new(Arc::clone(&settings))),
+                Box::new(SyncplayClientDependency::new(Arc::clone(&settings)))
+                    as Box<dyn Dependency>,
                 Box::new(MpvDependency::new(Arc::clone(&settings))),
                 Box::new(ServerRuntimeDependency::new(paths)),
             ],
@@ -231,7 +231,7 @@ mod tests {
         DependencyManager::with(
             vec![
                 Box::new(FakeDependency::installed(
-                    DependencyId::Tailscale,
+                    DependencyId::SyncplayClient,
                     ModeRequirement::Both,
                 )) as Box<dyn Dependency>,
                 Box::new(FakeDependency::missing(
@@ -248,7 +248,7 @@ mod tests {
         let report = manager().preflight(AppMode::Guest).await;
 
         assert_eq!(report.items.len(), 1);
-        assert_eq!(report.items[0].id, DependencyId::Tailscale);
+        assert_eq!(report.items[0].id, DependencyId::SyncplayClient);
         assert!(report.is_satisfied());
     }
 
@@ -269,7 +269,7 @@ mod tests {
         let bus = RecordingEventBus::default();
 
         manager()
-            .install(DependencyId::Tailscale, &bus)
+            .install(DependencyId::SyncplayClient, &bus)
             .await
             .expect("install");
 
@@ -278,7 +278,7 @@ mod tests {
         assert!(matches!(
             &events[0],
             AppEvent::InstallProgress {
-                dependency: DependencyId::Tailscale,
+                dependency: DependencyId::SyncplayClient,
                 percent: Some(50),
                 ..
             }
@@ -288,9 +288,9 @@ mod tests {
     #[tokio::test]
     async fn a_dependency_that_cannot_be_located_by_hand_refuses_a_path() {
         let error = manager()
-            .set_manual_path(DependencyId::Tailscale, Some("/somewhere".to_owned()))
+            .set_manual_path(DependencyId::ServerRuntime, Some("/somewhere".to_owned()))
             .await
-            .expect_err("Tailscale has a fixed install location");
+            .expect_err("the managed runtime lives where syncparty puts it");
 
         assert_eq!(error.kind(), "other");
     }

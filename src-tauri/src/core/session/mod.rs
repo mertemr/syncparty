@@ -1,9 +1,10 @@
 //! The orchestrator the UI talks to.
 //!
-//! Tailscale, the server process, the room monitor and Discord are each
+//! The transport, the server process, the room monitor and Discord are each
 //! useful on their own; this is the piece that knows the order they go in and
 //! how to unwind when a step fails partway through.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -14,11 +15,11 @@ use crate::core::config::{ConfigStore, SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
+use crate::core::net::{GuestTunnel, HostTunnel, PartyEndpoint};
 use crate::core::notify::{self, DiscordNotifier};
 use crate::core::syncplay::{
     ClientLauncher, MonitorConfig, RoomMonitor, ServerConfig, ServerController, ServerState,
 };
-use crate::core::tailscale::{AuthFlow, CliTailscaleClient, TailscaleClient};
 
 /// Length of the generated server password. Long enough that guessing is
 /// hopeless, short enough to read aloud if the link ever fails.
@@ -46,8 +47,9 @@ pub enum SessionState {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum StartupStep {
-    ConnectingTailscale,
+    JoiningNetwork,
     StartingServer,
+    OpeningTunnel,
     AttachingMonitor,
 }
 
@@ -59,14 +61,28 @@ pub struct HostingInfo {
     pub invite: Invite,
     pub invite_code: String,
     pub deep_link: String,
-    /// This machine's own tailnet address — the one the server is bound to.
-    ///
-    /// Not decoration: it is the address the host's own Syncplay has to use.
-    /// `invite.host` may be a masqueraded address that only resolves inside
-    /// the tailnet this node was shared into, which does not include here.
-    pub tailscale_address: String,
+    /// Where the Syncplay server is listening, for the host's own client and
+    /// for diagnostics. Always on loopback — guests never see this.
+    pub server_address: String,
     pub server: ServerState,
     pub monitor_attached: bool,
+}
+
+/// What a guest holds open for as long as it is in a party.
+///
+/// Both halves have to outlive the call that created them. The tunnel is the
+/// route Syncplay's connection actually runs through, and the endpoint owns
+/// the QUIC state underneath it, so dropping either mid-film disconnects the
+/// guest even though the Syncplay window is still open.
+struct GuestSession {
+    tunnel: GuestTunnel,
+    endpoint: PartyEndpoint,
+}
+
+/// What a host holds open while a party is running.
+struct HostNetwork {
+    tunnel: HostTunnel,
+    endpoint: PartyEndpoint,
 }
 
 pub struct PartySession {
@@ -77,6 +93,8 @@ pub struct PartySession {
     bus: Arc<dyn EventBus>,
     state: Mutex<SessionState>,
     monitor: Mutex<Option<RoomMonitor>>,
+    network: Mutex<Option<HostNetwork>>,
+    guest: Mutex<Option<GuestSession>>,
 }
 
 impl PartySession {
@@ -95,6 +113,8 @@ impl PartySession {
             bus,
             state: Mutex::new(SessionState::Idle),
             monitor: Mutex::new(None),
+            network: Mutex::new(None),
+            guest: Mutex::new(None),
         }
     }
 
@@ -109,8 +129,9 @@ impl PartySession {
 
     /// Brings a party up end to end.
     ///
-    /// On failure the server is stopped again rather than left running in the
-    /// background where the next attempt would collide with it.
+    /// On failure everything already started is torn down again rather than
+    /// left running in the background where the next attempt would collide
+    /// with it.
     pub async fn start_hosting(&self) -> Result<HostingInfo> {
         match self.start_hosting_inner().await {
             Ok(info) => Ok(info),
@@ -129,22 +150,16 @@ impl PartySession {
         let settings = self.settings.get();
 
         self.transition(SessionState::Starting {
-            step: StartupStep::ConnectingTailscale,
+            step: StartupStep::JoiningNetwork,
         })
         .await;
 
-        let tailscale = CliTailscaleClient::discover()?;
-        let address = match tailscale.bring_up().await? {
-            AuthFlow::Ready(address) => address,
-            AuthFlow::NeedsLogin { auth_url } => {
-                // Published once. The UI opens it; nothing here does, which is
-                // what stops the browser-tab storm the prototype produced.
-                self.bus.publish(AppEvent::TailscaleLoginRequired {
-                    auth_url: auth_url.clone(),
-                });
-                return Err(SyncPartyError::TailscaleLoginRequired { auth_url });
-            }
-        };
+        // First, because it is the step most likely to fail and the only one
+        // that depends on the outside world. Failing here costs nothing to
+        // unwind, whereas failing after the server is up does not.
+        let endpoint = PartyEndpoint::bind_hosting(&self.secrets).await?;
+        endpoint.wait_online().await?;
+        let host_endpoint = endpoint.id();
 
         // Generated once and reused forever. The salt in particular must not
         // change: Syncplay derives room operator passwords from it, and a new
@@ -161,35 +176,25 @@ impl PartySession {
         })
         .await;
 
-        self.server
-            .start(&ServerConfig {
-                port: settings.port,
-                password: password.clone(),
-                salt,
-                bind_address: address,
-            })
-            .await?;
+        let config = ServerConfig {
+            port: settings.port,
+            password: password.clone(),
+            salt,
+        };
+        self.server.start(&config).await?;
 
-        // Guests may reach this node on a masqueraded address or its MagicDNS
-        // name rather than the raw IP it binds to.
-        let advertised = tailscale
-            .shareable_address()
-            .await?
-            .unwrap_or_else(|| address.to_string());
+        self.transition(SessionState::Starting {
+            step: StartupStep::OpeningTunnel,
+        })
+        .await;
 
-        // Every other address that reaches this server goes along for the
-        // ride, because which one works depends on which tailnet the guest is
-        // on — something the host has no way to know. `candidates` drops the
-        // duplicates this produces when a host has only one address.
-        let mut alternates = vec![address.to_string()];
-        if let Some(dns_name) = tailscale.status().await.ok().and_then(|s| s.dns_name) {
-            alternates.push(dns_name);
-        }
+        // Started only once the server is answering, so a guest that arrives
+        // in the same instant is forwarded to something that exists.
+        let tunnel = HostTunnel::start(endpoint.inner().clone(), config.local_address());
+        *self.network.lock().await = Some(HostNetwork { tunnel, endpoint });
 
         let invite = Invite {
-            host: advertised,
-            alternate_hosts: alternates,
-            port: settings.port,
+            endpoint: host_endpoint.to_string(),
             password: password.clone(),
             room: settings.room.clone(),
         };
@@ -200,13 +205,8 @@ impl PartySession {
             })
             .await;
 
-            self.attach_monitor(
-                &address.to_string(),
-                settings.port,
-                &password,
-                &settings.room,
-            )
-            .await;
+            self.attach_monitor(config.local_address(), &password, &settings.room)
+                .await;
             true
         } else {
             false
@@ -215,7 +215,7 @@ impl PartySession {
         let info = HostingInfo {
             invite_code: invite.encode(),
             deep_link: invite.deep_link(),
-            tailscale_address: address.to_string(),
+            server_address: config.local_address().to_string(),
             server: self.server.state().await,
             monitor_attached,
             invite,
@@ -243,12 +243,13 @@ impl PartySession {
 
     /// Attaches the monitor and republishes its snapshots as events.
     ///
-    /// Connects over the loopback-facing tailnet address rather than the
-    /// advertised one, since the server binds to exactly that.
-    async fn attach_monitor(&self, host: &str, port: u16, password: &str, room: &str) {
+    /// Connects straight to the server on loopback rather than going out
+    /// through the tunnel and back: the monitor runs in this very process, so
+    /// a round trip through QUIC would buy nothing but latency.
+    async fn attach_monitor(&self, address: SocketAddr, password: &str, room: &str) {
         let monitor = RoomMonitor::start(MonitorConfig {
-            host: host.to_owned(),
-            port,
+            host: address.ip().to_string(),
+            port: address.port(),
             password: password.to_owned(),
             room: room.to_owned(),
         });
@@ -268,7 +269,12 @@ impl PartySession {
         *self.monitor.lock().await = Some(monitor);
     }
 
-    /// Stops the party. Tailscale is left alone.
+    /// Stops the party.
+    ///
+    /// The order matters: the tunnel goes first so no guest is mid-forward
+    /// into a server that is about to disappear, and the endpoint is closed
+    /// rather than dropped so guests are told the party ended instead of
+    /// waiting out a timeout.
     pub async fn stop_hosting(&self) -> Result<()> {
         let settings = self.settings.get();
 
@@ -282,17 +288,39 @@ impl PartySession {
         // Dropping the monitor aborts its task and closes the connection.
         self.monitor.lock().await.take();
 
+        if let Some(network) = self.network.lock().await.take() {
+            drop(network.tunnel);
+            network.endpoint.close().await;
+        }
+
         self.server.stop().await?;
         self.transition(SessionState::Idle).await;
         Ok(())
     }
 
-    /// Opens the Syncplay client on an invite. Used by the guest half.
+    /// Joins a party as a guest: opens a tunnel to the host, then points
+    /// Syncplay at the near end of it.
+    ///
+    /// The invite is only remembered once Syncplay has actually been launched,
+    /// so a code that turns out to be unreachable is not the one restored on
+    /// next startup.
     pub async fn join(&self, invite: &Invite) -> Result<()> {
         let nickname = self.settings.get().nickname;
-        ClientLauncher::discover(&self.settings)?
-            .join(invite, &nickname)
-            .await?;
+
+        // Resolved before anything is spawned: a launcher that cannot be found
+        // should fail without having opened a connection to the host first.
+        let launcher = ClientLauncher::discover(&self.settings)?;
+
+        let endpoint = PartyEndpoint::bind_joining().await?;
+        let tunnel = GuestTunnel::open(endpoint.inner().clone(), invite.endpoint_id()?).await?;
+        let address = tunnel.local_addr();
+
+        launcher.join(invite, address, &nickname).await?;
+
+        // Held for the length of the party. Assigning before the old session
+        // is dropped keeps a re-join from briefly having no tunnel at all.
+        *self.guest.lock().await = Some(GuestSession { tunnel, endpoint });
+
         self.secrets
             .set(SecretKey::LastInvite, &encode_last_invite(invite)?)
     }
@@ -314,18 +342,36 @@ impl PartySession {
         Ok(Some(invite))
     }
 
+    /// Closes a guest's tunnel. Syncplay keeps running; it simply loses the
+    /// server, which is what leaving a party means.
+    pub async fn leave(&self) -> Result<()> {
+        if let Some(guest) = self.guest.lock().await.take() {
+            drop(guest.tunnel);
+            guest.endpoint.close().await;
+        }
+
+        Ok(())
+    }
+
     /// Opens the host's own Syncplay client on the party it is running.
     ///
-    /// This deliberately bypasses `join`: a host-local connection is not a
-    /// guest session and must not replace the invite resumed on next startup.
+    /// This deliberately bypasses `join`: the host's client connects straight
+    /// to the server on loopback, with no tunnel and no endpoint in between,
+    /// and a host-local connection must not replace the invite that gets
+    /// resumed on next startup.
     pub async fn join_as_host(&self) -> Result<()> {
         let SessionState::Hosting(info) = self.state().await else {
             return Err(SyncPartyError::ServerNotRunning);
         };
 
+        let address = info
+            .server_address
+            .parse::<SocketAddr>()
+            .map_err(|error| SyncPartyError::Other(format!("unusable server address: {error}")))?;
+
         let nickname = self.settings.get().nickname;
         ClientLauncher::discover(&self.settings)?
-            .join(&info.invite.at_host(&info.tailscale_address), &nickname)
+            .join(&info.invite, address, &nickname)
             .await
     }
 
@@ -431,6 +477,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaving_without_having_joined_is_not_an_error() {
+        let (session, _) = session_with("leave-idle", Arc::new(FakeServer::default()));
+
+        assert!(session.leave().await.is_ok());
+    }
+
+    #[tokio::test]
     async fn a_failed_start_leaves_no_server_running() {
         let server = Arc::new(FakeServer {
             fail_on_start: true,
@@ -438,8 +491,9 @@ mod tests {
         });
         let (session, _) = session_with("failed-start", Arc::clone(&server));
 
-        // Tailscale is almost certainly absent in CI, so this fails before
-        // reaching the server; either way the cleanup path must run.
+        // On a machine with no network the endpoint step fails first; on one
+        // with network the fake server fails instead. Either way the cleanup
+        // path is what this is checking.
         let _ = session.start_hosting().await;
 
         assert!(
@@ -460,9 +514,7 @@ mod tests {
     #[test]
     fn saved_invites_round_trip() {
         let invite = Invite {
-            host: "movie-box.tail1a2b3.ts.net".to_owned(),
-            alternate_hosts: Vec::new(),
-            port: 8999,
+            endpoint: iroh::SecretKey::generate().public().to_string(),
             password: "swordfish".to_owned(),
             room: "MovieNight".to_owned(),
         };
@@ -471,5 +523,16 @@ mod tests {
             parse_last_invite(&encode_last_invite(&invite).expect("encode")),
             Some(invite)
         );
+    }
+
+    #[test]
+    fn a_saved_invite_from_the_tailscale_era_is_discarded_rather_than_resumed() {
+        // The old shape, as it would still be sitting in the keychain after an
+        // upgrade. It has no endpoint, so there is nothing to dial; being
+        // rejected here is what makes the app clear it and start clean.
+        let legacy = r#"{"host":"100.127.167.56","alternateHosts":[],"port":8999,
+                         "password":"swordfish","room":"MovieNight"}"#;
+
+        assert!(parse_last_invite(legacy).is_none());
     }
 }

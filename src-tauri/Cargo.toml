@@ -1,7 +1,7 @@
 [package]
 name = "syncparty"
 version = "0.3.2"
-description = "Synchronised movie nights over Tailscale"
+description = "Synchronised movie nights, peer to peer"
 authors = ["Taha Çeken"]
 edition = "2021"
 license = "MIT"

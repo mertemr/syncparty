@@ -22,6 +22,15 @@ export const en = {
   "mode.host": "Host",
   "mode.guest": "Guest",
 
+  "nav.steps": "Setup progress",
+  "nav.step.mode": "Mode",
+  "nav.step.setup": "Setup",
+  "nav.step.party": "Movie night",
+  "nav.leaveHosting.title": "Your movie night is still running",
+  "nav.leaveHosting.detail":
+    "Going back stops the server, and everyone watching will be disconnected.",
+  "nav.leaveHosting.confirm": "Stop and go back",
+
   "onboarding.title": "What are you doing tonight?",
   "onboarding.eyebrow": "Watch together, privately",
   "onboarding.subtitle":
@@ -193,6 +202,15 @@ export const tr: Messages = {
 
   "mode.host": "Sunucu",
   "mode.guest": "Misafir",
+
+  "nav.steps": "Kurulum ilerlemesi",
+  "nav.step.mode": "Mod",
+  "nav.step.setup": "Kurulum",
+  "nav.step.party": "Film gecesi",
+  "nav.leaveHosting.title": "Film gecen hâlâ sürüyor",
+  "nav.leaveHosting.detail":
+    "Geri dönersen sunucu durur ve izleyen herkesin bağlantısı kopar.",
+  "nav.leaveHosting.confirm": "Durdur ve geri dön",
 
   "onboarding.title": "Bu akşam ne yapıyorsun?",
   "onboarding.eyebrow": "Birlikte, sadece size özel",

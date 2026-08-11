@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
+import { StepTrail, type Step } from "@/app/StepTrail";
 import { GuestScreen } from "@/features/guest/GuestScreen";
 import { HostScreen } from "@/features/host/HostScreen";
 import { ModeChooser } from "@/features/onboarding/ModeChooser";
@@ -12,6 +13,7 @@ import {
   type MessageKey,
 } from "@/shared/i18n";
 import { useAppUpdate } from "@/shared/hooks/useAppUpdate";
+import { ipc } from "@/shared/ipc";
 import { Badge, Button } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 
@@ -36,32 +38,89 @@ function Localised() {
 
 function Shell() {
   const t = useTranslate();
-  const { settings, patchSettings, pendingInvite, reportFailure } =
+  const { settings, patchSettings, pendingInvite, reportFailure, session } =
     useAppState();
 
   const [showSettings, setShowSettings] = useState(false);
   const [setupConfirmed, setSetupConfirmed] = useState(false);
+  // Set when the user steps back out of setup. The stored mode stays as their
+  // last answer — the backend patch cannot clear it — but the chooser comes
+  // back so a mistaken pick is one click to undo.
+  const [rechoosingMode, setRechoosingMode] = useState(false);
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
 
   // An invite arriving by link means the user is a guest tonight, whatever
-  // they picked last time.
+  // they picked last time — and settles the mode question outright.
   useEffect(() => {
-    if (pendingInvite && settings && settings.mode !== "guest") {
+    if (!pendingInvite || !settings) return;
+
+    setRechoosingMode(false);
+    if (settings.mode !== "guest") {
       void patchSettings({ mode: "guest" }).catch(reportFailure);
     }
   }, [pendingInvite, settings, patchSettings, reportFailure]);
 
   const chooseMode = (mode: AppMode) => {
     setSetupConfirmed(false);
+    setRechoosingMode(false);
     void patchSettings({ mode }).catch(reportFailure);
   };
+
+  const mode = rechoosingMode ? null : (settings?.mode ?? null);
+  const step: Step = mode === null ? "mode" : setupConfirmed ? "party" : "setup";
+
+  const partyRunning =
+    session.phase === "starting" || session.phase === "hosting";
+  const canGoBack = settings !== null && !showSettings && step !== "mode";
+
+  function stepBack() {
+    setConfirmingLeave(false);
+    if (step === "party") setSetupConfirmed(false);
+    else setRechoosingMode(true);
+  }
+
+  /**
+   * Hosting is the one step back that breaks something: the server and
+   * everyone connected to it go down with it, so it asks first. Nothing on the
+   * guest side is torn down by walking back, so no guard there.
+   */
+  function goBack() {
+    if (step === "party" && mode === "host" && partyRunning) {
+      setConfirmingLeave(true);
+      return;
+    }
+    stepBack();
+  }
+
+  async function stopAndGoBack() {
+    try {
+      await ipc.stopHosting();
+    } catch (error) {
+      reportFailure(error);
+      setConfirmingLeave(false);
+      return;
+    }
+    stepBack();
+  }
 
   return (
     <div className="relative flex h-full flex-col">
       <Header
-        mode={settings?.mode ?? null}
+        mode={mode}
         settingsOpen={showSettings}
+        canGoBack={canGoBack}
+        onBack={goBack}
         onToggleSettings={() => setShowSettings((open) => !open)}
       />
+
+      {settings && !showSettings && <StepTrail current={step} />}
+
+      {confirmingLeave && (
+        <LeaveHostingPrompt
+          onConfirm={() => void stopAndGoBack()}
+          onCancel={() => setConfirmingLeave(false)}
+        />
+      )}
 
       {/* Above the loading state on purpose: if settings fail to load, the
           reason has to be visible rather than hidden behind a spinner that
@@ -76,14 +135,11 @@ function Shell() {
           </p>
         ) : showSettings ? (
           <SettingsScreen />
-        ) : settings.mode === null ? (
+        ) : mode === null ? (
           <ModeChooser onChoose={chooseMode} />
         ) : !setupConfirmed ? (
-          <Preflight
-            mode={settings.mode}
-            onReady={() => setSetupConfirmed(true)}
-          />
-        ) : settings.mode === "host" ? (
+          <Preflight mode={mode} onReady={() => setSetupConfirmed(true)} />
+        ) : mode === "host" ? (
           <HostScreen />
         ) : (
           <GuestScreen />
@@ -93,13 +149,57 @@ function Shell() {
   );
 }
 
+/**
+ * The one confirmation in the app.
+ *
+ * A strip rather than a modal: it matches the other two things that interrupt
+ * from the top of the window, and a modal layer exists nowhere else here.
+ */
+function LeaveHostingPrompt({
+  onConfirm,
+  onCancel,
+}: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const t = useTranslate();
+
+  return (
+    <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-3">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-warn">
+            {t("nav.leaveHosting.title")}
+          </p>
+          <p className="mt-0.5 text-xs text-ink-muted">
+            {t("nav.leaveHosting.detail")}
+          </p>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="ghost" onClick={onCancel}>
+            {t("common.cancel")}
+          </Button>
+          <Button variant="danger" onClick={onConfirm}>
+            {t("nav.leaveHosting.confirm")}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Header({
   mode,
   settingsOpen,
+  canGoBack,
+  onBack,
   onToggleSettings,
 }: {
   mode: AppMode | null;
   settingsOpen: boolean;
+  canGoBack: boolean;
+  onBack: () => void;
   onToggleSettings: () => void;
 }) {
   const t = useTranslate();
@@ -115,6 +215,26 @@ function Header({
         <span className="text-[15px] font-bold tracking-[-0.02em] text-ink">
           {t("appName")}
         </span>
+
+        {canGoBack && (
+          <>
+            <span aria-hidden className="h-5 w-px bg-line/70" />
+            <Button variant="ghost" onClick={onBack} className="px-3">
+              <svg
+                viewBox="0 0 24 24"
+                className="size-4 fill-none stroke-current"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M15 5.5 8.5 12l6.5 6.5" />
+              </svg>
+              {t("common.back")}
+            </Button>
+          </>
+        )}
+
         {mode && (
           <Badge tone="neutral">
             {t(mode === "host" ? "mode.host" : "mode.guest")}

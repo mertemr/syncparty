@@ -24,6 +24,9 @@ pub enum SecretKey {
     DiscordWebhook,
     /// The most recent guest invite, so restarting the app reopens the room.
     LastInvite,
+    /// This machine's iroh endpoint key. Its public half is the address an
+    /// invite names, so losing it invalidates every code already handed out.
+    EndpointKey,
 }
 
 impl SecretKey {
@@ -33,6 +36,7 @@ impl SecretKey {
             Self::ServerSalt => "server-salt",
             Self::DiscordWebhook => "discord-webhook",
             Self::LastInvite => "last-invite",
+            Self::EndpointKey => "endpoint-key",
         }
     }
 }

@@ -5,17 +5,11 @@
  */
 export type Invite = { 
 /**
- * The address most guests should use.
- */
-host: string, 
-/**
- * Other addresses that reach the same server.
+ * The host's iroh endpoint id — its public key, written out.
  *
- * No single address suits everyone. A node shared into somebody else's
- * tailnet is reached on a masqueraded address that means nothing anywhere
- * else — including on the host's own machine — while peers inside the
- * host's tailnet need its real address or MagicDNS name. Carrying every
- * candidate lets the joining side find out which one actually answers
- * instead of the host having to know who is on which tailnet.
+ * This is the whole address. There is no host name, no IP and no port,
+ * because the transport resolves the id to whatever route works right
+ * now: a direct connection when hole punching succeeds, a relay when it
+ * does not.
  */
-alternateHosts: Array<string>, port: number, password: string, room: string, };
+endpoint: string, password: string, room: string, };

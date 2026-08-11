@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
 import { GuestScreen } from "@/features/guest/GuestScreen";
@@ -135,9 +134,9 @@ function Header({
 }
 
 /**
- * Failures that arrive outside a command call, plus the Tailscale sign-in
- * prompt — which is not really an error, but needs the same treatment: say
- * what happened and offer the one action that fixes it.
+ * Failures that arrive outside a command call, so there was no `Result` to
+ * surface them on. Known kinds get a translated headline; the rest fall back
+ * to the message the backend wrote.
  */
 function FailureBanner() {
   const t = useTranslate();
@@ -146,14 +145,11 @@ function FailureBanner() {
   if (!failure) return null;
 
   const knownKeys: Record<string, MessageKey> = {
-    tailscale_login_required: "error.tailscale_login_required",
     dependency_missing: "error.dependency_missing",
-    no_tailscale_route: "error.no_tailscale_route",
-    party_not_running: "error.party_not_running",
+    endpoint_offline: "error.endpoint_offline",
     party_unreachable: "error.party_unreachable",
   };
   const headline = knownKeys[failure.kind];
-  const authUrl = failure.authUrl;
 
   return (
     <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-3">
@@ -162,19 +158,12 @@ function FailureBanner() {
           <p className="text-sm font-medium text-warn">
             {headline ? t(headline) : t("error.title")}
           </p>
-          {!authUrl && (
-            <p className="mt-0.5 text-xs break-words text-ink-muted">
-              {failure.message}
-            </p>
-          )}
+          <p className="mt-0.5 text-xs break-words text-ink-muted">
+            {failure.message}
+          </p>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {authUrl && (
-            <Button variant="primary" onClick={() => void openUrl(authUrl)}>
-              {t("error.openLogin")}
-            </Button>
-          )}
           <Button variant="ghost" onClick={dismissFailure}>
             {t("common.close")}
           </Button>

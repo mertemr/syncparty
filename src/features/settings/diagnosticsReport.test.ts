@@ -28,22 +28,17 @@ describe("safeToShare", () => {
           },
         ],
       },
-      tailnet: {
-        backendState: "Running",
-        ipv4: "100.64.0.10",
-        dnsName: "private-device.example.ts.net",
-        isRunning: true,
-      },
-      tailnetError: null,
+      endpoint: "k7yvcfvw3wm2gqbkbmzsvwmnl6yxu4h3fbtjgnfhpcowcprivate",
       session: { phase: "idle" },
     };
 
     const shared = JSON.stringify(safeToShare(report));
 
     expect(shared).toContain('"version":"0.40"');
-    expect(shared).toContain('"hasAddress":true');
-    expect(shared).not.toContain("100.64.0.10");
-    expect(shared).not.toContain("private-device");
+    expect(shared).toContain('"hasEndpoint":true');
+    // The endpoint id names this machine, and an invite carrying it may still
+    // be live, so the report says whether there is one and never which.
+    expect(shared).not.toContain("k7yvcfvw3wm2gqbkbmzsvwmnl6yxu4h3fbtjgnfhpcow");
     expect(shared).not.toContain("Taha");
     expect(shared).not.toContain("example.com");
   });
@@ -53,14 +48,13 @@ describe("safeToShare", () => {
       appVersion: "0.2.1",
       operatingSystem: "windows",
       dependencies: { mode: "guest", items: [] },
-      tailnet: null,
-      tailnetError: "failed at C:\\private\\tailscale.exe",
+      endpoint: null,
       session: { phase: "failed", message: "secret detail" },
     } satisfies DiagnosticsReport;
 
     const shared = safeToShare(report);
 
-    expect(shared.tailnetError).toBe("unavailable");
+    expect(shared.hasEndpoint).toBe(false);
     expect(shared.session).toEqual({ phase: "failed" });
     expect(JSON.stringify(shared)).not.toContain("private");
     expect(JSON.stringify(shared)).not.toContain("secret detail");

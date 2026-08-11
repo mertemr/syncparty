@@ -43,10 +43,6 @@ pub enum AppEvent {
     /// A line the Syncplay server wrote to stdout or stderr.
     ServerLog { line: String, is_error: bool },
 
-    /// Tailscale needs an interactive sign-in. Emitted exactly once per
-    /// attempt — the PowerShell prototype re-opened this URL every second.
-    TailscaleLoginRequired { auth_url: String },
-
     /// The app was opened through a `syncparty://` link. The UI switches to
     /// the guest screen with these details already filled in.
     InviteReceived { invite: crate::core::invite::Invite },

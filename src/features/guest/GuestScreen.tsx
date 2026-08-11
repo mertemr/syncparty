@@ -76,6 +76,9 @@ export function GuestScreen() {
   }
 
   function reset() {
+    // Closing the tunnel is the part that actually leaves the party. Clearing
+    // the saved invite only stops it being reopened on the next launch.
+    void ipc.leaveParty().catch(reportFailure);
     void ipc.clearLastSession().catch(reportFailure);
     setInvite(null);
     setJoined(false);
@@ -96,7 +99,7 @@ export function GuestScreen() {
             <div>
               <p className="text-lg font-semibold text-ink">{invite.room}</p>
               <p className="selectable font-mono text-xs text-ink-faint">
-                {invite.host}:{invite.port}
+                {invite.endpoint}
               </p>
             </div>
 

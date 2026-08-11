@@ -3,10 +3,10 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::core::config::AppMode;
+use crate::core::config::{AppMode, SecretStore};
 use crate::core::deps::{DependencyManager, PreflightReport};
+use crate::core::net;
 use crate::core::session::{PartySession, SessionState};
-use crate::core::tailscale::{CliTailscaleClient, TailnetStatus, TailscaleClient};
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -15,10 +15,12 @@ pub struct DiagnosticsReport {
     pub app_version: String,
     pub operating_system: String,
     pub dependencies: PreflightReport,
-    pub tailnet: Option<TailnetStatus>,
-    /// Kept separate from `tailnet`: a missing CLI and a stopped daemon both
-    /// need an explanation, but neither should make the whole report fail.
-    pub tailnet_error: Option<String>,
+    /// This machine's address on the syncparty network.
+    ///
+    /// Absent until the first time it hosts, since only a host needs a stable
+    /// identity. Included because it is the one value that identifies a
+    /// machine when comparing notes about a party that would not connect.
+    pub endpoint: Option<String>,
     pub session: SessionState,
 }
 
@@ -26,28 +28,16 @@ pub struct DiagnosticsReport {
 pub async fn collect(
     dependencies: &DependencyManager,
     session: &PartySession,
+    secrets: &SecretStore,
     mode: AppMode,
 ) -> DiagnosticsReport {
-    let dependency_check = dependencies.preflight(mode);
-    let session_check = session.state();
-    let tailnet_check = async {
-        let client = CliTailscaleClient::discover()?;
-        client.status().await
-    };
-
-    let (dependencies, session, tailnet_result) =
-        tokio::join!(dependency_check, session_check, tailnet_check);
-    let (tailnet, tailnet_error) = match tailnet_result {
-        Ok(status) => (Some(status), None),
-        Err(error) => (None, Some(error.to_string())),
-    };
+    let (dependencies, session) = tokio::join!(dependencies.preflight(mode), session.state());
 
     DiagnosticsReport {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         operating_system: std::env::consts::OS.to_owned(),
         dependencies,
-        tailnet,
-        tailnet_error,
+        endpoint: net::stored_endpoint_id(secrets).map(|id| id.to_string()),
         session,
     }
 }

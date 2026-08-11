@@ -116,9 +116,9 @@ jobs:
             **Windows** — the `.exe` setup file below (or the `.msi`)
             **macOS** — `aarch64.dmg` for Apple silicon, `x64.dmg` for Intel
 
-            Everything syncparty needs — Tailscale, the Syncplay client, mpv,
-            and the Python environment for hosting — is checked on first launch
-            and installed for you if it is missing.
+            Everything syncparty needs — the Syncplay client, mpv, and the
+            Python environment for hosting — is checked on first launch and
+            installed for you if it is missing.
 
             From this release on, syncparty checks for updates on startup and
             offers to install them in place — no need to come back here again.

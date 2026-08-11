@@ -15,7 +15,7 @@ use crate::core::config::{ConfigStore, SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
-use crate::core::net::{GuestTunnel, HostTunnel, PartyEndpoint};
+use crate::core::net::{GuestTunnel, HostTunnel, PartyEndpoint, TransportReport};
 use crate::core::notify::{self, DiscordNotifier};
 use crate::core::syncplay::{
     ClientLauncher, MonitorConfig, RoomMonitor, ServerConfig, ServerController, ServerState,
@@ -120,6 +120,31 @@ impl PartySession {
 
     pub async fn state(&self) -> SessionState {
         self.state.lock().await.clone()
+    }
+
+    /// How this machine is placed on the network, and how any live connection
+    /// is being carried.
+    ///
+    /// Measured on whichever endpoint the session already has, so a running
+    /// party is reported rather than disturbed. With no party there is no
+    /// endpoint to ask, and one is bound for the length of the check — that is
+    /// the only way to learn whether the relays answer and what address the
+    /// outside world sees, and it is what the user pressed the button for.
+    pub async fn transport(&self) -> Result<TransportReport> {
+        if let Some(network) = self.network.lock().await.as_ref() {
+            return Ok(network.endpoint.report(network.tunnel.peers()));
+        }
+
+        if let Some(guest) = self.guest.lock().await.as_ref() {
+            return Ok(guest.endpoint.report(vec![guest.tunnel.host_path()]));
+        }
+
+        let endpoint = PartyEndpoint::bind_joining().await?;
+        endpoint.wait_online().await?;
+        let report = endpoint.report(Vec::new());
+        endpoint.close().await;
+
+        Ok(report)
     }
 
     async fn transition(&self, state: SessionState) {

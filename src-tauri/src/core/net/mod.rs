@@ -17,12 +17,15 @@
 
 mod tunnel;
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use iroh::endpoint::presets;
-use iroh::{Endpoint, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointId, SecretKey, TransportAddr, Watcher};
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::core::config::{SecretKey as StoredSecret, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
@@ -42,6 +45,78 @@ pub const ALPN: &[u8] = b"syncparty/syncplay/1";
 /// nothing, so an invite handed out before it would name an address no guest
 /// could resolve.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The address range carriers hand out when they have run out of IPv4 and put
+/// their subscribers behind a shared NAT.
+///
+/// A machine here has no public address of its own and cannot be reached by
+/// forwarding a port on its router, because the router is not the thing doing
+/// the translating. It is the case syncparty has to survive rather than
+/// diagnose away, so this is reported and not treated as a fault.
+const CARRIER_GRADE_NAT: (Ipv4Addr, u8) = (Ipv4Addr::new(100, 64, 0, 0), 10);
+
+/// How a live connection to one peer is carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum PathKind {
+    /// Hole punched: packets travel machine to machine, with no port forwarded
+    /// on either end.
+    Direct,
+    /// Forwarded by a relay, which is where a network that refuses to be hole
+    /// punched ends up. Slower, still end-to-end encrypted.
+    Relayed,
+    /// Connected, but QUIC has not settled on a path yet. Normal for the first
+    /// moment of a connection.
+    Unknown,
+}
+
+/// One live connection, and how it turned out to be carried.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPath {
+    pub peer: String,
+    pub kind: PathKind,
+    /// The selected path's far address, as iroh reports it.
+    pub remote: Option<String>,
+    pub rtt_ms: Option<u64>,
+}
+
+/// One relay this endpoint has been assigned, and whether it is usable.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayHealth {
+    pub url: String,
+    pub connected: bool,
+    pub last_error: Option<String>,
+}
+
+/// What the transport can say about itself right now.
+///
+/// Assembled from a live endpoint, so every field is measured rather than
+/// configured — which is the point. Nothing here is read from settings, and
+/// there is no address for the user to have got wrong.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportReport {
+    /// This machine's address on the syncparty network.
+    pub endpoint_id: String,
+    /// The addresses iroh worked out for this machine, including any public
+    /// one a relay observed. Not a setting — these are discovered.
+    pub addresses: Vec<String>,
+    /// Whether a discovered address falls inside the carrier-grade NAT range.
+    ///
+    /// `None` when no public IPv4 was discovered at all, which is a different
+    /// statement from "not behind CGNAT" and must not be shown as one.
+    pub behind_carrier_nat: Option<bool>,
+    pub relays: Vec<RelayHealth>,
+    /// Live connections. Empty when no party is running, which is why the
+    /// screen has to say so rather than reading it as "nobody connected".
+    pub peers: Vec<PeerPath>,
+}
 
 /// One machine's presence on the syncparty network.
 pub struct PartyEndpoint {
@@ -103,6 +178,84 @@ impl PartyEndpoint {
     pub async fn close(&self) {
         self.endpoint.close().await;
     }
+
+    /// A snapshot of how this endpoint is placed on the network.
+    ///
+    /// `peers` is left to the caller: an endpoint does not know which of its
+    /// connections belong to a party, and the tunnels that do are the ones
+    /// holding them.
+    pub fn report(&self, peers: Vec<PeerPath>) -> TransportReport {
+        let addr = self.endpoint.addr();
+
+        let addresses: Vec<String> = addr
+            .addrs
+            .iter()
+            .map(|address| match address {
+                TransportAddr::Ip(socket) => socket.to_string(),
+                TransportAddr::Relay(url) => url.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+
+        let relays = self
+            .endpoint
+            .home_relay_status()
+            .get()
+            .iter()
+            .map(|relay| RelayHealth {
+                url: relay.url().to_string(),
+                connected: relay.is_connected(),
+                last_error: relay.last_error().map(|error| error.to_string()),
+            })
+            .collect();
+
+        TransportReport {
+            endpoint_id: self.endpoint.id().to_string(),
+            addresses,
+            behind_carrier_nat: carrier_nat_verdict(&addr.addrs),
+            relays,
+            peers,
+        }
+    }
+}
+
+/// Whether any routable address discovered for this machine is a carrier-grade
+/// NAT one.
+///
+/// Private and link-local addresses are skipped: every machine has those, and
+/// they say nothing about how the internet sees it. Returning `None` when
+/// nothing routable was discovered keeps "we could not tell" distinct from
+/// "no, you have a real address".
+fn carrier_nat_verdict<'a>(addrs: impl IntoIterator<Item = &'a TransportAddr>) -> Option<bool> {
+    let mut verdict = None;
+
+    for address in addrs {
+        let TransportAddr::Ip(socket) = address else {
+            continue;
+        };
+        let IpAddr::V4(ip) = socket.ip() else {
+            continue;
+        };
+        if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+            continue;
+        }
+
+        // Any carrier-NAT address settles it: the machine is behind one, even
+        // if some other interface has a public address.
+        if in_carrier_nat_range(ip) {
+            return Some(true);
+        }
+        verdict = Some(false);
+    }
+
+    verdict
+}
+
+fn in_carrier_nat_range(ip: Ipv4Addr) -> bool {
+    let (base, prefix) = CARRIER_GRADE_NAT;
+    let mask = u32::MAX << (32 - prefix);
+
+    u32::from(ip) & mask == u32::from(base) & mask
 }
 
 /// Reads the host's endpoint key, creating and storing one on first use.
@@ -188,6 +341,76 @@ mod tests {
         let id = SecretKey::generate().public();
 
         assert_eq!(parse_endpoint_id(&id.to_string()).expect("parse"), id);
+    }
+
+    fn ip(address: &str) -> TransportAddr {
+        TransportAddr::Ip(format!("{address}:11204").parse().expect("address"))
+    }
+
+    #[test]
+    fn the_carrier_nat_range_is_recognised_at_both_ends() {
+        assert!(in_carrier_nat_range(Ipv4Addr::new(100, 64, 0, 0)));
+        assert!(in_carrier_nat_range(Ipv4Addr::new(100, 127, 255, 255)));
+
+        // The addresses either side of the range. 100.63 and 100.128 are
+        // ordinary public space, and treating them as CGNAT would tell someone
+        // their connection is doomed when it is not.
+        assert!(!in_carrier_nat_range(Ipv4Addr::new(100, 63, 255, 255)));
+        assert!(!in_carrier_nat_range(Ipv4Addr::new(100, 128, 0, 0)));
+    }
+
+    #[test]
+    fn a_carrier_nat_address_is_reported_even_alongside_a_public_one() {
+        let verdict = carrier_nat_verdict(&[ip("100.90.1.1"), ip("203.0.113.7")]);
+
+        assert_eq!(verdict, Some(true));
+    }
+
+    #[test]
+    fn a_public_address_on_its_own_clears_the_machine() {
+        assert_eq!(carrier_nat_verdict(&[ip("203.0.113.7")]), Some(false));
+    }
+
+    /// The distinction the UI depends on: "we could not tell" must not render
+    /// as "no". A machine that has only found its LAN address has not been
+    /// cleared of anything.
+    #[test]
+    fn local_addresses_alone_are_not_a_verdict() {
+        let verdict = carrier_nat_verdict(&[
+            ip("192.168.1.42"),
+            ip("10.0.0.5"),
+            ip("127.0.0.1"),
+            ip("169.254.3.9"),
+            TransportAddr::Relay("https://relay.example".parse().expect("url")),
+        ]);
+
+        assert_eq!(verdict, None);
+    }
+
+    /// What this machine actually looks like from the outside.
+    ///
+    /// Exercises the path the diagnostics screen takes when no party is
+    /// running — bind, wait for the relays, read back — against the real
+    /// infrastructure, and prints the verdict. Not an assertion: the answer
+    /// depends on whoever's network it runs on, and every answer is valid.
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture this_machine
+    /// ```
+    #[tokio::test]
+    #[ignore = "needs the internet and n0's relays"]
+    async fn what_the_network_looks_like_from_this_machine() {
+        let endpoint = PartyEndpoint::bind_joining().await.expect("bind");
+        endpoint.wait_online().await.expect("get online");
+
+        let report = endpoint.report(Vec::new());
+        endpoint.close().await;
+
+        println!("addresses:  {:?}", report.addresses);
+        println!("carrier nat: {:?}", report.behind_carrier_nat);
+        for relay in &report.relays {
+            println!("relay:      {} connected={}", relay.url, relay.connected);
+        }
     }
 
     #[test]

@@ -22,22 +22,32 @@
 //! previously the two Syncplay processes talked over Tailscale on their own.
 //! Both tunnels are therefore owned by the session and live as long as it does.
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId};
 
 use crate::core::error::{Result, SyncPartyError};
-use crate::core::net::ALPN;
+use crate::core::net::{PathKind, PeerPath, ALPN};
+
+/// The connections currently being served, so the diagnostics screen can say
+/// how each one is carried.
+///
+/// A `std` mutex rather than tokio's: every critical section is a map insert
+/// or a clone-out, with no `await` between lock and unlock.
+type Peers = Arc<Mutex<BTreeMap<EndpointId, Connection>>>;
 
 /// The host half: turns incoming QUIC streams into connections to the local
 /// Syncplay server.
 pub struct HostTunnel {
     task: JoinHandle<()>,
+    peers: Peers,
 }
 
 impl HostTunnel {
@@ -49,8 +59,12 @@ impl HostTunnel {
     /// giving up when a connection drops, so a stream ending is routine and
     /// must not bring the tunnel down with it.
     pub fn start(endpoint: Endpoint, target: SocketAddr) -> Self {
+        let peers: Peers = Arc::new(Mutex::new(BTreeMap::new()));
+
+        let accepted = Arc::clone(&peers);
         let task = tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
+                let peers = Arc::clone(&accepted);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -60,12 +74,22 @@ impl HostTunnel {
                         }
                     };
 
-                    serve(connection, target).await;
+                    serve(connection, target, peers).await;
                 });
             }
         });
 
-        Self { task }
+        Self { task, peers }
+    }
+
+    /// How each guest currently in the party is reached.
+    ///
+    /// The answer this exists for is whether a connection was hole punched or
+    /// fell back to a relay — which is not something either side can choose,
+    /// and the only honest way to find out is to ask a live connection.
+    pub fn peers(&self) -> Vec<PeerPath> {
+        let peers = self.peers.lock().expect("the peer map is never poisoned");
+        peers.values().map(describe).collect()
     }
 }
 
@@ -79,9 +103,14 @@ impl Drop for HostTunnel {
 }
 
 /// Serves one guest until it disconnects.
-async fn serve(connection: Connection, target: SocketAddr) {
+async fn serve(connection: Connection, target: SocketAddr, peers: Peers) {
     let guest = connection.remote_id();
     tracing::info!(%guest, "a guest joined the party");
+
+    peers
+        .lock()
+        .expect("the peer map is never poisoned")
+        .insert(guest, connection.clone());
 
     // Ends when the guest closes the connection or it times out, which is what
     // terminates this task — there is nothing else to poll for.
@@ -99,13 +128,53 @@ async fn serve(connection: Connection, target: SocketAddr) {
         });
     }
 
+    peers
+        .lock()
+        .expect("the peer map is never poisoned")
+        .remove(&guest);
+
     tracing::info!(%guest, "a guest left the party");
+}
+
+/// Reads back how a live connection is actually being carried.
+///
+/// QUIC keeps several paths open at once and moves between them — a
+/// connection typically starts relayed and switches to a direct path a moment
+/// later, once hole punching succeeds. The selected path is therefore the only
+/// one worth reporting, and its absence is a real state rather than an error.
+fn describe(connection: &Connection) -> PeerPath {
+    let paths = connection.paths();
+    let selected = paths.iter().find(|path| path.is_selected());
+
+    let Some(path) = selected else {
+        return PeerPath {
+            peer: connection.remote_id().to_string(),
+            kind: PathKind::Unknown,
+            remote: None,
+            rtt_ms: None,
+        };
+    };
+
+    PeerPath {
+        peer: connection.remote_id().to_string(),
+        kind: if path.is_relay() {
+            PathKind::Relayed
+        } else {
+            PathKind::Direct
+        },
+        remote: Some(format!("{:?}", path.remote_addr())),
+        rtt_ms: Some(path.rtt().as_millis() as u64),
+    }
 }
 
 /// The guest half: a loopback port that Syncplay can be pointed at.
 pub struct GuestTunnel {
     local: SocketAddr,
     task: JoinHandle<()>,
+    /// The connection the forwarding task is using, held here only so the
+    /// diagnostics screen can ask how it is carried. Cloning a [`Connection`]
+    /// clones a handle, not the connection.
+    connection: Connection,
     /// Kept alive, never used again.
     ///
     /// An [`Endpoint`] is a handle to the QUIC stack, and dropping the last
@@ -145,13 +214,14 @@ impl GuestTunnel {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let local = listener.local_addr()?;
 
+        let forwarding = connection.clone();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
 
-                let connection = connection.clone();
+                let connection = forwarding.clone();
                 tokio::spawn(async move {
                     match connection.open_bi().await {
                         Ok((send, recv)) => splice(stream, send, recv).await,
@@ -166,6 +236,7 @@ impl GuestTunnel {
         Ok(Self {
             local,
             task,
+            connection,
             _endpoint: endpoint,
         })
     }
@@ -174,6 +245,11 @@ impl GuestTunnel {
     /// the network can reach it.
     pub fn local_addr(&self) -> SocketAddr {
         self.local
+    }
+
+    /// How this guest is reaching the host.
+    pub fn host_path(&self) -> PeerPath {
+        describe(&self.connection)
     }
 }
 
@@ -360,6 +436,85 @@ mod tests {
             &buffer, b"hello syncplay",
             "bytes must survive the round trip through QUIC and back to TCP"
         );
+    }
+
+    /// The claim the whole move off Tailscale rests on: an invite code alone
+    /// is enough to reach a host, with nothing installed, nothing signed into
+    /// and no port forwarded on either router.
+    ///
+    /// Unlike the test above, this one uses `presets::N0` — the real relays
+    /// and the real address lookup — and the guest is handed nothing but an
+    /// [`EndpointId`], exactly what an invite carries. Everything that turns
+    /// that id into a route is then being exercised for real.
+    ///
+    /// `#[ignore]` because it needs the internet and n0's infrastructure to be
+    /// up, which is not a property of this repository. Run it deliberately:
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture reaches_a_host
+    /// ```
+    ///
+    /// On one machine both endpoints sit behind the same NAT, so the path that
+    /// wins is a local one and this proves discovery rather than hole
+    /// punching. Two machines on different networks is what proves the rest,
+    /// and the path it prints is how you tell which happened.
+    #[tokio::test]
+    #[ignore = "needs the internet and n0's relays"]
+    async fn a_guest_reaches_a_host_from_the_invite_code_alone() {
+        use iroh::endpoint::presets;
+
+        let syncplay = echo_server().await;
+
+        let host_endpoint = Endpoint::builder(presets::N0)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("host endpoint");
+
+        // Without this the host has published nothing yet and the id names an
+        // address the guest could not resolve — the same reason the real host
+        // waits before handing out an invite.
+        tokio::time::timeout(std::time::Duration::from_secs(30), host_endpoint.online())
+            .await
+            .expect("the host should get online");
+
+        // The only thing that crosses from host to guest, standing in for the
+        // invite code being pasted into a chat window.
+        let invited = host_endpoint.id();
+
+        let guest_endpoint = Endpoint::bind(presets::N0)
+            .await
+            .expect("guest endpoint");
+
+        let host = HostTunnel::start(host_endpoint, syncplay);
+
+        let guest = GuestTunnel::open(guest_endpoint, invited)
+            .await
+            .expect("the code alone should be enough to reach the host");
+
+        let mut client = TcpStream::connect(guest.local_addr())
+            .await
+            .expect("the tunnel's local port should accept a connection");
+        client.write_all(b"hello syncplay").await.expect("write");
+
+        let mut buffer = [0_u8; 14];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.read_exact(&mut buffer),
+        )
+        .await
+        .expect("the reply should arrive")
+        .expect("read");
+
+        assert_eq!(&buffer, b"hello syncplay");
+
+        // Printed rather than asserted on: which path wins is decided by the
+        // two networks involved, and a relayed connection is a working one.
+        // Failing the test for it would be asserting on someone's router.
+        println!("guest -> host: {:?}", guest.host_path());
+        for peer in host.peers() {
+            println!("host <- guest: {peer:?}");
+        }
     }
 
     #[tokio::test]

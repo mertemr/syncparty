@@ -395,7 +395,7 @@ mod tests {
     /// depends on whoever's network it runs on, and every answer is valid.
     ///
     /// ```text
-    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture this_machine
+    /// cd src-tauri && cargo test -- --ignored --nocapture this_machine
     /// ```
     #[tokio::test]
     #[ignore = "needs the internet and n0's relays"]

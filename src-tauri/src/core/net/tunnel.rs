@@ -451,7 +451,7 @@ mod tests {
     /// up, which is not a property of this repository. Run it deliberately:
     ///
     /// ```text
-    /// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture reaches_a_host
+    /// cd src-tauri && cargo test -- --ignored --nocapture reaches_a_host
     /// ```
     ///
     /// On one machine both endpoints sit behind the same NAT, so the path that

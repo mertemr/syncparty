@@ -58,6 +58,13 @@ pnpm build   # runs tsc, so this is the frontend type check too
 
 CI runs all of the above on Windows and macOS.
 
+Run cargo from `src-tauri`, not from the repository root with
+`--manifest-path`. Cargo looks for `.cargo/config.toml` relative to the working
+directory rather than to the manifest, and that file is what sets
+`TS_RS_EXPORT_DIR`. Run from the root, the variable is unset, and `ts-rs`
+writes the generated types into a stray `src-tauri/bindings/` instead of the
+frontend — quietly, with the tests still green.
+
 ## Local test build
 
 To put an installer in a tester's hands without cutting a release:

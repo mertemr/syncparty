@@ -482,9 +482,7 @@ mod tests {
         // invite code being pasted into a chat window.
         let invited = host_endpoint.id();
 
-        let guest_endpoint = Endpoint::bind(presets::N0)
-            .await
-            .expect("guest endpoint");
+        let guest_endpoint = Endpoint::bind(presets::N0).await.expect("guest endpoint");
 
         let host = HostTunnel::start(host_endpoint, syncplay);
 

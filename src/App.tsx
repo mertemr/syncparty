@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
+import { inviteResponse, isPartyRunning } from "@/app/inviteResponse";
 import { StepTrail, type Step } from "@/app/StepTrail";
 import { GuestScreen } from "@/features/guest/GuestScreen";
 import { HostScreen } from "@/features/host/HostScreen";
@@ -38,8 +39,14 @@ function Localised() {
 
 function Shell() {
   const t = useTranslate();
-  const { settings, patchSettings, pendingInvite, reportFailure, session } =
-    useAppState();
+  const {
+    settings,
+    patchSettings,
+    pendingInvite,
+    clearPendingInvite,
+    reportFailure,
+    session,
+  } = useAppState();
 
   const [showSettings, setShowSettings] = useState(false);
   const [setupConfirmed, setSetupConfirmed] = useState(false);
@@ -52,28 +59,44 @@ function Shell() {
   // it, because a user who walked there deliberately must be allowed to stay.
   const [autoSkipSpent, setAutoSkipSpent] = useState(false);
 
+  const invite = inviteResponse({
+    invite: pendingInvite !== null,
+    phase: session.phase,
+  });
+
   // An invite arriving by link means the user is a guest tonight, whatever
-  // they picked last time — and settles the mode question outright.
+  // they picked last time — and settles the mode question outright. Unless a
+  // party of their own is up, in which case the prompt below asks first and
+  // this runs on its own once hosting has stopped.
   useEffect(() => {
-    if (!pendingInvite || !settings) return;
+    if (!settings || invite !== "switchToGuest") return;
 
     setRechoosingMode(false);
     if (settings.mode !== "guest") {
       void patchSettings({ mode: "guest" }).catch(reportFailure);
     }
-  }, [pendingInvite, settings, patchSettings, reportFailure]);
+  }, [invite, settings, patchSettings, reportFailure]);
 
-  const chooseMode = (mode: AppMode) => {
+  /**
+   * The chooser stays up until the backend confirms the new mode. Clearing it
+   * first left `settings.mode` holding the old answer for the length of the
+   * round trip, and the screen spent that time rendering the *previous* mode's
+   * setup — a host who picked guest was shown the host checklist.
+   */
+  async function chooseMode(mode: AppMode) {
     setSetupConfirmed(false);
-    setRechoosingMode(false);
-    void patchSettings({ mode }).catch(reportFailure);
-  };
+    try {
+      await patchSettings({ mode });
+      setRechoosingMode(false);
+    } catch (error) {
+      reportFailure(error);
+    }
+  }
 
   const mode = rechoosingMode ? null : (settings?.mode ?? null);
   const step: Step = mode === null ? "mode" : setupConfirmed ? "party" : "setup";
 
-  const partyRunning =
-    session.phase === "starting" || session.phase === "hosting";
+  const partyRunning = isPartyRunning(session.phase);
   const canGoBack = settings !== null && !showSettings && step !== "mode";
 
   function stepBack() {
@@ -107,6 +130,19 @@ function Shell() {
     stepBack();
   }
 
+  /**
+   * Stopping is all this does. Once the session reports itself idle the invite
+   * effect above takes over and switches sides, so the two paths into guest
+   * mode stay the same one.
+   */
+  async function stopHostingForInvite() {
+    try {
+      await ipc.stopHosting();
+    } catch (error) {
+      reportFailure(error);
+    }
+  }
+
   return (
     <div className="relative flex h-full flex-col">
       <Header
@@ -120,9 +156,22 @@ function Shell() {
       {settings && !showSettings && <StepTrail current={step} />}
 
       {confirmingLeave && (
-        <LeaveHostingPrompt
+        <ConfirmStrip
+          title={t("nav.leaveHosting.title")}
+          detail={t("nav.leaveHosting.detail")}
+          confirmLabel={t("nav.leaveHosting.confirm")}
           onConfirm={() => void stopAndGoBack()}
           onCancel={() => setConfirmingLeave(false)}
+        />
+      )}
+
+      {invite === "askToStopHosting" && (
+        <ConfirmStrip
+          title={t("nav.joinWhileHosting.title")}
+          detail={t("nav.joinWhileHosting.detail")}
+          confirmLabel={t("nav.joinWhileHosting.confirm")}
+          onConfirm={() => void stopHostingForInvite()}
+          onCancel={clearPendingInvite}
         />
       )}
 
@@ -140,7 +189,7 @@ function Shell() {
         ) : showSettings ? (
           <SettingsScreen />
         ) : mode === null ? (
-          <ModeChooser onChoose={chooseMode} />
+          <ModeChooser onChoose={(next) => void chooseMode(next)} />
         ) : !setupConfirmed ? (
           <Preflight
             mode={mode}
@@ -162,15 +211,22 @@ function Shell() {
 }
 
 /**
- * The one confirmation in the app.
+ * Both of the app's confirmations: stepping back out of a party, and an invite
+ * arriving while one is running. Each stops the server, so each asks first.
  *
- * A strip rather than a modal: it matches the other two things that interrupt
- * from the top of the window, and a modal layer exists nowhere else here.
+ * A strip rather than a modal: it matches the other things that interrupt from
+ * the top of the window, and a modal layer exists nowhere else here.
  */
-function LeaveHostingPrompt({
+function ConfirmStrip({
+  title,
+  detail,
+  confirmLabel,
   onConfirm,
   onCancel,
 }: {
+  title: string;
+  detail: string;
+  confirmLabel: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -180,12 +236,8 @@ function LeaveHostingPrompt({
     <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-warn">
-            {t("nav.leaveHosting.title")}
-          </p>
-          <p className="mt-0.5 text-xs text-ink-muted">
-            {t("nav.leaveHosting.detail")}
-          </p>
+          <p className="text-sm font-medium text-warn">{title}</p>
+          <p className="mt-0.5 text-xs text-ink-muted">{detail}</p>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -193,7 +245,7 @@ function LeaveHostingPrompt({
             {t("common.cancel")}
           </Button>
           <Button variant="danger" onClick={onConfirm}>
-            {t("nav.leaveHosting.confirm")}
+            {confirmLabel}
           </Button>
         </div>
       </div>

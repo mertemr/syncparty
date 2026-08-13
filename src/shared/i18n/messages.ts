@@ -30,6 +30,10 @@ export const en = {
   "nav.leaveHosting.detail":
     "Going back stops the server, and everyone watching will be disconnected.",
   "nav.leaveHosting.confirm": "Stop and go back",
+  "nav.joinWhileHosting.title": "An invite arrived while you are hosting",
+  "nav.joinWhileHosting.detail":
+    "Joining it stops your own movie night, and everyone watching will be disconnected.",
+  "nav.joinWhileHosting.confirm": "Stop mine and join",
 
   "onboarding.title": "What are you doing tonight?",
   "onboarding.eyebrow": "Watch together, privately",
@@ -232,6 +236,10 @@ export const tr: Messages = {
   "nav.leaveHosting.detail":
     "Geri dönersen sunucu durur ve izleyen herkesin bağlantısı kopar.",
   "nav.leaveHosting.confirm": "Durdur ve geri dön",
+  "nav.joinWhileHosting.title": "Sen film gecesi kurmuşken bir davet geldi",
+  "nav.joinWhileHosting.detail":
+    "Katılırsan kendi film gecen durur ve izleyen herkesin bağlantısı kopar.",
+  "nav.joinWhileHosting.confirm": "Benimkini durdur, katıl",
 
   "onboarding.title": "Bu akşam ne yapıyorsun?",
   "onboarding.eyebrow": "Birlikte, sadece size özel",

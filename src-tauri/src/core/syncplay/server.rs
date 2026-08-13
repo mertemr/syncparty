@@ -2,7 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +23,15 @@ use crate::core::process;
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// The address the Syncplay server listens on.
+///
+/// Loopback, always, and not configurable. Guests arrive through the host's
+/// tunnel rather than by dialling this port, so there is no reason for it to
+/// be visible on any network interface — not the local one and certainly not
+/// the internet. Previously this was the machine's Tailscale address, which
+/// was already narrow but still reachable by every peer on that tailnet.
+const BIND_ADDRESS: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
@@ -30,9 +39,13 @@ pub struct ServerConfig {
     pub password: String,
     /// Stable across restarts, or every room operator password breaks.
     pub salt: String,
-    /// The Tailscale address to bind to. Binding here rather than to
-    /// `0.0.0.0` is what keeps the server off the local network entirely.
-    pub bind_address: Ipv4Addr,
+}
+
+impl ServerConfig {
+    /// Where the tunnel and the host's own Syncplay client should connect.
+    pub fn local_address(&self) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(BIND_ADDRESS), self.port)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -53,8 +66,9 @@ pub trait ServerController: Send + Sync {
 
     /// Stops the server and nothing else.
     ///
-    /// Explicitly *not* Tailscale: the prototype ran `tailscale down` on
-    /// shutdown, which cut every other thing the machine used the tailnet for.
+    /// Explicitly *not* the transport: the endpoint and the tunnel are the
+    /// session's to tear down, and stopping a party must not disturb anything
+    /// else the process is doing.
     async fn stop(&self) -> Result<()>;
 
     async fn state(&self) -> ServerState;
@@ -99,7 +113,7 @@ impl UvManagedServer {
             "--isolate-rooms".to_owned(),
             "--ipv4-only".to_owned(),
             "--interface-ipv4".to_owned(),
-            config.bind_address.to_string(),
+            BIND_ADDRESS.to_string(),
         ]
     }
 
@@ -115,7 +129,7 @@ impl UvManagedServer {
     /// its child down with it — would otherwise look like a clean start while
     /// the real child had already exited with "address in use".
     async fn await_ready(&self, config: &ServerConfig, child: &mut Child) -> Result<()> {
-        let address = format!("{}:{}", config.bind_address, config.port);
+        let address = config.local_address();
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
 
         while tokio::time::Instant::now() < deadline {
@@ -125,7 +139,7 @@ impl UvManagedServer {
                 )));
             }
 
-            if tokio::net::TcpStream::connect(&address).await.is_ok() {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
                 return Ok(());
             }
 
@@ -281,7 +295,6 @@ mod tests {
             port: 8999,
             password: "swordfish".to_owned(),
             salt: "PEPPER".to_owned(),
-            bind_address: Ipv4Addr::new(100, 101, 102, 103),
         }
     }
 
@@ -299,15 +312,27 @@ mod tests {
     }
 
     #[test]
-    fn binds_only_to_the_tailscale_address() {
+    fn binds_only_to_loopback_so_nothing_on_the_network_can_reach_it() {
         let arguments = server().arguments(&config());
 
         let index = arguments
             .iter()
             .position(|a| a == "--interface-ipv4")
             .expect("--interface-ipv4");
-        assert_eq!(arguments[index + 1], "100.101.102.103");
+        assert_eq!(arguments[index + 1], "127.0.0.1");
         assert!(arguments.contains(&"--ipv4-only".to_owned()));
+        assert!(
+            !arguments.iter().any(|a| a == "0.0.0.0"),
+            "binding to every interface would put the server on the internet"
+        );
+    }
+
+    #[test]
+    fn the_local_address_is_where_the_tunnel_should_connect() {
+        assert_eq!(
+            config().local_address(),
+            "127.0.0.1:8999".parse::<SocketAddr>().expect("address")
+        );
     }
 
     #[test]

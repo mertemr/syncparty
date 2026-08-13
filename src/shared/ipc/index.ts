@@ -31,7 +31,6 @@ const EVENT_CHANNEL = "syncparty://event";
 export interface BackendError {
   kind: string;
   message: string;
-  authUrl?: string;
 }
 
 export function isBackendError(value: unknown): value is BackendError {
@@ -83,15 +82,24 @@ export const ipc = {
   /** Accepts a bare code, a deep link, or a whole chat message. */
   decodeInvite: (text: string) => invoke<Invite>("decode_invite", { text }),
   joinParty: (invite: Invite) => invoke<void>("join_party", { invite }),
+
+  /**
+   * Closes the tunnel this guest is connected through.
+   *
+   * syncparty carries the connection rather than standing beside it, so a
+   * guest that has finished with a party has to say so — otherwise the tunnel
+   * stays open for as long as the window does.
+   */
+  leaveParty: () => invoke<void>("leave_party"),
+
   resumeLastSession: () => invoke<Invite | null>("resume_last_session"),
   clearLastSession: () => invoke<void>("clear_last_session"),
 
   /**
    * Opens the host's own Syncplay client on the party they are running.
    *
-   * Not the same as `joinParty` with the shared invite: the host has to
-   * connect on the address the server is bound to, which is not always the
-   * one guests are given.
+   * Not the same as `joinParty` with the shared invite: the host connects
+   * straight to its own server on loopback, with no tunnel in between.
    */
   joinHostedParty: () => invoke<void>("join_hosted_party"),
 

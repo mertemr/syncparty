@@ -13,4 +13,4 @@ export type AppEvent = { "kind": "preflightCompleted", report: PreflightReport, 
 /**
  * Absent when the underlying installer reports no percentage.
  */
-percent: number | null, detail: string | null, } | { "kind": "sessionChanged", state: SessionState, } | { "kind": "roomUpdated", snapshot: RoomSnapshot, } | { "kind": "serverLog", line: string, isError: boolean, } | { "kind": "tailscaleLoginRequired", authUrl: string, } | { "kind": "inviteReceived", invite: Invite, } | { "kind": "failed", errorKind: string, message: string, };
+percent: number | null, detail: string | null, } | { "kind": "sessionChanged", state: SessionState, } | { "kind": "roomUpdated", snapshot: RoomSnapshot, } | { "kind": "serverLog", line: string, isError: boolean, } | { "kind": "inviteReceived", invite: Invite, } | { "kind": "failed", errorKind: string, message: string, };

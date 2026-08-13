@@ -20,14 +20,17 @@ pub enum SyncPartyError {
     #[error("no automatic installer is available for {name} on this platform")]
     InstallUnsupported { name: String },
 
-    #[error("Tailscale is not running")]
-    TailscaleDown,
+    #[error("could not open a connection to the syncparty network: {0}")]
+    EndpointBindFailed(String),
 
-    #[error("Tailscale sign-in required")]
-    TailscaleLoginRequired { auth_url: String },
-
-    #[error("this machine has no Tailscale IPv4 address yet")]
-    TailscaleNoAddress,
+    /// The endpoint bound, but never worked out how it can be reached. Without
+    /// that there is no home relay and nothing has been published, so an
+    /// invite generated now would name an address no guest could resolve.
+    #[error(
+        "could not reach the syncparty network. Check this machine's internet connection and \
+         try again — a firewall that blocks outbound UDP will also cause this."
+    )]
+    EndpointOffline,
 
     #[error("the Syncplay server is not running")]
     ServerNotRunning,
@@ -44,30 +47,15 @@ pub enum SyncPartyError {
     #[error("could not reach the room monitor: {0}")]
     MonitorFailed(String),
 
-    /// Every address in the invite failed a `tailscale ping`, not just a TCP
-    /// connect — Tailscale itself has no route to the host from here. By far
-    /// the most common cause is that this device was never shared into (or
-    /// dropped out of) the host's tailnet, not a syncparty bug.
+    /// The host's endpoint could not be dialled. Unlike the tailnet this
+    /// replaced there is no membership to check, so the causes are narrow: the
+    /// host is not running a party right now, or one of the two machines
+    /// cannot get out to the network at all.
     #[error(
-        "could not find the host on Tailscale from this device. Ask them to check that this \
-         device still has access to their machine (Tailscale admin console → Share), and that \
-         Tailscale here is signed in and connected."
+        "could not reach the host. They may have ended the movie night, or not started it yet — \
+         ask them to check syncparty is still running, then try again."
     )]
-    NoTailscaleRoute,
-
-    /// The host answered a Tailscale ping, so the two machines can see each
-    /// other, but nothing was listening on the party's port.
-    #[error(
-        "found the host on Tailscale, but nothing answered on port {port} — the movie night may \
-         have already ended, or the server was not started"
-    )]
-    PartyNotRunning { port: u16 },
-
-    /// Every candidate address failed, but the ping diagnostic could not
-    /// tell why (Tailscale itself may be unreachable, or every candidate came
-    /// back "no response" rather than a clear yes/no).
-    #[error("could not reach the host at any of these addresses on port {port}: {addresses}")]
-    PartyUnreachable { addresses: String, port: u16 },
+    PartyUnreachable { host: String, reason: String },
 
     #[error("{command} exited with status {status}: {stderr}")]
     CommandFailed {
@@ -100,16 +88,13 @@ impl SyncPartyError {
             Self::DependencyMissing(_) => "dependency_missing",
             Self::InstallFailed { .. } => "install_failed",
             Self::InstallUnsupported { .. } => "install_unsupported",
-            Self::TailscaleDown => "tailscale_down",
-            Self::TailscaleLoginRequired { .. } => "tailscale_login_required",
-            Self::TailscaleNoAddress => "tailscale_no_address",
+            Self::EndpointBindFailed(_) => "endpoint_bind_failed",
+            Self::EndpointOffline => "endpoint_offline",
             Self::ServerNotRunning => "server_not_running",
             Self::ServerAlreadyRunning => "server_already_running",
             Self::ServerStartFailed(_) => "server_start_failed",
             Self::InvalidInvite(_) => "invalid_invite",
             Self::MonitorFailed(_) => "monitor_failed",
-            Self::NoTailscaleRoute => "no_tailscale_route",
-            Self::PartyNotRunning { .. } => "party_not_running",
             Self::PartyUnreachable { .. } => "party_unreachable",
             Self::CommandFailed { .. } => "command_failed",
             Self::Config(_) => "config",
@@ -121,17 +106,14 @@ impl SyncPartyError {
     }
 }
 
-/// Tauri requires command errors to be `Serialize`. The login URL is the one
-/// recovery value the UI needs alongside the stable kind and message.
+/// Tauri requires command errors to be `Serialize`. The stable kind and the
+/// human-readable message are all the UI branches on.
 impl Serialize for SyncPartyError {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("SyncPartyError", 3)?;
+        let mut state = serializer.serialize_struct("SyncPartyError", 2)?;
         state.serialize_field("kind", self.kind())?;
         state.serialize_field("message", &self.to_string())?;
-        if let Self::TailscaleLoginRequired { auth_url } = self {
-            state.serialize_field("authUrl", auth_url)?;
-        }
         state.end()
     }
 }
@@ -165,13 +147,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn login_errors_keep_the_authorization_url() {
-        let error = SyncPartyError::TailscaleLoginRequired {
-            auth_url: "https://login.tailscale.com/a".to_owned(),
-        };
-        let value = serde_json::to_value(error).expect("serialize");
+    fn errors_carry_a_stable_kind_and_a_readable_message() {
+        let value = serde_json::to_value(SyncPartyError::EndpointOffline).expect("serialize");
 
-        assert_eq!(value["kind"], "tailscale_login_required");
-        assert_eq!(value["authUrl"], "https://login.tailscale.com/a");
+        assert_eq!(value["kind"], "endpoint_offline");
+        assert!(value["message"]
+            .as_str()
+            .expect("message")
+            .contains("syncparty network"));
+    }
+
+    #[test]
+    fn an_unreachable_party_does_not_leak_the_dial_error_into_the_message() {
+        // The reason is kept for diagnostics, but a QUIC handshake failure is
+        // not something a guest can act on, so it stays out of what they read.
+        let error = SyncPartyError::PartyUnreachable {
+            host: "ab12cd34".to_owned(),
+            reason: "handshake timed out".to_owned(),
+        };
+
+        let message = error.to_string();
+        assert!(!message.contains("handshake timed out"), "{message}");
+        assert_eq!(error.kind(), "party_unreachable");
     }
 }

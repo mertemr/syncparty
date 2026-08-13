@@ -11,7 +11,8 @@ import { LobbyPanel } from "./LobbyPanel";
 import { RoomPanel } from "./RoomPanel";
 
 const STEP_LABELS: Record<StartupStep, MessageKey> = {
-  connectingTailscale: "host.step.connectingTailscale",
+  joiningNetwork: "host.step.joiningNetwork",
+  openingTunnel: "host.step.openingTunnel",
   startingServer: "host.step.startingServer",
   attachingMonitor: "host.step.attachingMonitor",
 };
@@ -71,7 +72,7 @@ export function HostScreen() {
               {starting
                 ? t(STEP_LABELS[session.step])
                 : hosting
-                  ? `${session.invite.host}:${session.invite.port}`
+                  ? `${session.invite.endpoint.slice(0, 8)}…`
                   : t("host.idle.hint")}
             </p>
           </div>

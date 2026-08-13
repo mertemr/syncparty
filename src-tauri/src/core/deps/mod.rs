@@ -10,7 +10,6 @@ mod manager;
 mod mpv;
 mod server_runtime;
 mod syncplay_client;
-mod tailscale;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,15 +24,12 @@ pub use manager::DependencyManager;
 pub use mpv::MpvDependency;
 pub use server_runtime::ServerRuntimeDependency;
 pub use syncplay_client::SyncplayClientDependency;
-pub use tailscale::TailscaleDependency;
 
 /// Stable identifier for each dependency, shared with the frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum DependencyId {
-    /// The mesh VPN every connection rides on.
-    Tailscale,
     /// The Syncplay desktop client, used to join a party.
     SyncplayClient,
     /// The video player Syncplay drives.
@@ -110,8 +106,7 @@ pub trait Dependency: Send + Sync {
     /// Whether the user can point syncparty at this program by hand.
     ///
     /// True for anything with a portable distribution — an extracted zip is
-    /// invisible to both `PATH` and the registry. False for Tailscale, which
-    /// installs a system service at a fixed location, and for the managed
+    /// invisible to both `PATH` and the registry. False for the managed
     /// server runtime, which syncparty puts where it likes.
     fn supports_manual_path(&self) -> bool {
         false
@@ -195,7 +190,7 @@ mod tests {
         let report = PreflightReport {
             mode: AppMode::Host,
             items: vec![
-                item(DependencyId::Tailscale, installed.clone()),
+                item(DependencyId::SyncplayClient, installed.clone()),
                 item(DependencyId::Mpv, installed),
             ],
         };
@@ -204,7 +199,10 @@ mod tests {
 
         let report = PreflightReport {
             mode: AppMode::Host,
-            items: vec![item(DependencyId::Tailscale, DependencyStatus::Missing)],
+            items: vec![item(
+                DependencyId::SyncplayClient,
+                DependencyStatus::Missing,
+            )],
         };
         assert!(!report.is_satisfied());
         assert_eq!(report.missing().count(), 1);

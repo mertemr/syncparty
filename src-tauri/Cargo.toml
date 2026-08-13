@@ -1,7 +1,7 @@
 [package]
 name = "syncparty"
 version = "0.3.2"
-description = "Synchronised movie nights over Tailscale"
+description = "Synchronised movie nights, peer to peer"
 authors = ["Taha Çeken"]
 edition = "2021"
 license = "MIT"
@@ -64,6 +64,11 @@ tar = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+# The transport a party runs over: QUIC between two ed25519 keys, hole punched
+# where the network allows and relayed where it does not. Pinned to the 1.x
+# line, which is the first with a stability guarantee — and which is also why
+# the 0.35 relays, retired at the end of 2026, are not a concern here.
+iroh = "1.0.3"
 
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

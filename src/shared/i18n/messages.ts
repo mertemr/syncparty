@@ -22,6 +22,15 @@ export const en = {
   "mode.host": "Host",
   "mode.guest": "Guest",
 
+  "nav.steps": "Setup progress",
+  "nav.step.mode": "Mode",
+  "nav.step.setup": "Setup",
+  "nav.step.party": "Movie night",
+  "nav.leaveHosting.title": "Your movie night is still running",
+  "nav.leaveHosting.detail":
+    "Going back stops the server, and everyone watching will be disconnected.",
+  "nav.leaveHosting.confirm": "Stop and go back",
+
   "onboarding.title": "What are you doing tonight?",
   "onboarding.eyebrow": "Watch together, privately",
   "onboarding.subtitle":
@@ -60,9 +69,10 @@ export const en = {
   "host.starting": "Starting…",
   "host.stop": "Stop",
   "host.idle.hint":
-    "Brings Tailscale up, starts the server and creates your invite.",
-  "host.step.connectingTailscale": "Connecting to Tailscale…",
+    "Starts the server, opens your connection and creates your invite.",
+  "host.step.joiningNetwork": "Connecting…",
   "host.step.startingServer": "Starting the Syncplay server…",
+  "host.step.openingTunnel": "Opening the door for guests…",
   "host.step.attachingMonitor": "Attaching the room panel…",
   "host.live": "Live",
   "host.join": "Join the film",
@@ -75,10 +85,10 @@ export const en = {
   "host.invite.hint":
     "Send the link — clicking it opens syncparty already filled in.",
   "host.details.title": "Connection details",
-  "host.details.server": "Server",
+  "host.details.endpoint": "This machine",
+  "host.details.server": "Local server",
   "host.details.room": "Room",
   "host.details.password": "Password",
-  "host.details.tailscale": "This machine",
   "host.room.title": "In the room",
   "host.room.empty": "Nobody has joined yet.",
   "host.room.disconnected": "Room panel is not connected.",
@@ -135,7 +145,7 @@ export const en = {
     "Attaches a hidden Syncplay client so the host can see who is watching what. It appears in everyone's user list as “syncparty-panel”.",
   "settings.diagnostics.title": "Connection health",
   "settings.diagnostics.hint":
-    "Check Tailscale, required apps and the current party in one place. Copied reports leave out private addresses and local paths.",
+    "Check your connection, required apps and the current party in one place. Copied reports leave out your address and local paths.",
   "settings.diagnostics.run": "Run checks",
   "settings.diagnostics.runAgain": "Check again",
   "settings.diagnostics.running": "Checking…",
@@ -143,6 +153,8 @@ export const en = {
   "settings.diagnostics.healthy": "All clear",
   "settings.diagnostics.attention": "Needs attention",
   "settings.diagnostics.unavailable": "Unavailable",
+  "settings.diagnostics.endpoint": "This machine",
+  "settings.diagnostics.endpointUnset": "Not hosted yet",
   "settings.diagnostics.dependencies": "Required apps",
   "settings.diagnostics.ready": "ready",
   "settings.diagnostics.session": "Party session",
@@ -150,6 +162,21 @@ export const en = {
   "settings.diagnostics.session.starting": "Starting",
   "settings.diagnostics.session.hosting": "Hosting",
   "settings.diagnostics.session.failed": "Failed",
+  "settings.diagnostics.transport": "Connection",
+  "settings.diagnostics.transport.failed": "Could not be measured",
+  "settings.diagnostics.relay": "Relay",
+  "settings.diagnostics.relay.connected": "connected",
+  "settings.diagnostics.relay.none": "No relay assigned yet",
+  "settings.diagnostics.nat": "Your network",
+  "settings.diagnostics.nat.routable": "Reachable address",
+  "settings.diagnostics.nat.carrier":
+    "Behind carrier-grade NAT — parties run over a relay",
+  "settings.diagnostics.nat.unknown": "No public address found",
+  "settings.diagnostics.paths": "Live connections",
+  "settings.diagnostics.paths.none": "Nobody connected",
+  "settings.diagnostics.path.direct": "direct",
+  "settings.diagnostics.path.relayed": "relayed",
+  "settings.diagnostics.path.unknown": "settling",
   "settings.discord": "Discord",
   "settings.discord.enable": "Announce parties on Discord",
   "settings.discord.webhook": "Webhook URL",
@@ -162,13 +189,9 @@ export const en = {
   "settings.saved": "Saved",
 
   "error.title": "Something went wrong",
-  "error.tailscale_login_required": "Tailscale needs you to sign in.",
-  "error.openLogin": "Open sign-in page",
   "error.dependency_missing": "A required program is missing.",
-  "error.no_tailscale_route":
-    "This device has no route to the host on Tailscale.",
-  "error.party_not_running":
-    "The host is reachable, but nothing answered there.",
+  "error.endpoint_offline":
+    "Could not reach the syncparty network from this machine.",
   "error.party_unreachable": "Could not reach the host.",
 
   "update.title": "Update ready",
@@ -194,6 +217,15 @@ export const tr: Messages = {
 
   "mode.host": "Sunucu",
   "mode.guest": "Misafir",
+
+  "nav.steps": "Kurulum ilerlemesi",
+  "nav.step.mode": "Mod",
+  "nav.step.setup": "Kurulum",
+  "nav.step.party": "Film gecesi",
+  "nav.leaveHosting.title": "Film gecen hâlâ sürüyor",
+  "nav.leaveHosting.detail":
+    "Geri dönersen sunucu durur ve izleyen herkesin bağlantısı kopar.",
+  "nav.leaveHosting.confirm": "Durdur ve geri dön",
 
   "onboarding.title": "Bu akşam ne yapıyorsun?",
   "onboarding.eyebrow": "Birlikte, sadece size özel",
@@ -232,8 +264,9 @@ export const tr: Messages = {
   "host.starting": "Başlatılıyor…",
   "host.stop": "Durdur",
   "host.idle.hint":
-    "Tailscale'i açar, sunucuyu başlatır ve davetini oluşturur.",
-  "host.step.connectingTailscale": "Tailscale'e bağlanılıyor…",
+    "Sunucuyu başlatır, bağlantını açar ve davetini oluşturur.",
+  "host.step.joiningNetwork": "Bağlanılıyor…",
+  "host.step.openingTunnel": "Misafirler için kapı açılıyor…",
   "host.step.startingServer": "Syncplay sunucusu başlatılıyor…",
   "host.step.attachingMonitor": "Oda paneli bağlanıyor…",
   "host.live": "Yayında",
@@ -247,10 +280,10 @@ export const tr: Messages = {
   "host.invite.hint":
     "Bağlantıyı gönder — tıklayınca syncparty hazır dolu olarak açılır.",
   "host.details.title": "Bağlantı bilgileri",
-  "host.details.server": "Sunucu",
+  "host.details.endpoint": "Bu bilgisayar",
+  "host.details.server": "Yerel sunucu",
   "host.details.room": "Oda",
   "host.details.password": "Parola",
-  "host.details.tailscale": "Bu bilgisayar",
   "host.room.title": "Odadakiler",
   "host.room.empty": "Henüz kimse katılmadı.",
   "host.room.disconnected": "Oda paneli bağlı değil.",
@@ -306,7 +339,7 @@ export const tr: Messages = {
     "Kimin ne izlediğini görebilmek için gizli bir Syncplay istemcisi bağlar. Herkesin kullanıcı listesinde “syncparty-panel” olarak görünür.",
   "settings.diagnostics.title": "Bağlantı sağlığı",
   "settings.diagnostics.hint":
-    "Tailscale'i, gerekli uygulamaları ve mevcut film gecesini tek yerden kontrol et. Kopyalanan raporda özel adresler ve yerel dosya yolları bulunmaz.",
+    "Bağlantını, gerekli uygulamaları ve mevcut film gecesini tek yerden kontrol et. Kopyalanan raporda adresin ve yerel dosya yolları bulunmaz.",
   "settings.diagnostics.run": "Kontrolleri çalıştır",
   "settings.diagnostics.runAgain": "Tekrar kontrol et",
   "settings.diagnostics.running": "Kontrol ediliyor…",
@@ -314,6 +347,8 @@ export const tr: Messages = {
   "settings.diagnostics.healthy": "Her şey yolunda",
   "settings.diagnostics.attention": "Kontrol gerekli",
   "settings.diagnostics.unavailable": "Kullanılamıyor",
+  "settings.diagnostics.endpoint": "Bu bilgisayar",
+  "settings.diagnostics.endpointUnset": "Henüz sunuculuk yapılmadı",
   "settings.diagnostics.dependencies": "Gerekli uygulamalar",
   "settings.diagnostics.ready": "hazır",
   "settings.diagnostics.session": "Film gecesi",
@@ -321,6 +356,21 @@ export const tr: Messages = {
   "settings.diagnostics.session.starting": "Başlatılıyor",
   "settings.diagnostics.session.hosting": "Yayında",
   "settings.diagnostics.session.failed": "Başarısız",
+  "settings.diagnostics.transport": "Bağlantı",
+  "settings.diagnostics.transport.failed": "Ölçülemedi",
+  "settings.diagnostics.relay": "Relay",
+  "settings.diagnostics.relay.connected": "bağlı",
+  "settings.diagnostics.relay.none": "Henüz relay atanmadı",
+  "settings.diagnostics.nat": "Ağın",
+  "settings.diagnostics.nat.routable": "Ulaşılabilir adres",
+  "settings.diagnostics.nat.carrier":
+    "Operatör NAT'ı (CGNAT) arkasında — parti relay üzerinden yürür",
+  "settings.diagnostics.nat.unknown": "Public adres bulunamadı",
+  "settings.diagnostics.paths": "Canlı bağlantılar",
+  "settings.diagnostics.paths.none": "Bağlı kimse yok",
+  "settings.diagnostics.path.direct": "doğrudan",
+  "settings.diagnostics.path.relayed": "relay",
+  "settings.diagnostics.path.unknown": "yerleşiyor",
   "settings.discord": "Discord",
   "settings.discord.enable": "Film gecelerini Discord'a duyur",
   "settings.discord.webhook": "Webhook adresi",
@@ -333,12 +383,9 @@ export const tr: Messages = {
   "settings.saved": "Kaydedildi",
 
   "error.title": "Bir şeyler ters gitti",
-  "error.tailscale_login_required": "Tailscale girişi yapman gerekiyor.",
-  "error.openLogin": "Giriş sayfasını aç",
   "error.dependency_missing": "Gerekli bir program eksik.",
-  "error.no_tailscale_route":
-    "Bu cihazın Tailscale üzerinden host'a erişimi yok.",
-  "error.party_not_running": "Host'a ulaşılıyor ama orada bir yanıt yok.",
+  "error.endpoint_offline":
+    "Bu bilgisayardan syncparty ağına ulaşılamadı.",
   "error.party_unreachable": "Host'a ulaşılamadı.",
 
   "update.title": "Güncelleme hazır",

@@ -5,11 +5,14 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppState } from "@/app/AppState";
 import { useTranslate, type Translate } from "@/shared/i18n";
 import { errorMessage, ipc } from "@/shared/ipc";
-import { Badge, Button, Card, Dot, PageHeader } from "@/shared/ui";
+import { Badge, Button, Card, Choice, Dot, PageHeader } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 import type { DependencyId } from "@/shared/types/DependencyId";
+import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightItem } from "@/shared/types/PreflightItem";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
+
+import { shouldAutoContinue } from "./autoContinue";
 
 /**
  * The setup checklist.
@@ -19,9 +22,15 @@ import type { PreflightReport } from "@/shared/types/PreflightReport";
  */
 export function Preflight({
   mode,
+  skipWhenReady,
+  skipAlreadyUsed,
+  onSkipWhenReadyChange,
   onReady,
 }: {
   mode: AppMode;
+  skipWhenReady: boolean;
+  skipAlreadyUsed: boolean;
+  onSkipWhenReadyChange: (next: boolean) => void;
   onReady: () => void;
 }) {
   const t = useTranslate();
@@ -33,6 +42,8 @@ export function Preflight({
   const [locateErrors, setLocateErrors] = useState<
     Partial<Record<DependencyId, string>>
   >({});
+  // Not persisted: it decides what this click downloads and nothing else.
+  const [playerChoice, setPlayerChoice] = useState<PlayerChoice>("mpv");
 
   const check = useCallback(async () => {
     setChecking(true);
@@ -52,7 +63,7 @@ export function Preflight({
   async function install(id: DependencyId) {
     setInstalling(id);
     try {
-      await ipc.installDependency(id);
+      await ipc.installDependency(id, id === "mpv" ? playerChoice : undefined);
     } catch (error) {
       reportFailure(error);
     } finally {
@@ -65,9 +76,10 @@ export function Preflight({
   /**
    * Asks the user where a program is.
    *
-   * The picker allows directories as well as files, because a portable build
-   * is a folder and that is how people think of it — the backend finds the
-   * executable inside either way.
+   * A file picker, not a folder one — Tauri's dialog is one or the other, and
+   * a portable build is reachable either way: the user opens the folder and
+   * picks the executable inside it. The backend accepts a folder too, for
+   * paths that arrive from somewhere other than this dialog.
    */
   async function locate(id: DependencyId, displayName: string) {
     const chosen = await open({
@@ -100,6 +112,27 @@ export function Preflight({
   const satisfied =
     report !== null && report.items.every((item) => item.status.state !== "missing");
 
+  const autoContinuing = shouldAutoContinue({
+    enabled: skipWhenReady,
+    satisfied,
+    alreadyUsed: skipAlreadyUsed,
+  });
+
+  useEffect(() => {
+    if (autoContinuing) onReady();
+  }, [autoContinuing, onReady]);
+
+  // Held back deliberately: painting the checklist for the one frame before
+  // the effect fires is the flash this setting exists to remove. The existing
+  // `checking && !report` branch covers the window before the report lands.
+  if (autoContinuing) {
+    return (
+      <p className="p-10 text-center text-sm text-ink-faint">
+        {t("preflight.checking")}
+      </p>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-3xl space-y-6 px-8 py-10">
       <PageHeader title={t("preflight.title")} description={t("preflight.subtitle")} />
@@ -119,6 +152,8 @@ export function Preflight({
                 progress={installs[item.id]?.stage}
                 disabled={installing !== null}
                 locateError={locateErrors[item.id] ?? null}
+                playerChoice={item.id === "mpv" ? playerChoice : null}
+                onPlayerChoice={setPlayerChoice}
                 onInstall={() => void install(item.id)}
                 onLocate={() => void locate(item.id, item.displayName)}
                 onForgetPath={() => void applyPath(item.id, null)}
@@ -138,6 +173,16 @@ export function Preflight({
         </Button>
 
         <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-ink-muted">
+            <input
+              type="checkbox"
+              checked={skipWhenReady}
+              onChange={(event) => onSkipWhenReadyChange(event.target.checked)}
+              className="size-4 accent-[color:var(--color-accent)]"
+            />
+            {t("preflight.skipWhenReady")}
+          </label>
+
           {satisfied && (
             <span className="text-sm text-good">{t("preflight.allReady")}</span>
           )}
@@ -155,6 +200,8 @@ function DependencyRow({
   busy,
   progress,
   disabled,
+  playerChoice,
+  onPlayerChoice,
   onInstall,
   onLocate,
   onForgetPath,
@@ -164,6 +211,8 @@ function DependencyRow({
   busy: boolean;
   progress: string | undefined;
   disabled: boolean;
+  playerChoice: PlayerChoice | null;
+  onPlayerChoice: (choice: PlayerChoice) => void;
   onInstall: () => void;
   onLocate: () => void;
   onForgetPath: () => void;
@@ -190,6 +239,19 @@ function DependencyRow({
           <Badge tone="good">{t("preflight.installed")}</Badge>
         ) : (
           <div className="flex items-center gap-2">
+            {playerChoice && item.canAutoInstall && (
+              <Choice
+                ariaLabel={t("preflight.player")}
+                value={playerChoice}
+                options={[
+                  { value: "mpv", label: "mpv" },
+                  { value: "vlc", label: "VLC" },
+                ]}
+                onChange={(choice) => onPlayerChoice(choice as PlayerChoice)}
+                disabled={disabled}
+              />
+            )}
+
             {/* Offered alongside installing, not instead of it: a portable
                 build already on disk is quicker than a download, and the
                 user is the only one who knows where they put it. */}

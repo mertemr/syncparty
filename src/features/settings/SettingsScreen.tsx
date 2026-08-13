@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useAppState } from "@/app/AppState";
 import { useTranslate } from "@/shared/i18n";
 import { errorMessage, ipc } from "@/shared/ipc";
-import { Button, Card, Field, Input, PageHeader, Toggle } from "@/shared/ui";
+import { Button, Card, Choice, Field, Input, PageHeader, Toggle } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
@@ -99,6 +99,17 @@ export function SettingsScreen() {
           hint={t("settings.monitor.hint")}
           onChange={(monitorEnabled) =>
             void patchSettings({ monitorEnabled }).catch(reportFailure)
+          }
+        />
+      </Card>
+
+      <Card title={t("settings.skipSetup")}>
+        <Toggle
+          checked={settings.skipSetupWhenReady}
+          label={t("settings.skipSetup")}
+          hint={t("settings.skipSetup.hint")}
+          onChange={(skipSetupWhenReady) =>
+            void patchSettings({ skipSetupWhenReady }).catch(reportFailure)
           }
         />
       </Card>
@@ -207,40 +218,5 @@ function DiscordSettings({
         {problem && <p className="text-sm text-bad">{problem}</p>}
       </div>
     </Card>
-  );
-}
-
-/** A small segmented control; there are never more than a few options. */
-function Choice({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: Array<{ value: string; label: string }>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <span className="text-sm font-medium text-ink">{label}</span>
-      <div className="flex gap-1 rounded-xl border border-line/80 bg-canvas/70 p-1.5">
-        {options.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            onClick={() => onChange(option.value)}
-            className={
-              option.value === value
-                ? "flex-1 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-accent-ink shadow-sm"
-                : "flex-1 rounded-lg px-3 py-2 text-sm text-ink-muted transition-colors hover:bg-surface-raised/50 hover:text-ink"
-            }
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }

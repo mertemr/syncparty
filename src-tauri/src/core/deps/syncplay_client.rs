@@ -6,7 +6,9 @@ use async_trait::async_trait;
 
 use crate::core::config::ConfigStore;
 use crate::core::deps::installer::{install_and_verify, PackageManagedInstall, PackageSpec};
-use crate::core::deps::{Dependency, DependencyId, DependencyStatus, ModeRequirement};
+use crate::core::deps::{
+    Dependency, DependencyId, DependencyStatus, ModeRequirement, PlayerChoice,
+};
 use crate::core::error::Result;
 use crate::core::events::ProgressSink;
 use crate::core::syncplay::{find_client, SYNCPLAY_CLIENT_KEY};
@@ -64,7 +66,11 @@ impl Dependency for SyncplayClientDependency {
         }
     }
 
-    async fn install(&self, progress: &dyn ProgressSink) -> Result<()> {
+    async fn install(
+        &self,
+        progress: &dyn ProgressSink,
+        _choice: Option<PlayerChoice>,
+    ) -> Result<()> {
         install_and_verify(self, &self.installer, progress).await
     }
 

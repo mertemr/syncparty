@@ -15,6 +15,7 @@ import type { DependencyId } from "@/shared/types/DependencyId";
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
 import type { HostingInfo } from "@/shared/types/HostingInfo";
 import type { Invite } from "@/shared/types/Invite";
+import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
@@ -61,8 +62,8 @@ export const ipc = {
   runDiagnostics: () => invoke<DiagnosticsReport>("run_diagnostics"),
 
   /** Progress arrives as `installProgress` events while this is in flight. */
-  installDependency: (id: DependencyId) =>
-    invoke<void>("install_dependency", { id }),
+  installDependency: (id: DependencyId, choice?: PlayerChoice) =>
+    invoke<void>("install_dependency", { id, choice }),
 
   /**
    * Points a dependency at a program the user chose, for portable builds

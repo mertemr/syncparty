@@ -48,6 +48,9 @@ function Shell() {
   // back so a mistaken pick is one click to undo.
   const [rechoosingMode, setRechoosingMode] = useState(false);
   const [confirmingLeave, setConfirmingLeave] = useState(false);
+  // Auto-skip is a once-per-launch courtesy. Stepping back into setup spends
+  // it, because a user who walked there deliberately must be allowed to stay.
+  const [autoSkipSpent, setAutoSkipSpent] = useState(false);
 
   // An invite arriving by link means the user is a guest tonight, whatever
   // they picked last time — and settles the mode question outright.
@@ -75,6 +78,7 @@ function Shell() {
 
   function stepBack() {
     setConfirmingLeave(false);
+    setAutoSkipSpent(true);
     if (step === "party") setSetupConfirmed(false);
     else setRechoosingMode(true);
   }
@@ -138,7 +142,15 @@ function Shell() {
         ) : mode === null ? (
           <ModeChooser onChoose={chooseMode} />
         ) : !setupConfirmed ? (
-          <Preflight mode={mode} onReady={() => setSetupConfirmed(true)} />
+          <Preflight
+            mode={mode}
+            skipWhenReady={settings.skipSetupWhenReady}
+            skipAlreadyUsed={autoSkipSpent}
+            onSkipWhenReadyChange={(skipSetupWhenReady) =>
+              void patchSettings({ skipSetupWhenReady }).catch(reportFailure)
+            }
+            onReady={() => setSetupConfirmed(true)}
+          />
         ) : mode === "host" ? (
           <HostScreen />
         ) : (

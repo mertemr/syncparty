@@ -26,6 +26,10 @@ const CLIENT_FALLBACKS: &[&str] = &["/usr/bin/syncplay", "/usr/local/bin/syncpla
 
 #[cfg(windows)]
 const MPV_FALLBACKS: &[&str] = &[
+    // winget's `shinchiro.mpv` installs here and does not touch `PATH`, so
+    // without this entry an automatic install finishes and then reports the
+    // player missing.
+    r"C:\Program Files\MPV Player\mpv.exe",
     r"C:\Program Files\mpv\mpv.exe",
     r"C:\Program Files\mpv.net\mpvnet.exe",
 ];
@@ -276,6 +280,20 @@ mod tests {
             find_player(directory.to_str()),
             Some(vlc),
             "a VLC folder should satisfy the player requirement"
+        );
+    }
+
+    /// A regression guard with a name, not a change detector.
+    ///
+    /// winget's `shinchiro.mpv` installs to "MPV Player" and adds nothing to
+    /// `PATH`, so this entry is the only thing standing between an automatic
+    /// install and the app declaring it missing straight afterwards.
+    #[cfg(windows)]
+    #[test]
+    fn the_directory_winget_installs_mpv_into_is_searched() {
+        assert!(
+            MPV_FALLBACKS.contains(&r"C:\Program Files\MPV Player\mpv.exe"),
+            "MPV_FALLBACKS: {MPV_FALLBACKS:?}"
         );
     }
 }

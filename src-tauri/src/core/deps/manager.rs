@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::core::config::{AppMode, ConfigStore};
 use crate::core::deps::{
-    Dependency, DependencyId, MpvDependency, PreflightItem, PreflightReport,
+    Dependency, DependencyId, MpvDependency, PlayerChoice, PreflightItem, PreflightReport,
     ServerRuntimeDependency, SyncplayClientDependency,
 };
 use crate::core::error::{Result, SyncPartyError};
@@ -109,17 +109,27 @@ impl DependencyManager {
     }
 
     /// Installs one dependency, streaming progress onto the event bus.
-    pub async fn install(&self, id: DependencyId, bus: &dyn EventBus) -> Result<()> {
+    pub async fn install(
+        &self,
+        id: DependencyId,
+        choice: Option<PlayerChoice>,
+        bus: &dyn EventBus,
+    ) -> Result<()> {
         let progress = DependencyProgress::new(bus, id);
-        self.install_with(id, &progress).await
+        self.install_with(id, choice, &progress).await
     }
 
-    pub async fn install_with(&self, id: DependencyId, progress: &dyn ProgressSink) -> Result<()> {
+    pub async fn install_with(
+        &self,
+        id: DependencyId,
+        choice: Option<PlayerChoice>,
+        progress: &dyn ProgressSink,
+    ) -> Result<()> {
         let dependency = self
             .find(id)
             .ok_or_else(|| SyncPartyError::Other(format!("unknown dependency: {id:?}")))?;
 
-        dependency.install(progress).await
+        dependency.install(progress, choice).await
     }
 }
 
@@ -182,7 +192,11 @@ mod tests {
             self.status.clone()
         }
 
-        async fn install(&self, progress: &dyn ProgressSink) -> Result<()> {
+        async fn install(
+            &self,
+            progress: &dyn ProgressSink,
+            _choice: Option<PlayerChoice>,
+        ) -> Result<()> {
             progress.report("installing", Some(50), None);
             Ok(())
         }
@@ -269,7 +283,7 @@ mod tests {
         let bus = RecordingEventBus::default();
 
         manager()
-            .install(DependencyId::SyncplayClient, &bus)
+            .install(DependencyId::SyncplayClient, None, &bus)
             .await
             .expect("install");
 
@@ -362,7 +376,7 @@ mod tests {
         let bus = RecordingEventBus::default();
 
         let error = manager()
-            .install(DependencyId::Mpv, &bus)
+            .install(DependencyId::Mpv, None, &bus)
             .await
             .expect_err("unknown dependency");
 

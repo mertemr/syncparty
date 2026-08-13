@@ -38,6 +38,20 @@ pub enum DependencyId {
     ServerRuntime,
 }
 
+/// Which player an automatic install should fetch.
+///
+/// Only the player has more than one source, so this is the only dependency
+/// whose install takes an argument. Detection is unaffected: `find_player`
+/// prefers mpv when both are present, whichever one was installed from here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum PlayerChoice {
+    #[default]
+    Mpv,
+    Vlc,
+}
+
 /// Whether a dependency is needed by hosts, guests, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeRequirement {
@@ -90,7 +104,14 @@ pub trait Dependency: Send + Sync {
     async fn detect(&self) -> DependencyStatus;
 
     /// Installs the dependency, reporting progress as it goes.
-    async fn install(&self, progress: &dyn ProgressSink) -> Result<()>;
+    ///
+    /// `choice` is meaningful only for the player, which is the one dependency
+    /// with more than one source. Everything else ignores it.
+    async fn install(
+        &self,
+        progress: &dyn ProgressSink,
+        choice: Option<PlayerChoice>,
+    ) -> Result<()>;
 
     /// Where to send the user when the automatic install does not work. Every
     /// dependency must have one — there is no dead end.

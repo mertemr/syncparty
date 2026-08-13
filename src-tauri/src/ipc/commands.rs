@@ -8,7 +8,7 @@ use tauri::State;
 use ts_rs::TS;
 
 use crate::core::config::{AppMode, AppSettings};
-use crate::core::deps::{DependencyId, PreflightReport};
+use crate::core::deps::{DependencyId, PlayerChoice, PreflightReport};
 use crate::core::diagnostics::{self, DiagnosticsReport};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::invite::Invite;
@@ -87,8 +87,15 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticsRe
 
 /// Installs one dependency. Progress arrives as events while this runs.
 #[tauri::command]
-pub async fn install_dependency(state: State<'_, AppState>, id: DependencyId) -> Result<()> {
-    state.dependencies.install(id, state.bus.as_ref()).await
+pub async fn install_dependency(
+    state: State<'_, AppState>,
+    id: DependencyId,
+    choice: Option<PlayerChoice>,
+) -> Result<()> {
+    state
+        .dependencies
+        .install(id, choice, state.bus.as_ref())
+        .await
 }
 
 /// Points a dependency at a program the user chose, for portable builds that

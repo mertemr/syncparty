@@ -10,7 +10,9 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::core::deps::installer::{PackageManagedInstall, PackageSpec};
-use crate::core::deps::{Dependency, DependencyId, DependencyStatus, ModeRequirement};
+use crate::core::deps::{
+    Dependency, DependencyId, DependencyStatus, ModeRequirement, PlayerChoice,
+};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::ProgressSink;
 use crate::core::paths::AppPaths;
@@ -200,7 +202,11 @@ impl Dependency for ServerRuntimeDependency {
         }
     }
 
-    async fn install(&self, progress: &dyn ProgressSink) -> Result<()> {
+    async fn install(
+        &self,
+        progress: &dyn ProgressSink,
+        _choice: Option<PlayerChoice>,
+    ) -> Result<()> {
         std::fs::create_dir_all(self.paths.server_runtime_dir())?;
 
         let uv = self.ensure_uv(progress).await?;

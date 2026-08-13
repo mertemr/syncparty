@@ -12,6 +12,8 @@ import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightItem } from "@/shared/types/PreflightItem";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 
+import { shouldAutoContinue } from "./autoContinue";
+
 /**
  * The setup checklist.
  *
@@ -20,9 +22,15 @@ import type { PreflightReport } from "@/shared/types/PreflightReport";
  */
 export function Preflight({
   mode,
+  skipWhenReady,
+  skipAlreadyUsed,
+  onSkipWhenReadyChange,
   onReady,
 }: {
   mode: AppMode;
+  skipWhenReady: boolean;
+  skipAlreadyUsed: boolean;
+  onSkipWhenReadyChange: (next: boolean) => void;
   onReady: () => void;
 }) {
   const t = useTranslate();
@@ -104,6 +112,27 @@ export function Preflight({
   const satisfied =
     report !== null && report.items.every((item) => item.status.state !== "missing");
 
+  const autoContinuing = shouldAutoContinue({
+    enabled: skipWhenReady,
+    satisfied,
+    alreadyUsed: skipAlreadyUsed,
+  });
+
+  useEffect(() => {
+    if (autoContinuing) onReady();
+  }, [autoContinuing, onReady]);
+
+  // Held back deliberately: painting the checklist for the one frame before
+  // the effect fires is the flash this setting exists to remove. The existing
+  // `checking && !report` branch covers the window before the report lands.
+  if (autoContinuing) {
+    return (
+      <p className="p-10 text-center text-sm text-ink-faint">
+        {t("preflight.checking")}
+      </p>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-3xl space-y-6 px-8 py-10">
       <PageHeader title={t("preflight.title")} description={t("preflight.subtitle")} />
@@ -144,6 +173,16 @@ export function Preflight({
         </Button>
 
         <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-ink-muted">
+            <input
+              type="checkbox"
+              checked={skipWhenReady}
+              onChange={(event) => onSkipWhenReadyChange(event.target.checked)}
+              className="size-4 accent-[color:var(--color-accent)]"
+            />
+            {t("preflight.skipWhenReady")}
+          </label>
+
           {satisfied && (
             <span className="text-sm text-good">{t("preflight.allReady")}</span>
           )}

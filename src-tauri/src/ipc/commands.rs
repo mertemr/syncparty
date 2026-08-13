@@ -39,6 +39,8 @@ pub struct SettingsPatch {
     #[ts(optional)]
     pub monitor_enabled: Option<bool>,
     #[ts(optional)]
+    pub skip_setup_when_ready: Option<bool>,
+    #[ts(optional)]
     pub discord_enabled: Option<bool>,
 }
 
@@ -67,6 +69,9 @@ pub fn update_settings(state: State<'_, AppState>, patch: SettingsPatch) -> Resu
         }
         if let Some(enabled) = patch.monitor_enabled {
             settings.monitor_enabled = enabled;
+        }
+        if let Some(skip) = patch.skip_setup_when_ready {
+            settings.skip_setup_when_ready = skip;
         }
         if let Some(enabled) = patch.discord_enabled {
             settings.discord_enabled = enabled;

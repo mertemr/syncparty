@@ -42,6 +42,12 @@ pub struct AppSettings {
     /// Whether the host attaches a hidden client to read live room state.
     /// Disabling it trades the rich panel for one fewer name in the user list.
     pub monitor_enabled: bool,
+    /// Whether a setup screen with nothing to report should show itself.
+    ///
+    /// The check still runs on every launch — what this skips is the screen,
+    /// and only when every dependency is present. A machine that has lost one
+    /// still stops here, which is the property that makes the flag safe.
+    pub skip_setup_when_ready: bool,
     pub discord_enabled: bool,
     /// Programs the user pointed at by hand, keyed by dependency.
     ///
@@ -60,6 +66,7 @@ impl Default for AppSettings {
             nickname: default_nickname(),
             language: "en".to_owned(),
             monitor_enabled: true,
+            skip_setup_when_ready: false,
             discord_enabled: false,
             executable_overrides: BTreeMap::new(),
         }

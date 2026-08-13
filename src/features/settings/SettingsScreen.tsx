@@ -103,6 +103,17 @@ export function SettingsScreen() {
         />
       </Card>
 
+      <Card title={t("settings.skipSetup")}>
+        <Toggle
+          checked={settings.skipSetupWhenReady}
+          label={t("settings.skipSetup")}
+          hint={t("settings.skipSetup.hint")}
+          onChange={(skipSetupWhenReady) =>
+            void patchSettings({ skipSetupWhenReady }).catch(reportFailure)
+          }
+        />
+      </Card>
+
       <DiagnosticsPanel />
 
       <DiscordSettings

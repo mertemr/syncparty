@@ -57,6 +57,7 @@ export const en = {
   "preflight.allReady": "Everything is ready.",
   "preflight.recheck": "Check again",
   "preflight.continue": "Continue",
+  "preflight.skipWhenReady": "Skip this screen when everything is ready",
   "preflight.locate": "Locate…",
   "preflight.locate.title": "Where is it?",
   "preflight.locate.hint":
@@ -142,6 +143,9 @@ export const en = {
   "settings.port": "Port",
   "settings.language": "Language",
   "settings.mode": "Mode",
+  "settings.skipSetup": "Setup screen",
+  "settings.skipSetup.hint":
+    "Skip it when every dependency is present. syncparty still checks on every launch, and still stops here if something is missing.",
   "settings.monitor": "Room panel",
   "settings.monitor.hint":
     "Attaches a hidden Syncplay client so the host can see who is watching what. It appears in everyone's user list as “syncparty-panel”.",
@@ -254,6 +258,7 @@ export const tr: Messages = {
   "preflight.allReady": "Her şey hazır.",
   "preflight.recheck": "Tekrar kontrol et",
   "preflight.continue": "Devam",
+  "preflight.skipWhenReady": "Her şey hazırsa bu ekranı gösterme",
   "preflight.locate": "Konumunu göster…",
   "preflight.locate.title": "Nerede?",
   "preflight.locate.hint":
@@ -338,6 +343,9 @@ export const tr: Messages = {
   "settings.port": "Port",
   "settings.language": "Dil",
   "settings.mode": "Mod",
+  "settings.skipSetup": "Kurulum ekranı",
+  "settings.skipSetup.hint":
+    "Bütün gereksinimler yerindeyse atlanır. syncparty her açılışta yine kontrol eder ve bir şey eksikse bu ekranda yine durur.",
   "settings.monitor": "Oda paneli",
   "settings.monitor.hint":
     "Kimin ne izlediğini görebilmek için gizli bir Syncplay istemcisi bağlar. Herkesin kullanıcı listesinde “syncparty-panel” olarak görünür.",

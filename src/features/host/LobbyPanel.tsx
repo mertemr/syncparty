@@ -2,7 +2,7 @@ import { useTranslate } from "@/shared/i18n";
 import { Badge, Card, Dot } from "@/shared/ui";
 import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 
-import { getLobbyState } from "./lobbyState";
+import { getLobbyBadge, getLobbyState } from "./lobbyState";
 
 export function LobbyPanel({
   snapshot,
@@ -11,16 +11,25 @@ export function LobbyPanel({
 }) {
   const t = useTranslate();
 
+  const state = getLobbyState(snapshot);
   const { people, readyCount, fileCount, filesCompatible, everyoneReady } =
-    getLobbyState(snapshot);
+    state;
+  const badge = getLobbyBadge(state);
+
+  const badgeLabel = {
+    empty: t("host.lobby.noGuests"),
+    waiting: t("host.lobby.waiting"),
+    ready: t("host.lobby.ready"),
+  }[badge];
+  const tone = badge === "ready" ? "good" : "neutral";
 
   return (
     <Card
       title={t("host.lobby.title")}
       action={
-        <Badge tone={everyoneReady ? "good" : "neutral"}>
-          <Dot tone={everyoneReady ? "good" : "neutral"} />
-          {everyoneReady ? t("host.lobby.ready") : t("host.lobby.waiting")}
+        <Badge tone={tone}>
+          <Dot tone={tone} />
+          {badgeLabel}
         </Badge>
       }
       className="border-accent/20"

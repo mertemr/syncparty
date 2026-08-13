@@ -65,9 +65,10 @@ export function Preflight({
   /**
    * Asks the user where a program is.
    *
-   * The picker allows directories as well as files, because a portable build
-   * is a folder and that is how people think of it — the backend finds the
-   * executable inside either way.
+   * A file picker, not a folder one — Tauri's dialog is one or the other, and
+   * a portable build is reachable either way: the user opens the folder and
+   * picks the executable inside it. The backend accepts a folder too, for
+   * paths that arrive from somewhere other than this dialog.
    */
   async function locate(id: DependencyId, displayName: string) {
     const chosen = await open({

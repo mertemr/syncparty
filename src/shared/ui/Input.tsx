@@ -13,7 +13,9 @@ export function Input({
         "w-full rounded-[var(--radius-control)] border border-line/80 bg-canvas/70 px-3.5 py-2.5",
         "text-sm text-ink placeholder:text-ink-faint",
         "cursor-text select-text",
-        "transition-colors focus:border-accent focus:bg-canvas focus:outline-none",
+        // The focus ring is the whole signal. Recolouring the border too put
+        // two accent lines around one field.
+        "transition-colors focus:bg-canvas",
         className,
       )}
     />

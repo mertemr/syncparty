@@ -66,6 +66,16 @@ export const en = {
   "preflight.usingPath": "Using the location you chose",
   "preflight.clearPath": "Forget this location",
 
+  "system.checking": "Checking your setup",
+  "system.ready": "System ready",
+  "system.blocked": "Missing something",
+  "system.recheck": "Check again",
+
+  "party.channel.ready": "Ready",
+  "party.channel.waiting": "Waiting",
+  "party.channel.noFile": "No file",
+  "party.channel.trackingError": "Tracking error",
+
   "host.title": "Host",
   "host.start": "Start movie night",
   "host.starting": "Starting…",
@@ -266,6 +276,16 @@ export const tr: Messages = {
   "preflight.locate.failed": "Bu konumda program bulunamadı.",
   "preflight.usingPath": "Gösterdiğin konum kullanılıyor",
   "preflight.clearPath": "Bu konumu unut",
+
+  "system.checking": "Kurulumun kontrol ediliyor",
+  "system.ready": "Sistem hazır",
+  "system.blocked": "Eksik var",
+  "system.recheck": "Yeniden kontrol et",
+
+  "party.channel.ready": "Hazır",
+  "party.channel.waiting": "Bekliyor",
+  "party.channel.noFile": "Dosya yok",
+  "party.channel.trackingError": "İzleme hatası",
 
   "host.title": "Sunucu",
   "host.start": "Film gecesini başlat",

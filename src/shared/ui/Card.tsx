@@ -14,15 +14,17 @@ export function Card({
   children: ReactNode;
 }) {
   return (
+    // No backdrop blur and no drop shadow: blur behind an opaque app
+    // background costs compositing for an effect nobody can see.
     <section
       className={cx(
-        "overflow-hidden rounded-panel border border-line/70 bg-surface/78 shadow-[0_20px_60px_oklch(0.08_0.03_275/0.28)] backdrop-blur-xl",
+        "overflow-hidden rounded-panel border border-line bg-surface/85",
         className,
       )}
     >
       {(title || action) && (
-        <header className="flex items-center justify-between gap-3 border-b border-line/60 bg-surface-raised/25 px-5 py-4">
-          <h2 className="text-xs font-bold tracking-[0.14em] text-ink-muted uppercase">
+        <header className="flex items-center justify-between gap-3 border-b border-line bg-surface-raised/30 px-5 py-3">
+          <h2 className="font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase">
             {title}
           </h2>
           {action}

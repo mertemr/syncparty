@@ -10,7 +10,7 @@ export function Input({
     <input
       {...props}
       className={cx(
-        "w-full rounded-xl border border-line/80 bg-canvas/70 px-3.5 py-2.5",
+        "w-full rounded-[var(--radius-control)] border border-line/80 bg-canvas/70 px-3.5 py-2.5",
         "text-sm text-ink placeholder:text-ink-faint",
         "cursor-text select-text",
         "transition-colors focus:border-accent focus:bg-canvas focus:outline-none",

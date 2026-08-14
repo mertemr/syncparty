@@ -26,7 +26,7 @@ export function Choice({
       <div
         role="group"
         aria-label={ariaLabel ?? label}
-        className="flex gap-1 rounded-xl border border-line/80 bg-canvas/70 p-1.5"
+        className="flex gap-1 rounded-[var(--radius-control)] border border-line/80 bg-canvas/70 p-1.5"
       >
         {options.map((option) => (
           <button
@@ -37,8 +37,8 @@ export function Choice({
             onClick={() => onChange(option.value)}
             className={
               option.value === value
-                ? "flex-1 rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-accent-ink shadow-sm disabled:opacity-50"
-                : "flex-1 rounded-lg px-3 py-2 text-sm text-ink-muted transition-colors hover:bg-surface-raised/50 hover:text-ink disabled:opacity-50"
+                ? "flex-1 rounded-[var(--radius-control)] bg-accent px-3 py-2 text-sm font-semibold text-accent-ink shadow-sm disabled:opacity-50"
+                : "flex-1 rounded-[var(--radius-control)] px-3 py-2 text-sm text-ink-muted transition-colors hover:bg-surface-raised/50 hover:text-ink disabled:opacity-50"
             }
           >
             {option.label}

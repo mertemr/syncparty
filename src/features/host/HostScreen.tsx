@@ -64,7 +64,10 @@ export function HostScreen() {
   }
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-5 px-8 py-8 lg:grid-cols-[1.15fr_1fr]">
+    // `md` rather than `lg`: the default window is 940px wide, so an `lg`
+    // breakpoint would mean the two-column layout never appeared in the app
+    // it was designed for. The 720px minimum still stacks.
+    <div className="mx-auto grid max-w-5xl gap-5 px-8 py-8 md:grid-cols-[1.15fr_1fr]">
       <div className="space-y-5">
         <Card>
           <div className="flex items-start justify-between gap-4">

@@ -88,11 +88,14 @@ function Slot({
   onClick: () => void;
 }) {
   return (
+    // Flex column rather than the default block: a button centres its content
+    // vertically, so the slot with the shorter description sat 11px lower
+    // than its neighbour.
     <button
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="group relative overflow-hidden rounded-panel border border-line bg-surface/80 p-6 text-left transition-colors duration-[var(--duration-base)] hover:border-accent/70 hover:bg-surface-raised/80 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:bg-surface/80"
+      className="group relative flex flex-col items-start overflow-hidden rounded-panel border border-line bg-surface/80 p-6 text-left transition-colors duration-[var(--duration-base)] hover:border-accent/70 hover:bg-surface-raised/80 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:bg-surface/80"
     >
       {/* The slot mouth. Nothing but a line, until you hover it. */}
       <span

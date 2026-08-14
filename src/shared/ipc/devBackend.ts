@@ -254,7 +254,7 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
   join_hosted_party: () => undefined,
 
   run_diagnostics: (): DiagnosticsReport => ({
-    appVersion: "0.4.0-dev",
+    appVersion: "0.5.3-dev",
     operatingSystem: "Windows 11 (dev backend)",
     dependencies: preflight(),
     endpoint: ENDPOINT,

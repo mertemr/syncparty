@@ -6,7 +6,9 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    "bg-accent text-accent-ink phosphor hover:bg-accent-strong disabled:hover:bg-accent",
+    // The glow goes out when the button does — a dead control that still
+    // lights up reads as broken rather than disabled.
+    "bg-accent text-accent-ink phosphor hover:bg-accent-strong disabled:shadow-none disabled:hover:bg-accent",
   secondary:
     "bg-surface-raised/80 text-ink border border-line hover:border-ink-faint hover:bg-surface-raised",
   ghost: "text-ink-muted hover:text-ink hover:bg-surface-raised/70",

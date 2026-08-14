@@ -63,7 +63,7 @@ export function InviteCard({ hosting }: { hosting: HostingInfo }) {
 function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <dt className="text-xs font-medium tracking-wide text-ink-faint uppercase">
+      <dt className="font-mono text-[10px] tracking-[0.16em] text-ink-faint uppercase">
         {label}
       </dt>
       <dd className="selectable mt-0.5 truncate font-mono text-sm text-ink">

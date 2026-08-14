@@ -21,7 +21,9 @@ export function LobbyPanel({
     waiting: t("host.lobby.waiting"),
     ready: t("host.lobby.ready"),
   }[badge];
-  const tone = badge === "ready" ? "good" : "neutral";
+  // Ready reads as a different kind of event from a green status dot: it is
+  // the one moment on this screen that asks the host to do something.
+  const tone = badge === "ready" ? "chroma" : "neutral";
 
   return (
     <Card

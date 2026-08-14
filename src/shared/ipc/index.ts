@@ -5,9 +5,10 @@
  * are checked against the generated bindings in one place instead of being
  * re-stated at each call site.
  */
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 
+import { devInvoke, devListen } from "./devBackend";
 import type { AppEvent } from "@/shared/types/AppEvent";
 import type { AppMode } from "@/shared/types/AppMode";
 import type { AppSettings } from "@/shared/types/AppSettings";
@@ -22,6 +23,20 @@ import type { SettingsPatch } from "@/shared/types/SettingsPatch";
 
 /** Must match `ipc::EVENT_CHANNEL`. */
 const EVENT_CHANNEL = "syncparty://event";
+
+/**
+ * `pnpm dev` serves the frontend without the Tauri shell, where `invoke` has
+ * nothing to talk to. Falling back to the fake backend there keeps every
+ * screen reachable in a browser during design work.
+ *
+ * `import.meta.env.DEV` is replaced with `false` in a production build, so the
+ * branch and the module behind it are both dropped from the bundle.
+ */
+export const insideTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const useDevBackend = import.meta.env.DEV && !insideTauri;
+
+const invoke = useDevBackend ? devInvoke : tauriInvoke;
 
 /**
  * The shape `SyncPartyError` serialises to.
@@ -119,5 +134,9 @@ export const ipc = {
  * every event.
  */
 export function onAppEvent(handler: (event: AppEvent) => void) {
-  return listen<AppEvent>(EVENT_CHANNEL, ({ payload }) => handler(payload));
+  if (useDevBackend) return devListen(handler);
+
+  return tauriListen<AppEvent>(EVENT_CHANNEL, ({ payload }) =>
+    handler(payload),
+  );
 }

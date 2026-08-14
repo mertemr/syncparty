@@ -5,33 +5,29 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppState } from "@/app/AppState";
 import { useTranslate, type Translate } from "@/shared/i18n";
 import { errorMessage, ipc } from "@/shared/ipc";
-import { Badge, Button, Card, Choice, Dot, PageHeader } from "@/shared/ui";
+import { Badge, Button, Choice, Dot, Rewind } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 import type { DependencyId } from "@/shared/types/DependencyId";
 import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightItem } from "@/shared/types/PreflightItem";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 
-import { shouldAutoContinue } from "./autoContinue";
+import { getStripState, summariseReady, type StripState } from "./stripState";
 
 /**
- * The setup checklist.
+ * The setup check, as a strip under the launch slots rather than a screen.
  *
  * Runs on every visit rather than caching a "setup done" flag, because the
- * things it checks for can be uninstalled between launches.
+ * things it checks for can be uninstalled between launches. When there is
+ * nothing to report it collapses to a single line — the check has to happen,
+ * but on a healthy machine it does not deserve a whole step.
  */
-export function Preflight({
+export function SystemStrip({
   mode,
-  skipWhenReady,
-  skipAlreadyUsed,
-  onSkipWhenReadyChange,
-  onReady,
+  onStateChange,
 }: {
   mode: AppMode;
-  skipWhenReady: boolean;
-  skipAlreadyUsed: boolean;
-  onSkipWhenReadyChange: (next: boolean) => void;
-  onReady: () => void;
+  onStateChange: (state: StripState) => void;
 }) {
   const t = useTranslate();
   const { installs, reportFailure } = useAppState();
@@ -59,6 +55,12 @@ export function Preflight({
   useEffect(() => {
     void check();
   }, [check]);
+
+  const state = getStripState(report);
+
+  useEffect(() => {
+    onStateChange(state);
+  }, [state, onStateChange]);
 
   async function install(id: DependencyId) {
     setInstalling(id);
@@ -109,88 +111,51 @@ export function Preflight({
     }
   }
 
-  const satisfied =
-    report !== null && report.items.every((item) => item.status.state !== "missing");
-
-  const autoContinuing = shouldAutoContinue({
-    enabled: skipWhenReady,
-    satisfied,
-    alreadyUsed: skipAlreadyUsed,
-  });
-
-  useEffect(() => {
-    if (autoContinuing) onReady();
-  }, [autoContinuing, onReady]);
-
-  // Held back deliberately: painting the checklist for the one frame before
-  // the effect fires is the flash this setting exists to remove. The existing
-  // `checking && !report` branch covers the window before the report lands.
-  if (autoContinuing) {
-    return (
-      <p className="p-10 text-center text-sm text-ink-faint">
-        {t("preflight.checking")}
-      </p>
-    );
-  }
-
   return (
-    <div className="mx-auto max-w-3xl space-y-6 px-8 py-10">
-      <PageHeader title={t("preflight.title")} description={t("preflight.subtitle")} />
+    <div className="shrink-0 border-t border-line bg-surface/60 px-6 py-3">
+      {state === "checking" ? (
+        <Rewind label={t("system.checking")} />
+      ) : (
+        <>
+          <div className="flex items-center gap-3">
+            <Dot tone={state === "ready" ? "good" : "warn"} />
+            <p className="min-w-0 flex-1 truncate font-mono text-[11px] tracking-[0.14em] text-ink-faint uppercase">
+              {state === "ready" && report
+                ? `${t("system.ready")} — ${summariseReady(report)}`
+                : t("system.blocked")}
+            </p>
+            <Button
+              variant="ghost"
+              onClick={() => void check()}
+              disabled={checking || installing !== null}
+            >
+              {checking ? t("system.checking") : t("system.recheck")}
+            </Button>
+          </div>
 
-      <Card>
-        {checking && !report ? (
-          <p className="py-6 text-center text-sm text-ink-faint">
-            {t("preflight.checking")}
-          </p>
-        ) : (
-          <ul className="divide-y divide-line">
-            {report?.items.map((item) => (
-              <DependencyRow
-                key={item.id}
-                item={item}
-                busy={installing === item.id}
-                progress={installs[item.id]?.stage}
-                disabled={installing !== null}
-                locateError={locateErrors[item.id] ?? null}
-                playerChoice={item.id === "mpv" ? playerChoice : null}
-                onPlayerChoice={setPlayerChoice}
-                onInstall={() => void install(item.id)}
-                onLocate={() => void locate(item.id, item.displayName)}
-                onForgetPath={() => void applyPath(item.id, null)}
-              />
-            ))}
-          </ul>
-        )}
-      </Card>
-
-      <div className="flex items-center justify-between gap-3">
-        <Button
-          variant="ghost"
-          onClick={() => void check()}
-          disabled={checking || installing !== null}
-        >
-          {checking ? t("preflight.checking") : t("preflight.recheck")}
-        </Button>
-
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-ink-muted">
-            <input
-              type="checkbox"
-              checked={skipWhenReady}
-              onChange={(event) => onSkipWhenReadyChange(event.target.checked)}
-              className="size-4 accent-[color:var(--color-accent)]"
-            />
-            {t("preflight.skipWhenReady")}
-          </label>
-
-          {satisfied && (
-            <span className="text-sm text-good">{t("preflight.allReady")}</span>
+          {state === "blocked" && (
+            <ul className="mt-2 divide-y divide-line/60">
+              {report?.items
+                .filter((item) => item.status.state === "missing")
+                .map((item) => (
+                  <DependencyRow
+                    key={item.id}
+                    item={item}
+                    busy={installing === item.id}
+                    progress={installs[item.id]?.stage}
+                    disabled={installing !== null}
+                    locateError={locateErrors[item.id] ?? null}
+                    playerChoice={item.id === "mpv" ? playerChoice : null}
+                    onPlayerChoice={setPlayerChoice}
+                    onInstall={() => void install(item.id)}
+                    onLocate={() => void locate(item.id, item.displayName)}
+                    onForgetPath={() => void applyPath(item.id, null)}
+                  />
+                ))}
+            </ul>
           )}
-          <Button variant="primary" onClick={onReady} disabled={!satisfied}>
-            {t("preflight.continue")}
-          </Button>
-        </div>
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -222,7 +187,7 @@ function DependencyRow({
   const installed = item.status.state === "installed";
 
   return (
-    <li className="py-3 first:pt-0 last:pb-0">
+    <li className="py-2.5">
       <div className="flex items-center gap-3">
         <Dot tone={installed ? "good" : "warn"} />
 
@@ -285,9 +250,7 @@ function DependencyRow({
         </div>
       )}
 
-      {locateError && (
-        <p className="mt-2 pl-5 text-xs text-bad">{locateError}</p>
-      )}
+      {locateError && <p className="mt-2 pl-5 text-xs text-bad">{locateError}</p>}
     </li>
   );
 }

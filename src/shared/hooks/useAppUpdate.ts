@@ -12,6 +12,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 
+import { insideTauri } from "@/shared/ipc";
+
 export type UpdateState =
   | { status: "idle" }
   | { status: "downloading"; version: string; percent: number | null }
@@ -24,6 +26,10 @@ export function useAppUpdate() {
 
   useEffect(() => {
     let cancelled = false;
+
+    // Outside the Tauri shell the updater plugin throws synchronously, before
+    // there is a promise to catch — so this is a guard rather than a `catch`.
+    if (!insideTauri) return;
 
     void (async () => {
       // A failed check (offline, GitHub unreachable, no releases yet) is not

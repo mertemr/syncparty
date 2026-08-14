@@ -2,7 +2,11 @@ import { useTranslate, type MessageKey } from "@/shared/i18n";
 import { Badge, Dot, type BadgeTone } from "@/shared/ui";
 import type { WatcherView } from "@/shared/types/WatcherView";
 
-import { getChannelStatus, type ChannelStatus } from "./channels";
+import {
+  formatDuration,
+  getChannelStatus,
+  type ChannelStatus,
+} from "./channels";
 
 const TONES: Record<ChannelStatus, BadgeTone> = {
   ready: "good",
@@ -46,6 +50,12 @@ export function ChannelRow({
           {watcher.file?.name ?? "—"}
         </p>
       </div>
+
+      {watcher.file?.durationSeconds != null && (
+        <span className="shrink-0 font-mono text-[11px] text-ink-faint">
+          {formatDuration(watcher.file.durationSeconds)}
+        </span>
+      )}
 
       <Badge tone={TONES[status]}>{t(LABELS[status])}</Badge>
     </li>

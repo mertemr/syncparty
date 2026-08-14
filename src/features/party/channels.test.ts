@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { WatcherView } from "@/shared/types/WatcherView";
 
-import { getChannelStatus } from "./channels";
+import { formatDuration, getChannelStatus } from "./channels";
 
 function watcher(overrides: Partial<WatcherView> = {}): WatcherView {
   return {
@@ -35,5 +35,15 @@ describe("getChannelStatus", () => {
 
   it("is waiting when the file matches but the person is not ready", () => {
     expect(getChannelStatus(watcher({ isReady: false }), true)).toBe("waiting");
+  });
+});
+
+describe("formatDuration", () => {
+  it("drops the hour field for anything under an hour", () => {
+    expect(formatDuration(95)).toBe("1:35");
+  });
+
+  it("keeps the hour field and pads the rest above an hour", () => {
+    expect(formatDuration(9660)).toBe("2:41:00");
   });
 });

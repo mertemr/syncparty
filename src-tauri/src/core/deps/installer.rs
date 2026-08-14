@@ -152,12 +152,12 @@ mod tests {
 
     #[test]
     fn winget_arguments_stay_non_interactive() {
-        let args = SystemPackageManager::Winget.args_for("Tailscale.Tailscale");
+        let args = SystemPackageManager::Winget.args_for("Syncplay.Syncplay");
 
         assert!(args.contains(&"--disable-interactivity".to_owned()));
         assert!(args.contains(&"--accept-package-agreements".to_owned()));
         assert!(args.contains(&"--exact".to_owned()));
-        assert!(args.contains(&"Tailscale.Tailscale".to_owned()));
+        assert!(args.contains(&"Syncplay.Syncplay".to_owned()));
     }
 
     #[test]

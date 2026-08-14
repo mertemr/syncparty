@@ -8,7 +8,7 @@ use tauri::State;
 use ts_rs::TS;
 
 use crate::core::config::{AppMode, AppSettings};
-use crate::core::deps::{DependencyId, PreflightReport};
+use crate::core::deps::{DependencyId, PlayerChoice, PreflightReport};
 use crate::core::diagnostics::{self, DiagnosticsReport};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::invite::Invite;
@@ -39,6 +39,8 @@ pub struct SettingsPatch {
     #[ts(optional)]
     pub monitor_enabled: Option<bool>,
     #[ts(optional)]
+    pub skip_setup_when_ready: Option<bool>,
+    #[ts(optional)]
     pub discord_enabled: Option<bool>,
 }
 
@@ -68,6 +70,9 @@ pub fn update_settings(state: State<'_, AppState>, patch: SettingsPatch) -> Resu
         if let Some(enabled) = patch.monitor_enabled {
             settings.monitor_enabled = enabled;
         }
+        if let Some(skip) = patch.skip_setup_when_ready {
+            settings.skip_setup_when_ready = skip;
+        }
         if let Some(enabled) = patch.discord_enabled {
             settings.discord_enabled = enabled;
         }
@@ -82,13 +87,20 @@ pub async fn run_preflight(state: State<'_, AppState>, mode: AppMode) -> Result<
 #[tauri::command]
 pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticsReport> {
     let mode = state.settings.get().mode.unwrap_or(AppMode::Host);
-    Ok(diagnostics::collect(&state.dependencies, &state.session, mode).await)
+    Ok(diagnostics::collect(&state.dependencies, &state.session, &state.secrets, mode).await)
 }
 
 /// Installs one dependency. Progress arrives as events while this runs.
 #[tauri::command]
-pub async fn install_dependency(state: State<'_, AppState>, id: DependencyId) -> Result<()> {
-    state.dependencies.install(id, state.bus.as_ref()).await
+pub async fn install_dependency(
+    state: State<'_, AppState>,
+    id: DependencyId,
+    choice: Option<PlayerChoice>,
+) -> Result<()> {
+    state
+        .dependencies
+        .install(id, choice, state.bus.as_ref())
+        .await
 }
 
 /// Points a dependency at a program the user chose, for portable builds that
@@ -127,6 +139,16 @@ pub fn decode_invite(text: String) -> Result<Invite> {
 #[tauri::command]
 pub async fn join_party(state: State<'_, AppState>, invite: Invite) -> Result<()> {
     state.session.join(&invite).await
+}
+
+/// Closes the tunnel a guest is connected through.
+///
+/// Needed now that syncparty carries the connection rather than standing
+/// beside it: without this the only way to leave a party would be to quit the
+/// app, and the tunnel would stay open for as long as the window did.
+#[tauri::command]
+pub async fn leave_party(state: State<'_, AppState>) -> Result<()> {
+    state.session.leave().await
 }
 
 /// Opens the host's own Syncplay client on the party they are running.

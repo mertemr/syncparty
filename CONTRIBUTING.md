@@ -58,6 +58,30 @@ pnpm build   # runs tsc, so this is the frontend type check too
 
 CI runs all of the above on Windows and macOS.
 
+Run cargo from `src-tauri`, not from the repository root with
+`--manifest-path`. Cargo looks for `.cargo/config.toml` relative to the working
+directory rather than to the manifest, and that file is what sets
+`TS_RS_EXPORT_DIR`. Run from the root, the variable is unset, and `ts-rs`
+writes the generated types into a stray `src-tauri/bindings/` instead of the
+frontend — quietly, with the tests still green.
+
+## Local test build
+
+To put an installer in a tester's hands without cutting a release:
+
+```bash
+pnpm tauri build --bundles nsis --config scripts/tauri.local.conf.json
+```
+
+`--bundles dmg` on macOS. The override exists for one reason:
+`createUpdaterArtifacts` is on in `tauri.conf.json`, and with it on the build
+fails outright unless an updater signing key is in the environment. A local
+build has no update to feed and no key to sign one with.
+
+The bundle lands under `src-tauri/target/release/bundle/`. It is unsigned, so
+SmartScreen and Gatekeeper both warn on first run — the same warning the
+published installers produce, and not a sign that anything went wrong.
+
 ## Cutting a release
 
 Keep the version bump in the same pull request as the release changes. Update

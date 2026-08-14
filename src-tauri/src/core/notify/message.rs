@@ -12,38 +12,30 @@ pub fn party_ready(invite: &Invite, language: &str) -> String {
             "🎬 **Film gecesi hazır!**\n\n\
              **Tek tıkla katıl:** {link}\n\
              **Davet kodu:** `{code}`\n\n\
-             **Elle bağlanmak isteyenler için**\n\
-             Sunucu: `{address}`\n\
-             Oda: `{room}`\n\
-             Parola: `{password}`\n\n\
+             **Oda**\n\
+             Oda adı: `{room}`\n\n\
              **İlk kez katılacaklar**\n\
              1. syncparty'yi kurun ve davet bağlantısına tıklayın — gerisini o halleder.\n\
-             2. Tailscale hesabınızla giriş yapın; bu bilgisayar sizinle paylaşılmadıysa davet isteyin.\n\n\
+             2. Hesap açmanız, ağ kurmanız veya port açmanız gerekmiyor.\n\n\
              Film dosyası herkeste yerel olarak bulunmalı; dosya internetten yayınlanmıyor.",
             link = invite.deep_link(),
             code = invite.encode(),
-            address = invite.server_address(),
             room = invite.room,
-            password = invite.password,
         )
     } else {
         format!(
             "🎬 **Movie night is up!**\n\n\
              **One-click join:** {link}\n\
              **Invite code:** `{code}`\n\n\
-             **If you would rather connect by hand**\n\
-             Server: `{address}`\n\
-             Room: `{room}`\n\
-             Password: `{password}`\n\n\
+             **Room**\n\
+             Room name: `{room}`\n\n\
              **First time joining**\n\
              1. Install syncparty and open the invite link — it handles the rest.\n\
-             2. Sign in with your Tailscale account; ask for an invite if this machine has not been shared with you.\n\n\
+             2. There is no account to create, no network to join and no port to open.\n\n\
              Everyone needs their own copy of the file locally — nothing is streamed.",
             link = invite.deep_link(),
             code = invite.encode(),
-            address = invite.server_address(),
             room = invite.room,
-            password = invite.password,
         )
     }
 }
@@ -75,9 +67,7 @@ mod tests {
 
     fn sample() -> Invite {
         Invite {
-            host: "movie-box.tail1a2b3.ts.net".to_owned(),
-            alternate_hosts: vec!["100.79.178.123".to_owned()],
-            port: 8999,
+            endpoint: iroh::SecretKey::generate().public().to_string(),
             password: "swordfish".to_owned(),
             room: "MovieNight".to_owned(),
         }
@@ -101,9 +91,21 @@ mod tests {
 
             assert!(message.contains(&invite.deep_link()), "{language}");
             assert!(message.contains(&invite.encode()), "{language}");
-            assert!(message.contains(&invite.server_address()), "{language}");
             assert!(message.contains(&invite.room), "{language}");
-            assert!(message.contains(&invite.password), "{language}");
+        }
+    }
+
+    #[test]
+    fn the_announcement_does_not_put_the_password_in_the_channel() {
+        // It travels inside the code, which is the thing people paste into
+        // syncparty. Printing it beside the code adds nothing and leaves the
+        // party's one secret sitting in plain sight in a chat log.
+        let invite = sample();
+
+        for language in ["tr", "en"] {
+            let message = party_ready(&invite, language);
+
+            assert!(!message.contains(&invite.password), "{language}");
         }
     }
 

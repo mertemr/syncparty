@@ -9,4 +9,4 @@ import type { AppMode } from "./AppMode";
  * `T | null`, which would force the frontend to spell out all seven on every
  * call and defeat the point of a patch.
  */
-export type SettingsPatch = { mode?: AppMode, port?: number, room?: string, nickname?: string, language?: string, monitorEnabled?: boolean, discordEnabled?: boolean, };
+export type SettingsPatch = { mode?: AppMode, port?: number, room?: string, nickname?: string, language?: string, monitorEnabled?: boolean, skipSetupWhenReady?: boolean, discordEnabled?: boolean, };

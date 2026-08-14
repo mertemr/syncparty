@@ -15,7 +15,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { errorMessage, ipc, isBackendError, onAppEvent } from "@/shared/ipc";
+import { errorMessage, ipc, onAppEvent } from "@/shared/ipc";
 import type { AppEvent } from "@/shared/types/AppEvent";
 import type { AppSettings } from "@/shared/types/AppSettings";
 import type { DependencyId } from "@/shared/types/DependencyId";
@@ -36,8 +36,6 @@ export interface InstallProgress {
 export interface AppFailure {
   kind: string;
   message: string;
-  /** Present when the failure is a Tailscale sign-in prompt. */
-  authUrl?: string;
 }
 
 interface AppStateValue {
@@ -111,14 +109,6 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         setPendingInvite(event.invite);
         break;
 
-      case "tailscaleLoginRequired":
-        setFailure({
-          kind: "tailscale_login_required",
-          message: event.authUrl,
-          authUrl: event.authUrl,
-        });
-        break;
-
       case "failed":
         setFailure({ kind: event.errorKind, message: event.message });
         break;
@@ -163,7 +153,6 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           ? String((error as { kind: unknown }).kind)
           : "other",
       message: errorMessage(error),
-      authUrl: isBackendError(error) ? error.authUrl : undefined,
     });
   }, []);
 

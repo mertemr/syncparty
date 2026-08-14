@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { FileCompatibility } from "@/shared/types/FileCompatibility";
 import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 
-import { getLobbyState } from "./lobbyState";
+import { getLobbyBadge, getLobbyState } from "./lobbyState";
 
 function snapshot(
   compatibility: FileCompatibility,
@@ -78,5 +78,39 @@ describe("getLobbyState", () => {
 
     expect(state.everyoneReady).toBe(false);
     expect(state.filesCompatible).toBe(false);
+  });
+});
+
+describe("getLobbyBadge", () => {
+  it("says nobody has joined rather than claiming progress", () => {
+    const state = getLobbyState(snapshot("waiting", []));
+
+    expect(getLobbyBadge(state)).toBe("empty");
+  });
+
+  it("says people are getting ready once somebody is there", () => {
+    const state = getLobbyState(
+      snapshot("waiting", [{ name: "ayse", ready: false, hasFile: false }]),
+    );
+
+    expect(getLobbyBadge(state)).toBe("waiting");
+  });
+
+  it("says ready when everyone is", () => {
+    const state = getLobbyState(
+      snapshot("exact", [{ name: "ayse", ready: true, hasFile: true }]),
+    );
+
+    expect(getLobbyBadge(state)).toBe("ready");
+  });
+
+  it("treats a room holding only the monitor as empty", () => {
+    const state = getLobbyState(
+      snapshot("waiting", [
+        { name: "syncparty-panel", ready: false, hasFile: false },
+      ]),
+    );
+
+    expect(getLobbyBadge(state)).toBe("empty");
   });
 });

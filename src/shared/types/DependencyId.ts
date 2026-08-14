@@ -3,4 +3,4 @@
 /**
  * Stable identifier for each dependency, shared with the frontend.
  */
-export type DependencyId = "tailscale" | "syncplayClient" | "mpv" | "serverRuntime";
+export type DependencyId = "syncplayClient" | "mpv" | "serverRuntime";

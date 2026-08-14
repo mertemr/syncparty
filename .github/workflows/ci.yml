@@ -1,52 +1,72 @@
 name: CI
 
-on:
-  pull_request:
-  workflow_dispatch:
-
 # `main` is protected and can only receive commits through a branch that has
 # passed these required checks. Running the same suite again after merge adds
 # no coverage and used to spend another complete CI cycle on identical code.
 
-# Neither job pushes, comments, or otherwise writes anything back — this is
-# read-only by design, including for PRs from forks.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Run the backend jobs
+        type: boolean
+        default: true
+      frontend:
+        description: Run the frontend job
+        type: boolean
+        default: true
+
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+
 jobs:
-  backend:
-    name: Backend (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  backend-checks:
+    name: Backend (lint & types)
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      # Debug symbols are not useful in ephemeral lint/test jobs and make the
-      # large Tauri dependency graph slower to compile and cache.
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
+    if: github.event_name != 'workflow_dispatch' || inputs.backend
 
     steps:
-      - uses: actions/checkout@v7
+      - &checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
 
-      # The frontend build output has to exist before `generate_context!`
-      # will expand, even for a check that never renders anything.
       - run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
-        shell: bash
 
       - name: Format
         working-directory: src-tauri
@@ -56,13 +76,11 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      # Also regenerates src/shared/types, which the drift check below reads.
       - name: Test
         working-directory: src-tauri
         run: cargo test
 
       - name: Generated types are up to date
-        shell: bash
         run: |
           if ! git diff --quiet -- src/shared/types; then
             echo "::error::src/shared/types is stale — run 'cargo test' in src-tauri and commit the result."
@@ -70,17 +88,45 @@ jobs:
             exit 1
           fi
 
+  backend:
+    name: Backend (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    if: github.event_name != 'workflow_dispatch' || inputs.backend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: macos-latest
+            label: macOS
+
+    steps:
+      - *checkout
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+
+      - run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
+
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'workflow_dispatch' || inputs.frontend
 
     steps:
-      - uses: actions/checkout@v7
+      - *checkout
 
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm

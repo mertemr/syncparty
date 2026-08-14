@@ -1,6 +1,6 @@
 //! Running external programs without flashing console windows at the user.
 //!
-//! Every subprocess syncparty starts — `tailscale`, `winget`, `uv`, `python`,
+//! Every subprocess syncparty starts — `winget`, `uv`, `python`,
 //! the Syncplay client — goes through here. On Windows a bare
 //! [`tokio::process::Command`] pops a console window for a fraction of a
 //! second, which looks broken in a GUI app; `CREATE_NO_WINDOW` suppresses it.
@@ -91,7 +91,7 @@ where
 /// Resolves an executable, preferring `PATH` and falling back to a list of
 /// well-known install locations.
 ///
-/// Tailscale, mpv and Syncplay all install somewhere predictable but do not
+/// mpv and Syncplay both install somewhere predictable but do not
 /// reliably add themselves to `PATH`, so looking in both places is what makes
 /// detection work on a stock machine.
 pub fn locate(binary: &str, fallbacks: &[&str]) -> Option<std::path::PathBuf> {

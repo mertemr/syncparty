@@ -6,8 +6,10 @@ import type { HostingInfo } from "@/shared/types/HostingInfo";
 /**
  * What the host actually sends to people.
  *
- * The link comes first and the raw connection details are secondary: pasting
- * one URL is the path that works, and the rest is there for when it does not.
+ * The link comes first and the raw details are secondary: pasting one URL is
+ * the path that works, and the rest is there to compare notes with when it
+ * does not — none of it can be typed into Syncplay by hand any more, since
+ * guests reach the server through this machine rather than by dialling it.
  */
 export function InviteCard({ hosting }: { hosting: HostingInfo }) {
   const t = useTranslate();
@@ -40,8 +42,8 @@ export function InviteCard({ hosting }: { hosting: HostingInfo }) {
       <Card title={t("host.details.title")}>
         <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-2">
           <Detail
-            label={t("host.details.server")}
-            value={`${hosting.invite.host}:${hosting.invite.port}`}
+            label={t("host.details.endpoint")}
+            value={hosting.invite.endpoint}
           />
           <Detail label={t("host.details.room")} value={hosting.invite.room} />
           <Detail
@@ -49,8 +51,8 @@ export function InviteCard({ hosting }: { hosting: HostingInfo }) {
             value={hosting.invite.password}
           />
           <Detail
-            label={t("host.details.tailscale")}
-            value={hosting.tailscaleAddress}
+            label={t("host.details.server")}
+            value={hosting.serverAddress}
           />
         </dl>
       </Card>

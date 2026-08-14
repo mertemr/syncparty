@@ -1,42 +1,51 @@
 //! Turning a party into one string a guest can act on.
 //!
-//! Everything a guest needs — address, port, password, room — travels as a
-//! single token, so nobody has to copy four values out of a chat message and
-//! retype them into a connection dialog. The same token doubles as a
-//! `syncparty://` link, which opens the app already filled in.
+//! Everything a guest needs travels as a single token, so nobody has to copy
+//! several values out of a chat message and retype them into a connection
+//! dialog. The same token doubles as a `syncparty://` link, which opens the
+//! app already filled in.
+//!
+//! Since the move off Tailscale an invite is markedly smaller. The host used
+//! to have to advertise every address that might reach it — a masqueraded
+//! share address, its own tailnet IP, its MagicDNS name — because which one
+//! worked depended on which tailnet the guest happened to be on, something the
+//! host could not know. An iroh endpoint id has no such problem: it is the
+//! address everywhere, from every network, and it does not change when the
+//! host's connection does. The port went the same way, since guests reach the
+//! Syncplay server through the host's tunnel rather than by dialling it.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::core::error::{Result, SyncPartyError};
+use crate::core::net;
 
 /// URI scheme registered with the OS for one-click joining.
 pub const DEEP_LINK_SCHEME: &str = "syncparty";
 
 /// Token prefix. Versioned so a future format can be told apart from this one
 /// instead of failing with a confusing parse error.
-const TOKEN_PREFIX: &str = "SP1.";
+const TOKEN_PREFIX: &str = "SP2.";
+
+/// The prefix used while parties ran over Tailscale. Recognised only so those
+/// codes can be turned down with an explanation rather than "not valid".
+const LEGACY_TOKEN_PREFIX: &str = "SP1.";
 
 /// A party, in the form a guest receives it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct Invite {
-    /// The address most guests should use.
-    pub host: String,
-    /// Other addresses that reach the same server.
+    /// The host's iroh endpoint id — its public key, written out.
     ///
-    /// No single address suits everyone. A node shared into somebody else's
-    /// tailnet is reached on a masqueraded address that means nothing anywhere
-    /// else — including on the host's own machine — while peers inside the
-    /// host's tailnet need its real address or MagicDNS name. Carrying every
-    /// candidate lets the joining side find out which one actually answers
-    /// instead of the host having to know who is on which tailnet.
-    #[serde(default)]
-    pub alternate_hosts: Vec<String>,
-    pub port: u16,
+    /// This is the whole address. There is no host name, no IP and no port,
+    /// because the transport resolves the id to whatever route works right
+    /// now: a direct connection when hole punching succeeds, a relay when it
+    /// does not.
+    pub endpoint: String,
     pub password: String,
     pub room: String,
 }
@@ -47,26 +56,19 @@ pub struct Invite {
 #[derive(Serialize, Deserialize)]
 struct Payload {
     v: u8,
-    h: String,
-    p: u16,
+    e: String,
     pw: String,
     r: String,
-    /// Absent in the first tokens syncparty produced, so it stays optional
-    /// rather than forcing a format bump that would reject them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    a: Vec<String>,
 }
 
 impl Invite {
-    /// Encodes the invite as a `SP1.…` token.
+    /// Encodes the invite as a `SP2.…` token.
     pub fn encode(&self) -> String {
         let payload = Payload {
-            v: 1,
-            h: self.host.clone(),
-            p: self.port,
+            v: 2,
+            e: self.endpoint.clone(),
             pw: self.password.clone(),
             r: self.room.clone(),
-            a: self.alternate_hosts.clone(),
         };
 
         // Serialising a struct we own cannot fail.
@@ -80,8 +82,21 @@ impl Invite {
     /// line of surrounding text — so this accepts all of it rather than
     /// asking them to trim it first.
     pub fn decode(input: &str) -> Result<Self> {
-        let token = extract_token(input)
-            .ok_or_else(|| SyncPartyError::InvalidInvite("no invite code found".to_owned()))?;
+        let Some(token) = extract_token(input, TOKEN_PREFIX) else {
+            // Worth telling apart: an old code is not a typo, and the guest
+            // cannot fix it by pasting more carefully.
+            if extract_token(input, LEGACY_TOKEN_PREFIX).is_some() {
+                return Err(SyncPartyError::InvalidInvite(
+                    "this code is from a version of syncparty that ran over Tailscale — ask the \
+                     host for a new one"
+                        .to_owned(),
+                ));
+            }
+
+            return Err(SyncPartyError::InvalidInvite(
+                "no invite code found".to_owned(),
+            ));
+        };
 
         let encoded = token.trim_start_matches(TOKEN_PREFIX);
         let json = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
@@ -91,72 +106,63 @@ impl Invite {
         let payload: Payload = serde_json::from_slice(&json)
             .map_err(|_| SyncPartyError::InvalidInvite("the code is damaged".to_owned()))?;
 
-        if payload.v != 1 {
+        if payload.v != 2 {
             return Err(SyncPartyError::InvalidInvite(format!(
                 "this code was made by a newer version of syncparty (format {})",
                 payload.v
             )));
         }
 
-        if payload.h.is_empty() || payload.r.is_empty() || payload.p == 0 {
+        if payload.e.is_empty() || payload.r.is_empty() {
             return Err(SyncPartyError::InvalidInvite(
-                "the code is missing an address, port or room".to_owned(),
+                "the code is missing a host or a room".to_owned(),
             ));
         }
 
-        Ok(Self {
-            host: payload.h,
-            alternate_hosts: payload.a,
-            port: payload.p,
+        let invite = Self {
+            endpoint: payload.e,
             password: payload.pw,
             room: payload.r,
-        })
+        };
+
+        // Checked here rather than at dial time so a mistyped or truncated
+        // code is rejected while the guest still has the chat message open,
+        // instead of after they press Join.
+        invite.endpoint_id()?;
+
+        Ok(invite)
     }
 
-    /// Every address worth trying, primary first and duplicates removed.
-    pub fn candidates(&self) -> Vec<String> {
-        let mut seen = Vec::with_capacity(1 + self.alternate_hosts.len());
-
-        for host in std::iter::once(&self.host).chain(&self.alternate_hosts) {
-            let host = host.trim();
-            if !host.is_empty() && !seen.iter().any(|kept| kept == host) {
-                seen.push(host.to_owned());
-            }
-        }
-
-        seen
+    /// The host's endpoint id, parsed.
+    pub fn endpoint_id(&self) -> Result<EndpointId> {
+        net::parse_endpoint_id(&self.endpoint)
     }
 
-    /// The same party reached at `host`, keeping the rest of the details.
-    pub fn at_host(&self, host: impl Into<String>) -> Self {
-        Self {
-            host: host.into(),
-            alternate_hosts: Vec::new(),
-            ..self.clone()
-        }
-    }
-
-    /// The clickable form: `syncparty://join/SP1.…`.
+    /// The clickable form: `syncparty://join/SP2.…`.
     pub fn deep_link(&self) -> String {
         format!("{DEEP_LINK_SCHEME}://join/{}", self.encode())
     }
 
-    /// `host:port`, the way the Syncplay client wants it.
-    pub fn server_address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+    /// A short, human-comparable form of the host's address.
+    ///
+    /// Only for display — reading a full endpoint id aloud is hopeless, but
+    /// the first characters are enough for two people to confirm over voice
+    /// chat that they are talking about the same party.
+    pub fn short_endpoint(&self) -> String {
+        self.endpoint.chars().take(8).collect()
     }
 }
 
-/// Finds a `SP1.…` token anywhere in `input`.
-fn extract_token(input: &str) -> Option<&str> {
-    let start = input.find(TOKEN_PREFIX)?;
+/// Finds a token with the given prefix anywhere in `input`.
+fn extract_token<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    let start = input.find(prefix)?;
     let rest = &input[start..];
 
     // base64url plus the prefix's dot; anything else ends the token.
     let end = rest
         .char_indices()
         .position(|(index, character)| {
-            index >= TOKEN_PREFIX.len()
+            index >= prefix.len()
                 && !(character.is_ascii_alphanumeric() || character == '-' || character == '_')
         })
         .unwrap_or(rest.len());
@@ -168,11 +174,15 @@ fn extract_token(input: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// A real endpoint id, so the parse check in `decode` is exercised rather
+    /// than sidestepped by a placeholder that could never be dialled.
+    fn endpoint() -> String {
+        iroh::SecretKey::generate().public().to_string()
+    }
+
     fn sample() -> Invite {
         Invite {
-            host: "movie-box.tail1a2b3.ts.net".to_owned(),
-            alternate_hosts: vec!["100.79.178.123".to_owned()],
-            port: 8999,
+            endpoint: endpoint(),
             password: "swordfish".to_owned(),
             room: "MovieNight".to_owned(),
         }
@@ -187,18 +197,13 @@ mod tests {
 
     #[test]
     fn tokens_are_url_safe_so_they_survive_chat_apps() {
-        let invite = Invite {
-            host: "host~with/odd+chars".to_owned(),
-            ..sample()
-        };
+        let token = sample().encode();
 
-        let token = invite.encode();
         assert!(token.starts_with(TOKEN_PREFIX));
         assert!(token
             .trim_start_matches(TOKEN_PREFIX)
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
-        assert_eq!(Invite::decode(&token).expect("decode"), invite);
     }
 
     #[test]
@@ -221,7 +226,7 @@ mod tests {
 
     #[test]
     fn deep_links_use_the_registered_scheme() {
-        assert!(sample().deep_link().starts_with("syncparty://join/SP1."));
+        assert!(sample().deep_link().starts_with("syncparty://join/SP2."));
     }
 
     #[test]
@@ -233,20 +238,31 @@ mod tests {
 
     #[test]
     fn rejects_a_corrupted_code() {
-        let error = Invite::decode("SP1.notrealbase64payload").expect_err("damaged");
+        let error = Invite::decode("SP2.notrealbase64payload").expect_err("damaged");
 
         assert_eq!(error.kind(), "invalid_invite");
+    }
+
+    #[test]
+    fn a_tailscale_era_code_says_so_instead_of_looking_like_a_typo() {
+        // A real token from the last Tailscale release. Someone re-pasting an
+        // old chat message must be told the format changed, not that they
+        // copied it wrong.
+        let legacy = "SP1.eyJ2IjoxLCJoIjoiMTAwLjEyNy4xNjcuNTYiLCJwIjo4OTk5LCJwdyI6IjdQWEpCQjZIWDQzaEoyYWpZWiIsInIiOiJNb3ZpZU5pZ2h0In0";
+
+        let error = Invite::decode(legacy).expect_err("SP1 is no longer usable");
+
+        assert_eq!(error.kind(), "invalid_invite");
+        assert!(error.to_string().contains("Tailscale"), "{error}");
     }
 
     #[test]
     fn rejects_a_future_format_with_a_useful_message() {
         let payload = serde_json::to_vec(&Payload {
             v: 99,
-            h: "host".to_owned(),
-            p: 8999,
+            e: endpoint(),
             pw: String::new(),
             r: "room".to_owned(),
-            a: Vec::new(),
         })
         .expect("encode");
         let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(payload));
@@ -256,14 +272,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_code_missing_its_address() {
+    fn rejects_a_code_whose_endpoint_is_not_a_real_address() {
+        // The failure a truncated paste produces. Caught at decode time so the
+        // guest is told before they press Join, not after.
         let payload = serde_json::to_vec(&Payload {
-            v: 1,
-            h: String::new(),
-            p: 8999,
+            v: 2,
+            e: "definitely-not-a-key".to_owned(),
             pw: String::new(),
             r: "room".to_owned(),
-            a: Vec::new(),
+        })
+        .expect("encode");
+        let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(payload));
+
+        assert_eq!(
+            Invite::decode(&token).expect_err("bad endpoint").kind(),
+            "invalid_invite"
+        );
+    }
+
+    #[test]
+    fn rejects_a_code_missing_its_room() {
+        let payload = serde_json::to_vec(&Payload {
+            v: 2,
+            e: endpoint(),
+            pw: String::new(),
+            r: String::new(),
         })
         .expect("encode");
         let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(payload));
@@ -282,69 +315,22 @@ mod tests {
     }
 
     #[test]
-    fn formats_the_address_the_way_the_client_expects() {
-        assert_eq!(sample().server_address(), "movie-box.tail1a2b3.ts.net:8999");
-    }
-
-    #[test]
-    fn alternate_addresses_survive_the_round_trip() {
+    fn the_endpoint_id_parses_back_to_the_key_it_came_from() {
+        let key = iroh::SecretKey::generate();
         let invite = Invite {
-            host: "100.127.167.56".to_owned(),
-            alternate_hosts: vec![
-                "100.79.178.123".to_owned(),
-                "movie-box.tail1a2b3.ts.net".to_owned(),
-            ],
+            endpoint: key.public().to_string(),
             ..sample()
         };
 
-        assert_eq!(Invite::decode(&invite.encode()).expect("decode"), invite);
+        assert_eq!(invite.endpoint_id().expect("parse"), key.public());
     }
 
     #[test]
-    fn candidates_put_the_primary_first_and_drop_duplicates() {
-        let invite = Invite {
-            host: "100.127.167.56".to_owned(),
-            alternate_hosts: vec![
-                "100.79.178.123".to_owned(),
-                // Repeated and blank entries are what a host with one
-                // address ends up producing; neither should be tried.
-                "100.127.167.56".to_owned(),
-                "  ".to_owned(),
-            ],
-            ..sample()
-        };
+    fn the_short_form_is_readable_aloud_without_being_the_whole_key() {
+        let invite = sample();
+        let short = invite.short_endpoint();
 
-        assert_eq!(
-            invite.candidates(),
-            vec!["100.127.167.56".to_owned(), "100.79.178.123".to_owned()]
-        );
-    }
-
-    #[test]
-    fn tokens_made_before_alternates_existed_still_decode() {
-        // A real token produced by the first release, which had no `a` field.
-        let legacy = "SP1.eyJ2IjoxLCJoIjoiMTAwLjEyNy4xNjcuNTYiLCJwIjo4OTk5LCJwdyI6IjdQWEpCQjZIWDQzaEoyYWpZWiIsInIiOiJNb3ZpZU5pZ2h0In0";
-
-        let invite = Invite::decode(legacy).expect("legacy tokens must keep working");
-
-        assert_eq!(invite.host, "100.127.167.56");
-        assert_eq!(invite.port, 8999);
-        assert_eq!(invite.room, "MovieNight");
-        assert!(invite.alternate_hosts.is_empty());
-        assert_eq!(invite.candidates(), vec!["100.127.167.56".to_owned()]);
-    }
-
-    #[test]
-    fn at_host_swaps_the_address_and_keeps_everything_else() {
-        let local = sample().at_host("100.79.178.123");
-
-        assert_eq!(local.host, "100.79.178.123");
-        assert_eq!(local.password, sample().password);
-        assert_eq!(local.room, sample().room);
-        assert_eq!(local.port, sample().port);
-        assert!(
-            local.alternate_hosts.is_empty(),
-            "a deliberately chosen address should not fall back to others"
-        );
+        assert_eq!(short.len(), 8);
+        assert!(invite.endpoint.starts_with(&short));
     }
 }

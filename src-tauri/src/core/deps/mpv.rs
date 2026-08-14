@@ -6,7 +6,9 @@ use async_trait::async_trait;
 
 use crate::core::config::ConfigStore;
 use crate::core::deps::installer::{install_and_verify, PackageManagedInstall, PackageSpec};
-use crate::core::deps::{Dependency, DependencyId, DependencyStatus, ModeRequirement};
+use crate::core::deps::{
+    Dependency, DependencyId, DependencyStatus, ModeRequirement, PlayerChoice,
+};
 use crate::core::error::Result;
 use crate::core::events::ProgressSink;
 use crate::core::process;
@@ -16,21 +18,32 @@ const DISPLAY_NAME: &str = "mpv or VLC";
 const MANUAL_URL: &str = "https://mpv.io/installation/";
 
 pub struct MpvDependency {
-    installer: PackageManagedInstall,
     settings: Arc<ConfigStore>,
 }
 
 impl MpvDependency {
     pub fn new(settings: Arc<ConfigStore>) -> Self {
-        Self {
-            installer: PackageManagedInstall {
-                display_name: DISPLAY_NAME,
-                spec: PackageSpec {
-                    winget_id: Some("shinchiro.mpv"),
-                    brew_cask: Some("mpv"),
-                },
+        Self { settings }
+    }
+
+    /// Where each player comes from on each platform.
+    pub(crate) fn spec_for(choice: PlayerChoice) -> PackageSpec {
+        match choice {
+            PlayerChoice::Mpv => PackageSpec {
+                winget_id: Some("shinchiro.mpv"),
+                brew_cask: Some("mpv"),
             },
-            settings,
+            PlayerChoice::Vlc => PackageSpec {
+                winget_id: Some("VideoLAN.VLC"),
+                brew_cask: Some("vlc"),
+            },
+        }
+    }
+
+    fn installer(choice: PlayerChoice) -> PackageManagedInstall {
+        PackageManagedInstall {
+            display_name: DISPLAY_NAME,
+            spec: Self::spec_for(choice),
         }
     }
 }
@@ -64,8 +77,13 @@ impl Dependency for MpvDependency {
         }
     }
 
-    async fn install(&self, progress: &dyn ProgressSink) -> Result<()> {
-        install_and_verify(self, &self.installer, progress).await
+    async fn install(
+        &self,
+        progress: &dyn ProgressSink,
+        choice: Option<PlayerChoice>,
+    ) -> Result<()> {
+        let installer = Self::installer(choice.unwrap_or_default());
+        install_and_verify(self, &installer, progress).await
     }
 
     fn manual_url(&self) -> &str {
@@ -77,7 +95,10 @@ impl Dependency for MpvDependency {
     }
 
     async fn can_auto_install(&self) -> bool {
-        self.installer.is_supported()
+        // Either player being installable is enough to offer the button; the
+        // control beside it is what picks between them.
+        Self::installer(PlayerChoice::Mpv).is_supported()
+            || Self::installer(PlayerChoice::Vlc).is_supported()
     }
 
     /// mpv is very often a portable build sitting in a folder somewhere.
@@ -87,5 +108,31 @@ impl Dependency for MpvDependency {
 
     fn manual_path_key(&self) -> Option<&'static str> {
         Some(MPV_KEY)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_player_names_itself_to_both_package_managers() {
+        let mpv = MpvDependency::spec_for(PlayerChoice::Mpv);
+        assert_eq!(mpv.winget_id, Some("shinchiro.mpv"));
+        assert_eq!(mpv.brew_cask, Some("mpv"));
+
+        let vlc = MpvDependency::spec_for(PlayerChoice::Vlc);
+        assert_eq!(vlc.winget_id, Some("VideoLAN.VLC"));
+        assert_eq!(vlc.brew_cask, Some("vlc"));
+    }
+
+    /// Nothing chosen means mpv, which is what the row does before the user
+    /// touches the control and what every existing caller expects.
+    #[test]
+    fn no_choice_installs_mpv() {
+        assert_eq!(
+            MpvDependency::spec_for(PlayerChoice::default()).winget_id,
+            Some("shinchiro.mpv")
+        );
     }
 }

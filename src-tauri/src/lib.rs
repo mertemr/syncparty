@@ -1,9 +1,10 @@
-//! syncparty — synchronised movie nights over Tailscale.
+//! syncparty — synchronised movie nights over a peer-to-peer connection.
 //!
-//! Two halves in one binary. A host brings up a Syncplay server on its
-//! tailnet address and hands out an invite; a guest opens that invite and is
-//! dropped straight into the room. Both share the same dependency checks,
-//! protocol code and settings, which is why they are not two apps.
+//! Two halves in one binary. A host brings up a Syncplay server on loopback,
+//! opens a peer-to-peer endpoint in front of it and hands out an invite; a
+//! guest opens that invite and is dropped straight into the room. Both share
+//! the same dependency checks, protocol code and settings, which is why they
+//! are not two apps.
 
 pub mod core;
 pub mod ipc;
@@ -69,6 +70,7 @@ pub fn run() {
             commands::session_state,
             commands::decode_invite,
             commands::join_party,
+            commands::leave_party,
             commands::join_hosted_party,
             commands::resume_last_session,
             commands::clear_last_session,

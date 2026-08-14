@@ -36,21 +36,10 @@ jobs:
           persist-credentials: false
 
       # Fails before three native runners are reserved for a bad version bump.
+      # The same check runs on every pull request, so reaching this step with a
+      # mismatch means the tag itself is wrong.
       - name: Check tag and application versions
-        run: |
-          package_version="$(node -p "require('./package.json').version")"
-          tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          cargo_version="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
-
-          if [[ "$package_version" != "$tauri_version" || "$package_version" != "$cargo_version" ]]; then
-            echo "::error::Version mismatch: package.json=$package_version, tauri.conf.json=$tauri_version, Cargo.toml=$cargo_version"
-            exit 1
-          fi
-
-          if [[ "$GITHUB_REF_NAME" != "v$package_version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match application version v$package_version"
-            exit 1
-          fi
+        run: node scripts/version.mjs check --tag "$GITHUB_REF_NAME"
 
   build:
     name: ${{ matrix.label }}

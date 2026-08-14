@@ -26,9 +26,9 @@ A few things that trip people up the first time:
   "Approve and run" on the Actions tab. This is a GitHub security default, not
   something specific to this repo, and it is expected — ping the PR if it has
   been a while.
-- **A PR cannot merge until CI is green.** `main` requires the Backend
-  (Windows), Backend (macOS) and Frontend checks to pass before the merge
-  button unlocks.
+- **A PR cannot merge until CI is green.** `main` requires the Versions agree,
+  Backend (Windows), Backend (macOS) and Frontend checks to pass before the
+  merge button unlocks.
 - Keep the branch scoped to one change. Unrelated formatting or refactors in
   the same PR make it harder to review.
 
@@ -84,16 +84,27 @@ published installers produce, and not a sign that anything went wrong.
 
 ## Cutting a release
 
-Keep the version bump in the same pull request as the release changes. Update
-the version in `package.json`, `src-tauri/Cargo.toml`, and
-`src-tauri/tauri.conf.json` before that pull request's final CI run. After it is
-green and merged, create and push the matching tag:
+Keep the version bump in the same pull request as the release changes, and make
+it with the bump script rather than by hand:
+
+```bash
+pnpm bump 0.5.0
+```
+
+That writes the number into `package.json`, `src-tauri/Cargo.toml` and
+`src-tauri/Cargo.lock` in one go. `src-tauri/tauri.conf.json` does not carry a
+number of its own — it points at `../package.json`, so the bundle follows along.
+Editing any of these by hand is what tagging four broken releases in a row looks
+like; the `Versions agree` check on every pull request exists to catch it before
+a tag is spent.
+
+After the pull request is green and merged, create and push the matching tag:
 
 ```bash
 git switch main
 git pull --ff-only
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
 The protected branch has already passed the required Windows, macOS, and

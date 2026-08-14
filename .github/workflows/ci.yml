@@ -35,11 +35,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  backend-checks:
-    name: Backend (lint & types)
+  # Cheap, and the reason it is here rather than only in the release workflow:
+  # a version mismatch found at tag time has already burned the tag.
+  version:
+    name: Versions agree
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    if: github.event_name != 'workflow_dispatch' || inputs.backend
+    timeout-minutes: 2
 
     steps:
       - &checkout
@@ -47,6 +48,17 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - run: node scripts/version.mjs check
+
+  backend-checks:
+    name: Backend (lint & types)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'workflow_dispatch' || inputs.backend
+
+    steps:
+      - *checkout
 
       - name: Install Tauri system dependencies
         run: |

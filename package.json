@@ -1,7 +1,7 @@
 {
   "name": "syncparty",
   "private": true,
-  "version": "0.5.3",
+  "version": "0.5.0",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "scripts": {
@@ -9,7 +9,9 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bump": "node scripts/version.mjs set",
+    "version:check": "node scripts/version.mjs check"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

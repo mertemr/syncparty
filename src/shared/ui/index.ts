@@ -15,3 +15,4 @@ export { Input, Field } from "./Input";
 export { Toggle } from "./Toggle";
 export { Choice } from "./Choice";
 export { CopyRow } from "./CopyRow";
+export { Logo, Wordmark } from "./Logo";

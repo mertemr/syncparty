@@ -14,7 +14,7 @@ import {
 } from "@/shared/i18n";
 import { useAppUpdate } from "@/shared/hooks/useAppUpdate";
 import { ipc } from "@/shared/ipc";
-import { Badge, Button } from "@/shared/ui";
+import { Badge, Button, Wordmark } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 
 export default function App() {
@@ -219,14 +219,7 @@ function Header({
   return (
     <header className="z-10 flex shrink-0 items-center justify-between border-b border-line/60 bg-canvas/55 px-6 py-4 backdrop-blur-2xl">
       <div className="flex items-center gap-3">
-        <span aria-hidden className="relative grid size-9 place-items-center overflow-hidden rounded-xl bg-accent text-accent-ink shadow-[0_8px_28px_oklch(0.65_0.18_42/0.25)]">
-          <svg viewBox="0 0 24 24" className="size-5 fill-current" aria-hidden>
-            <path d="M8.2 6.1a1 1 0 0 1 1.52-.85l8.25 5.3a1 1 0 0 1 0 1.7l-8.25 5.3a1 1 0 0 1-1.52-.84V6.1Z" />
-          </svg>
-        </span>
-        <span className="text-[15px] font-bold tracking-[-0.02em] text-ink">
-          {t("appName")}
-        </span>
+        <Wordmark />
 
         {canGoBack && (
           <>

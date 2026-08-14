@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
-import { StepTrail, type Step } from "@/app/StepTrail";
 import { GuestScreen } from "@/features/guest/GuestScreen";
 import { HostScreen } from "@/features/host/HostScreen";
-import { ModeChooser } from "@/features/onboarding/ModeChooser";
-import { Preflight } from "@/features/onboarding/Preflight";
+import { LaunchScreen } from "@/features/launch/LaunchScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import {
   TranslationProvider,
@@ -14,7 +12,7 @@ import {
 } from "@/shared/i18n";
 import { useAppUpdate } from "@/shared/hooks/useAppUpdate";
 import { ipc } from "@/shared/ipc";
-import { Badge, Button, Wordmark } from "@/shared/ui";
+import { Badge, Button, Rewind, Wordmark } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 
 export default function App() {
@@ -42,45 +40,37 @@ function Shell() {
     useAppState();
 
   const [showSettings, setShowSettings] = useState(false);
-  const [setupConfirmed, setSetupConfirmed] = useState(false);
-  // Set when the user steps back out of setup. The stored mode stays as their
-  // last answer — the backend patch cannot clear it — but the chooser comes
-  // back so a mistaken pick is one click to undo.
-  const [rechoosingMode, setRechoosingMode] = useState(false);
   const [confirmingLeave, setConfirmingLeave] = useState(false);
-  // Auto-skip is a once-per-launch courtesy. Stepping back into setup spends
-  // it, because a user who walked there deliberately must be allowed to stay.
-  const [autoSkipSpent, setAutoSkipSpent] = useState(false);
+  // Set when the user steps back to the launch surface. The stored mode stays
+  // as their last answer — `SettingsPatch` cannot clear it — but the slots
+  // come back, so a mistaken pick is one click to undo.
+  const [atLaunch, setAtLaunch] = useState(false);
 
   // An invite arriving by link means the user is a guest tonight, whatever
   // they picked last time — and settles the mode question outright.
   useEffect(() => {
     if (!pendingInvite || !settings) return;
 
-    setRechoosingMode(false);
+    setAtLaunch(false);
     if (settings.mode !== "guest") {
       void patchSettings({ mode: "guest" }).catch(reportFailure);
     }
   }, [pendingInvite, settings, patchSettings, reportFailure]);
 
   const chooseMode = (mode: AppMode) => {
-    setSetupConfirmed(false);
-    setRechoosingMode(false);
+    setAtLaunch(false);
     void patchSettings({ mode }).catch(reportFailure);
   };
 
-  const mode = rechoosingMode ? null : (settings?.mode ?? null);
-  const step: Step = mode === null ? "mode" : setupConfirmed ? "party" : "setup";
+  const mode = atLaunch ? null : (settings?.mode ?? null);
 
   const partyRunning =
     session.phase === "starting" || session.phase === "hosting";
-  const canGoBack = settings !== null && !showSettings && step !== "mode";
+  const canGoBack = settings !== null && !showSettings && mode !== null;
 
   function stepBack() {
     setConfirmingLeave(false);
-    setAutoSkipSpent(true);
-    if (step === "party") setSetupConfirmed(false);
-    else setRechoosingMode(true);
+    setAtLaunch(true);
   }
 
   /**
@@ -89,7 +79,7 @@ function Shell() {
    * guest side is torn down by walking back, so no guard there.
    */
   function goBack() {
-    if (step === "party" && mode === "host" && partyRunning) {
+    if (mode === "host" && partyRunning) {
       setConfirmingLeave(true);
       return;
     }
@@ -108,7 +98,7 @@ function Shell() {
   }
 
   return (
-    <div className="relative flex h-full flex-col">
+    <div className="crt-scan crt-vignette relative flex h-full flex-col">
       <Header
         mode={mode}
         settingsOpen={showSettings}
@@ -116,8 +106,6 @@ function Shell() {
         onBack={goBack}
         onToggleSettings={() => setShowSettings((open) => !open)}
       />
-
-      {settings && !showSettings && <StepTrail current={step} />}
 
       {confirmingLeave && (
         <LeaveHostingPrompt
@@ -134,23 +122,13 @@ function Shell() {
 
       <main className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
         {!settings ? (
-          <p className="p-10 text-center text-sm text-ink-faint">
-            {t("common.loading")}
-          </p>
+          <div className="mx-auto max-w-sm px-8 py-16">
+            <Rewind label={t("common.loading")} />
+          </div>
         ) : showSettings ? (
           <SettingsScreen />
         ) : mode === null ? (
-          <ModeChooser onChoose={chooseMode} />
-        ) : !setupConfirmed ? (
-          <Preflight
-            mode={mode}
-            skipWhenReady={settings.skipSetupWhenReady}
-            skipAlreadyUsed={autoSkipSpent}
-            onSkipWhenReadyChange={(skipSetupWhenReady) =>
-              void patchSettings({ skipSetupWhenReady }).catch(reportFailure)
-            }
-            onReady={() => setSetupConfirmed(true)}
-          />
+          <LaunchScreen onChoose={chooseMode} />
         ) : mode === "host" ? (
           <HostScreen />
         ) : (
@@ -180,7 +158,7 @@ function LeaveHostingPrompt({
     <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-warn">
+          <p className="font-mono text-[11px] tracking-[0.16em] text-warn uppercase">
             {t("nav.leaveHosting.title")}
           </p>
           <p className="mt-0.5 text-xs text-ink-muted">
@@ -277,10 +255,11 @@ function FailureBanner() {
   const headline = knownKeys[failure.kind];
 
   return (
-    <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-3">
+    // An error is exactly the moment a tape would skip.
+    <div className="tracking-glitch shrink-0 border-b border-bad/40 bg-bad/10 px-5 py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-warn">
+          <p className="font-mono text-[11px] tracking-[0.16em] text-bad uppercase">
             {headline ? t(headline) : t("error.title")}
           </p>
           <p className="mt-0.5 text-xs break-words text-ink-muted">
@@ -320,7 +299,7 @@ function UpdateBanner() {
     <div className="shrink-0 border-b border-accent/40 bg-accent/10 px-5 py-3">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
-          <p className="text-sm font-medium text-accent">
+          <p className="font-mono text-[11px] tracking-[0.16em] text-accent uppercase">
             {t("update.title")} — v{state.version}
           </p>
           {hosting && (

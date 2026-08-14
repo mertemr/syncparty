@@ -12,7 +12,7 @@ import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightItem } from "@/shared/types/PreflightItem";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 
-import { getStripState, summariseReady, type StripState } from "./systemStrip";
+import { getStripState, summariseReady, type StripState } from "./stripState";
 
 /**
  * The setup check, as a strip under the launch slots rather than a screen.

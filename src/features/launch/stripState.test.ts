@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { PreflightItem } from "@/shared/types/PreflightItem";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 
-import { getStripState, summariseReady } from "./systemStrip";
+import { getStripState, summariseReady } from "./stripState";
 
 function item(overrides: Partial<PreflightItem> = {}): PreflightItem {
   return {

@@ -106,13 +106,18 @@ body::before {
     linear-gradient(165deg, oklch(0.16 0.03 290), var(--color-canvas) 60%);
 }
 
-button,
-input {
-  font: inherit;
-}
+/* In `@layer base` on purpose. Unlayered CSS outranks every Tailwind layer,
+   so an unlayered `font: inherit` here silently beat `font-mono` and every
+   other font utility applied to a button or an input. */
+@layer base {
+  button,
+  input {
+    font: inherit;
+  }
 
-button {
-  -webkit-tap-highlight-color: transparent;
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
 }
 
 /* Anything the user might genuinely want to copy opts back in. */

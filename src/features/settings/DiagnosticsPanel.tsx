@@ -53,7 +53,7 @@ export function DiagnosticsPanel() {
       </p>
 
       {report && (
-        <div className="mt-4 divide-y divide-line/60 rounded-xl border border-line/70 bg-canvas/35 px-4">
+        <div className="mt-4 divide-y divide-line/60 rounded-[var(--radius-control)] border border-line/70 bg-canvas/35 px-4">
           <HealthRow
             label={t("settings.diagnostics.endpoint")}
             good={report.endpoint != null}

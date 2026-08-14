@@ -103,16 +103,9 @@ export function SettingsScreen() {
         />
       </Card>
 
-      <Card title={t("settings.skipSetup")}>
-        <Toggle
-          checked={settings.skipSetupWhenReady}
-          label={t("settings.skipSetup")}
-          hint={t("settings.skipSetup.hint")}
-          onChange={(skipSetupWhenReady) =>
-            void patchSettings({ skipSetupWhenReady }).catch(reportFailure)
-          }
-        />
-      </Card>
+      {/* ponytail: `skipSetupWhenReady` no longer has a screen to skip — the
+          setup check lives in the launch strip now. The backend field stays
+          until settings change for some other reason. */}
 
       <DiagnosticsPanel />
 

@@ -7,7 +7,6 @@
  * key a type error rather than a blank label at runtime.
  */
 export const en = {
-  appName: "syncparty",
 
   "common.back": "Back",
   "common.cancel": "Cancel",
@@ -22,10 +21,6 @@ export const en = {
   "mode.host": "Host",
   "mode.guest": "Guest",
 
-  "nav.steps": "Setup progress",
-  "nav.step.mode": "Mode",
-  "nav.step.setup": "Setup",
-  "nav.step.party": "Movie night",
   "nav.leaveHosting.title": "Your movie night is still running",
   "nav.leaveHosting.detail":
     "Going back stops the server, and everyone watching will be disconnected.",
@@ -42,9 +37,6 @@ export const en = {
   "onboarding.guest.detail":
     "Paste the invite you were sent and you're in.",
 
-  "preflight.title": "Setup check",
-  "preflight.subtitle": "syncparty needs these installed.",
-  "preflight.checking": "Checking…",
   "preflight.installed": "Ready",
   "preflight.missing": "Not installed",
   "preflight.install": "Install",
@@ -54,10 +46,6 @@ export const en = {
   "preflight.elevation": "Asks for administrator permission",
   "preflight.noAutoInstall":
     "No automatic installer here — use the download link.",
-  "preflight.allReady": "Everything is ready.",
-  "preflight.recheck": "Check again",
-  "preflight.continue": "Continue",
-  "preflight.skipWhenReady": "Skip this screen when everything is ready",
   "preflight.locate": "Locate…",
   "preflight.locate.title": "Where is it?",
   "preflight.locate.hint":
@@ -106,9 +94,6 @@ export const en = {
   "host.room.disconnected": "Room panel is not connected.",
   "host.room.monitorOff":
     "The room panel is switched off. Turn it on in Settings to see who is watching.",
-  "host.room.ready": "Ready",
-  "host.room.notReady": "Not ready",
-  "host.room.noFile": "No file open",
   "host.room.mismatch": "People have different files open",
   "host.room.mismatchDetail":
     "Playback will not stay in sync until everyone opens the same file.",
@@ -153,9 +138,6 @@ export const en = {
   "settings.port": "Port",
   "settings.language": "Language",
   "settings.mode": "Mode",
-  "settings.skipSetup": "Setup screen",
-  "settings.skipSetup.hint":
-    "Skip it when every dependency is present. syncparty still checks on every launch, and still stops here if something is missing.",
   "settings.monitor": "Room panel",
   "settings.monitor.hint":
     "Attaches a hidden Syncplay client so the host can see who is watching what. It appears in everyone's user list as “syncparty-panel”.",
@@ -219,7 +201,6 @@ export type MessageKey = keyof typeof en;
 export type Messages = Record<MessageKey, string>;
 
 export const tr: Messages = {
-  appName: "syncparty",
 
   "common.back": "Geri",
   "common.cancel": "Vazgeç",
@@ -234,10 +215,6 @@ export const tr: Messages = {
   "mode.host": "Sunucu",
   "mode.guest": "Misafir",
 
-  "nav.steps": "Kurulum ilerlemesi",
-  "nav.step.mode": "Mod",
-  "nav.step.setup": "Kurulum",
-  "nav.step.party": "Film gecesi",
   "nav.leaveHosting.title": "Film gecen hâlâ sürüyor",
   "nav.leaveHosting.detail":
     "Geri dönersen sunucu durur ve izleyen herkesin bağlantısı kopar.",
@@ -253,9 +230,6 @@ export const tr: Messages = {
   "onboarding.guest.title": "Katılıyorum",
   "onboarding.guest.detail": "Sana gönderilen daveti yapıştır, hazırsın.",
 
-  "preflight.title": "Kurulum kontrolü",
-  "preflight.subtitle": "syncparty'nin bunlara ihtiyacı var.",
-  "preflight.checking": "Kontrol ediliyor…",
   "preflight.installed": "Hazır",
   "preflight.missing": "Kurulu değil",
   "preflight.install": "Kur",
@@ -265,10 +239,6 @@ export const tr: Messages = {
   "preflight.elevation": "Yönetici izni ister",
   "preflight.noAutoInstall":
     "Burada otomatik kurulum yok — indirme bağlantısını kullan.",
-  "preflight.allReady": "Her şey hazır.",
-  "preflight.recheck": "Tekrar kontrol et",
-  "preflight.continue": "Devam",
-  "preflight.skipWhenReady": "Her şey hazırsa bu ekranı gösterme",
   "preflight.locate": "Konumunu göster…",
   "preflight.locate.title": "Nerede?",
   "preflight.locate.hint":
@@ -317,9 +287,6 @@ export const tr: Messages = {
   "host.room.disconnected": "Oda paneli bağlı değil.",
   "host.room.monitorOff":
     "Oda paneli kapalı. Kimin ne izlediğini görmek için Ayarlar'dan aç.",
-  "host.room.ready": "Hazır",
-  "host.room.notReady": "Hazır değil",
-  "host.room.noFile": "Dosya açılmadı",
   "host.room.mismatch": "Farklı dosyalar açık",
   "host.room.mismatchDetail":
     "Herkes aynı dosyayı açmadan oynatma senkron kalmaz.",
@@ -363,9 +330,6 @@ export const tr: Messages = {
   "settings.port": "Port",
   "settings.language": "Dil",
   "settings.mode": "Mod",
-  "settings.skipSetup": "Kurulum ekranı",
-  "settings.skipSetup.hint":
-    "Bütün gereksinimler yerindeyse atlanır. syncparty her açılışta yine kontrol eder ve bir şey eksikse bu ekranda yine durur.",
   "settings.monitor": "Oda paneli",
   "settings.monitor.hint":
     "Kimin ne izlediğini görebilmek için gizli bir Syncplay istemcisi bağlar. Herkesin kullanıcı listesinde “syncparty-panel” olarak görünür.",

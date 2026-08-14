@@ -1,4 +1,10 @@
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  type ReactNode,
+} from "react";
 
 import { dictionaries, en, type MessageKey } from "./messages";
 
@@ -23,6 +29,17 @@ export function TranslationProvider({
     const dictionary = dictionaries[base] ?? en;
 
     return (key) => dictionary[key] ?? en[key] ?? key;
+  }, [language]);
+
+  /**
+   * Keeps `<html lang>` in step with the chosen language.
+   *
+   * Not cosmetic: CSS `text-transform: uppercase` is locale-sensitive, and
+   * this app now sets a lot of labels in uppercase. Under `lang="en"` Turkish
+   * "birlikte" uppercases to "BIRLIKTE" instead of "BİRLİKTE".
+   */
+  useEffect(() => {
+    document.documentElement.lang = language.split(/[-_]/)[0];
   }, [language]);
 
   return (

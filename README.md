@@ -32,18 +32,30 @@ address to copy, nothing exposed to the public internet.
 ## Install
 
 Grab the latest build from [Releases](https://github.com/Tahckn/syncparty/releases).
-That's the only manual install — from v0.2.0 on, syncparty checks for updates
-on startup and offers to install new ones in place.
 
-The installers themselves are unsigned, so Windows SmartScreen and macOS
-Gatekeeper will both warn on first run. Updates are still verified: they are
-cryptographically signed and checked against a key built into the app before
-anything is installed, so this warning is a one-time thing rather than
-something you see on every update.
+**Windows** — the `.exe` setup file (or the `.msi`).
+**macOS** — `aarch64.dmg` for Apple silicon, `x64.dmg` for Intel.
+**Debian / Ubuntu** — `sudo apt install ./syncparty_*.deb`.
+**Arch** — `syncparty-bin` from the AUR.
+**Anything else** — [`docs/building.md`](docs/building.md).
 
-Everything else — the Syncplay client, mpv, and the Python environment the
-server needs — is detected on first launch and installed for you if it is
-missing.
+The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will
+both warn on first run. Updates are still verified: they are cryptographically
+signed and checked against a key built into the app before anything is
+installed, so this warning is a one-time thing rather than something you see on
+every update.
+
+Everything else — the Syncplay client, mpv, and the Python the server runs on —
+is handled for you, though by different means depending on the platform.
+Windows and macOS detect what is missing on first launch and install it through
+winget or Homebrew. The Linux packages declare the same things as dependencies,
+so your package manager has already put them in place before the app opens.
+
+Updates work the same way. On Windows and macOS syncparty downloads them in the
+background and offers to restart. On Linux it tells you a new version exists
+and stops there: every Linux build is owned by a package manager, and
+installing behind apt's or pacman's back is how a package database ends up
+holding a version it did not put there.
 
 ## How it works
 
@@ -111,8 +123,13 @@ A few decisions worth knowing about:
   be switched off in Settings at the cost of the detail it provides.
 - **Secrets never touch the command line.** The server password and salt reach
   Syncplay through `SYNCPLAY_PASSWORD` and `SYNCPLAY_SALT`, so they stay out of
-  the process table. They are stored in Windows Credential Manager or the macOS
-  Keychain.
+  the process table. They are stored in Windows Credential Manager, the macOS
+  Keychain, or the Secret Service on Linux. Linux is the one platform where
+  that store may be absent — Secret Service is a daemon, and a minimal window
+  manager may run none — so the packages list a provider as a recommendation
+  and the app falls back to a `0600` file under `~/.local/share/syncparty/`
+  rather than refusing to host. `Settings → Diagnostics` reports which store is
+  in use.
 - **The salt is generated once and kept.** Syncplay derives room operator
   passwords from it; a new salt on every start would silently invalidate them.
 - **The invite is the only thing guarding a party.** There is no network
@@ -125,11 +142,20 @@ A few decisions worth knowing about:
   silently — there is no reason to make that wait for anyone. Installing
   replaces the running binary and restarts the app, though, which would take
   the Syncplay server down mid-film, so that step is always an explicit
-  button, and it stays hidden for as long as a party is running.
+  button, and it stays hidden for as long as a party is running. On Linux it
+  does not download at all: the package manager owns the install there, so the
+  app reports the new version and leaves it alone.
+- **The Linux packages carry their own Syncplay server.** No distribution
+  ships one syncparty can use. It binds the server to loopback with
+  `--ipv4-only` and `--interface-ipv4`, both added in Syncplay 1.7.1, and the
+  newest package in any Ubuntu LTS is 1.7.0 — without them the server would
+  listen on every interface. The pinned source is verified against a SHA-256
+  recorded in the code and installed to `/usr/lib/syncparty/`; only Twisted
+  comes from the distribution.
 
 ## Building from source
 
-Requires [Rust](https://rustup.rs), Node 20+, pnpm, and the
+Requires [Rust](https://rustup.rs), Node 22+, pnpm, and the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform.
 
 ```bash
@@ -146,6 +172,9 @@ cd src-tauri && cargo test
 TypeScript types under `src/shared/types` are generated from the Rust types by
 `ts-rs` when the tests run — do not edit them by hand.
 
+[`docs/building.md`](docs/building.md) covers Linux in full: the per-distribution
+package lists, and the `scripts/fetch-syncplay.mjs` step a packaged build needs.
+
 ## Layout
 
 ```
@@ -160,6 +189,9 @@ src-tauri/
     syncplay/            protocol, server process, room monitor, launcher
     invite/              invite codes and deep links
     session/             the host/guest state machine
+    update.rs            whether this build may update itself
+  packaging/             the .deb maintainer scripts
+scripts/                 version bump, Syncplay vendoring, AUR rendering
 ```
 
 `core` never imports from `ipc`, which is what lets the whole of it run under

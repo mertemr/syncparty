@@ -14,6 +14,7 @@ use crate::core::error::{Result, SyncPartyError};
 use crate::core::invite::Invite;
 use crate::core::notify;
 use crate::core::session::{HostingInfo, SessionState};
+use crate::core::update::UpdatePolicy;
 use crate::ipc::AppState;
 
 /// A partial settings update. Absent fields are left alone, so the UI can send
@@ -47,6 +48,12 @@ pub struct SettingsPatch {
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> AppSettings {
     state.settings.get()
+}
+
+/// Tells the frontend how far it may take an available update.
+#[tauri::command]
+pub fn update_policy() -> UpdatePolicy {
+    UpdatePolicy::current()
 }
 
 #[tauri::command]

@@ -28,6 +28,7 @@ import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
 import type { StartupStep } from "@/shared/types/StartupStep";
+import type { UpdatePolicy } from "@/shared/types/UpdatePolicy";
 
 const scenario = new URLSearchParams(globalThis.location?.search ?? "").get(
   "dev",
@@ -202,6 +203,11 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
     settings = { ...settings, ...(patch as SettingsPatch) };
     return settings;
   },
+
+  // The dev backend stands in for a desktop install, so it claims the
+  // self-installing behaviour. The updater plugin is unreachable in a browser
+  // anyway, so this never gets as far as a download.
+  update_policy: (): UpdatePolicy => ({ checks: true, selfInstalls: true }),
 
   run_preflight: () => {
     const report = preflight();

@@ -14,6 +14,12 @@ use crate::core::session::{PartySession, SessionState};
 pub struct DiagnosticsReport {
     pub app_version: String,
     pub operating_system: String,
+    /// Where secrets actually ended up — `"keychain"` or `"file"`.
+    ///
+    /// Worth surfacing because the fallback is silent by design: the app keeps
+    /// working without a keyring daemon, so without this line there would be
+    /// no way to tell which store a machine is using.
+    pub secret_storage: String,
     pub dependencies: PreflightReport,
     /// This machine's address on the syncparty network.
     ///
@@ -53,6 +59,7 @@ pub async fn collect(
     DiagnosticsReport {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
         operating_system: std::env::consts::OS.to_owned(),
+        secret_storage: secrets.backend().as_str().to_owned(),
         dependencies,
         endpoint: net::stored_endpoint_id(secrets).map(|id| id.to_string()),
         session: state,

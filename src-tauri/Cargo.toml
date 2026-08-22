@@ -44,7 +44,17 @@ futures = "0.3"
 thiserror = "2"
 # Pinned to 3.x: keyring 4 moved to a different backend API, and 3.x is the
 # line with the stable Entry interface used in core::config::secrets.
-keyring = { version = "3", features = ["apple-native", "windows-native"] }
+#
+# `sync-secret-service` is what makes Linux work at all. Without a backend
+# feature matching the target, keyring silently falls back to an in-memory
+# mock store: it compiles, it never errors, and nothing survives a restart —
+# which on Linux meant the server salt was regenerated on every launch and
+# every room operator password quietly stopped working.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
 base64 = "0.23"
 md-5 = "0.10"
 # rustls rather than the platform TLS stack, so the same certificate

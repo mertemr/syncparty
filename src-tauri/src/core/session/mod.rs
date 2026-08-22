@@ -460,12 +460,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
 
-        let settings = Arc::new(ConfigStore::load(AppPaths::rooted_at(dir)).expect("settings"));
+        let paths = AppPaths::rooted_at(dir);
+        let settings = Arc::new(ConfigStore::load(paths.clone()).expect("settings"));
         settings
             .update(|s| s.mode = Some(AppMode::Host))
             .expect("update");
 
-        let secrets = Arc::new(SecretStore::new());
+        let secrets = Arc::new(SecretStore::new(paths));
         let bus = Arc::new(RecordingEventBus::default());
 
         let session = PartySession::new(

@@ -256,6 +256,7 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
   run_diagnostics: (): DiagnosticsReport => ({
     appVersion: "0.5.3-dev",
     operatingSystem: "Windows 11 (dev backend)",
+    secretStorage: "keychain",
     dependencies: preflight(),
     endpoint: ENDPOINT,
     session,

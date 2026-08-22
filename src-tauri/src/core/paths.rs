@@ -38,6 +38,11 @@ impl AppPaths {
         self.data_dir.join("settings.json")
     }
 
+    /// Fallback secret store, used only when no OS keychain answers.
+    pub fn secrets_file(&self) -> PathBuf {
+        self.data_dir.join("secrets.json")
+    }
+
     /// Root of the managed Python environment and Syncplay checkout.
     pub fn server_runtime_dir(&self) -> PathBuf {
         self.data_dir.join("server-runtime")
@@ -106,6 +111,7 @@ mod tests {
         let paths = AppPaths::rooted_at("/tmp/syncparty-test");
 
         assert!(paths.settings_file().starts_with("/tmp/syncparty-test"));
+        assert!(paths.secrets_file().starts_with("/tmp/syncparty-test"));
         assert!(paths.server_entrypoint().ends_with("syncplayServer.py"));
         assert!(paths.server_python().starts_with(paths.server_venv_dir()));
     }

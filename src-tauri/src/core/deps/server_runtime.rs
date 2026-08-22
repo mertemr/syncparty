@@ -25,8 +25,25 @@ const MANUAL_URL: &str = "https://github.com/Syncplay/syncplay/releases";
 /// mid-evening. Bump deliberately, after testing.
 const SYNCPLAY_VERSION: &str = "1.7.5";
 
+/// SHA-256 of the pinned source archive.
+///
+/// TLS proves GitHub served the bytes; it does not prove they are the bytes
+/// this release was tested against. Bump it together with `SYNCPLAY_VERSION`
+/// — `curl -sL <url> | sha256sum` produces it.
+///
+/// The known failure mode: GitHub generates tag archives on demand, so a
+/// change to their compression would change this digest without upstream
+/// republishing anything. That is rare and loud, and the alternative — not
+/// checking at all — means unpacking whatever arrives.
+const SYNCPLAY_SHA256: &str = "6aef1e8351bccb97e6833fcae04c80f9d01b290b627f70df3e3870555c40deaa";
+
+
 /// Python the virtual environment is built against. `uv` downloads it if the
 /// machine has none, which is why the user never has to install Python.
+///
+/// Not used on Linux, which runs the server on the system interpreter — see
+/// [`crate::core::paths::AppPaths::server_python`].
+#[cfg(not(target_os = "linux"))]
 const PYTHON_VERSION: &str = "3.12";
 
 pub struct ServerRuntimeDependency {
@@ -56,6 +73,10 @@ impl ServerRuntimeDependency {
     ///
     /// Homebrew ships `uv` as a formula rather than a cask, so on macOS the
     /// shared cask installer does not apply and `brew install uv` runs here.
+    ///
+    /// Absent on Linux: `uv` is packaged by neither Debian nor Ubuntu, so
+    /// there is nothing to install it with and nothing that needs it.
+    #[cfg(not(target_os = "linux"))]
     async fn ensure_uv(&self, progress: &dyn ProgressSink) -> Result<std::path::PathBuf> {
         if let Ok(found) = which::which("uv") {
             return Ok(found);
@@ -106,6 +127,9 @@ impl ServerRuntimeDependency {
             .bytes()
             .await?;
 
+        progress.report("verifying", None, None);
+        verify_digest(&archive)?;
+
         progress.report("extracting", None, None);
 
         let runtime_dir = self.paths.server_runtime_dir();
@@ -118,7 +142,7 @@ impl ServerRuntimeDependency {
 
         // The archive wraps everything in a `syncplay-<version>/` directory.
         let unpacked = single_child_directory(&staging)?;
-        let destination = self.paths.syncplay_source_dir();
+        let destination = self.paths.managed_source_dir();
         let _ = std::fs::remove_dir_all(&destination);
         std::fs::rename(&unpacked, &destination)?;
         let _ = std::fs::remove_dir_all(&staging);
@@ -127,6 +151,7 @@ impl ServerRuntimeDependency {
     }
 
     /// Creates the virtual environment and installs the server's dependencies.
+    #[cfg(not(target_os = "linux"))]
     async fn build_environment(&self, uv: &Path, progress: &dyn ProgressSink) -> Result<()> {
         progress.report(
             "creating environment",
@@ -150,7 +175,7 @@ impl ServerRuntimeDependency {
 
         progress.report("installing dependencies", None, None);
 
-        let requirements = self.paths.syncplay_source_dir().join("requirements.txt");
+        let requirements = self.paths.managed_source_dir().join("requirements.txt");
         process::capture(
             uv,
             [
@@ -191,6 +216,15 @@ impl Dependency for ServerRuntimeDependency {
             return DependencyStatus::Missing;
         }
 
+        // The managed virtual environment is built with the server's own
+        // requirements, so on Windows and macOS an interpreter that exists is
+        // an interpreter that works. Linux borrows the system Python and takes
+        // Twisted from the distribution, so it has to be asked.
+        #[cfg(target_os = "linux")]
+        if !twisted_is_importable(&python).await {
+            return DependencyStatus::Missing;
+        }
+
         DependencyStatus::Installed {
             version: Some(SYNCPLAY_VERSION.to_owned()),
             path: Some(
@@ -209,9 +243,37 @@ impl Dependency for ServerRuntimeDependency {
     ) -> Result<()> {
         std::fs::create_dir_all(self.paths.server_runtime_dir())?;
 
-        let uv = self.ensure_uv(progress).await?;
-        self.fetch_source(progress).await?;
-        self.build_environment(&uv, progress).await?;
+        // Linux never builds an environment. The packages install the pinned
+        // server source and take Twisted from the distribution, so the only
+        // thing that can be missing here is the source itself — which happens
+        // in a source build, where there is no packaged copy to find.
+        #[cfg(target_os = "linux")]
+        {
+            if !self.paths.server_entrypoint().is_file() {
+                self.fetch_source(progress).await?;
+            }
+
+            let python = self.paths.server_python();
+            if !twisted_is_importable(&python).await {
+                return Err(SyncPartyError::InstallFailed {
+                    name: DISPLAY_NAME.to_owned(),
+                    reason: format!(
+                        "Python is present at {} but Twisted is not installed for it. \
+                         Install your distribution's Twisted package \
+                         (python3-twisted on Debian and Ubuntu, python-twisted on Arch, \
+                         python3-twisted on Fedora).",
+                        python.display()
+                    ),
+                });
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let uv = self.ensure_uv(progress).await?;
+            self.fetch_source(progress).await?;
+            self.build_environment(&uv, progress).await?;
+        }
 
         progress.report("verifying", None, None);
         if self.detect().await.is_installed() {
@@ -233,9 +295,49 @@ impl Dependency for ServerRuntimeDependency {
         false
     }
 
+    /// Linux needs no `uv` and no virtual environment, so this is always
+    /// true there — the worst case is downloading the pinned source, which
+    /// needs nothing but the network.
     async fn can_auto_install(&self) -> bool {
+        if cfg!(target_os = "linux") {
+            return true;
+        }
+
         which::which("uv").is_ok() || self.uv_installer.is_supported() || cfg!(target_os = "macos")
     }
+}
+
+/// Confirms the interpreter can actually import the server's one hard
+/// dependency.
+///
+/// Only Twisted is checked because only Twisted is required: the server's
+/// other listed requirements, `certifi` and `pem`, are imported by
+/// `syncplay/client.py` and never on the server path.
+#[cfg(target_os = "linux")]
+async fn twisted_is_importable(python: &Path) -> bool {
+    process::capture(python, ["-c", "import twisted"])
+        .await
+        .is_ok()
+}
+
+/// Rejects an archive whose contents are not what this release pinned.
+fn verify_digest(archive: &[u8]) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let actual = format!("{:x}", Sha256::digest(archive));
+
+    if actual != SYNCPLAY_SHA256 {
+        return Err(SyncPartyError::InstallFailed {
+            name: DISPLAY_NAME.to_owned(),
+            reason: format!(
+                "the downloaded Syncplay {SYNCPLAY_VERSION} archive did not match its \
+                 expected checksum (wanted {SYNCPLAY_SHA256}, got {actual}) — refusing \
+                 to unpack it"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Returns the single directory inside `parent`, which is how a GitHub source
@@ -273,6 +375,24 @@ mod tests {
 
         assert!(url.starts_with("https://github.com/Syncplay/syncplay/"));
         assert!(url.ends_with(&format!("v{SYNCPLAY_VERSION}.tar.gz")));
+    }
+
+    #[test]
+    fn an_archive_that_does_not_match_the_pin_is_refused() {
+        let error = verify_digest(b"not the syncplay release").expect_err("should reject");
+
+        assert!(error.to_string().contains("checksum"));
+    }
+
+    /// Guards the pin itself: a `SYNCPLAY_VERSION` bump without a matching
+    /// `SYNCPLAY_SHA256` bump would otherwise only fail at install time, on a
+    /// user's machine.
+    #[test]
+    fn the_pinned_digest_is_a_sha256() {
+        assert_eq!(SYNCPLAY_SHA256.len(), 64);
+        assert!(SYNCPLAY_SHA256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
     }
 
     #[test]

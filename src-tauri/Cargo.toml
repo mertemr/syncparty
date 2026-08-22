@@ -57,6 +57,10 @@ keyring = { version = "3", features = [
 ] }
 base64 = "0.23"
 md-5 = "0.10"
+# Verifies the pinned Syncplay source archive after download. The tarball is
+# fetched over TLS from GitHub, but TLS only proves who served the bytes, not
+# that they are the bytes this release was tested against.
+sha2 = "0.10"
 # rustls rather than the platform TLS stack, so the same certificate
 # behaviour ships on Windows and macOS.
 reqwest = { version = "0.13", default-features = false, features = [

@@ -9,6 +9,7 @@ describe("safeToShare", () => {
     const report: DiagnosticsReport = {
       appVersion: "0.2.1",
       operatingSystem: "windows",
+      secretStorage: "keychain",
       dependencies: {
         mode: "host",
         items: [
@@ -73,6 +74,7 @@ describe("safeToShare", () => {
     const report = {
       appVersion: "0.2.1",
       operatingSystem: "windows",
+      secretStorage: "file",
       dependencies: { mode: "guest", items: [] },
       endpoint: null,
       session: { phase: "failed", message: "secret detail" },

@@ -61,6 +61,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::update_settings,
+            commands::update_policy,
             commands::run_preflight,
             commands::run_diagnostics,
             commands::install_dependency,

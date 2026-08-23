@@ -62,8 +62,37 @@ jobs:
           - label: macOS (Intel)
             os: macos-latest
             target: x86_64-apple-darwin
+          # Built inside 22.04 rather than on the 22.04 runner: that image
+          # begins deprecation on 2026-09-17, while a container image has no
+          # runner lifecycle at all. The glibc floor is what matters here —
+          # linking against 24.04's would lock out Ubuntu 22.04 and Debian 12,
+          # and 22.04 is the oldest release still carrying WebKitGTK 4.1.
+          #
+          # Only `deb` is bundled. `rpm` and `appimage` build from the same
+          # job, but publishing an artifact nobody has installed and launched
+          # is a support promise this release does not make yet.
+          - label: Linux (.deb)
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            container: ubuntu:22.04
+            bundles: deb
+
+    container: ${{ matrix.container }}
 
     steps:
+      # The container is bare: no git, no curl, and none of the WebKitGTK
+      # stack Tauri links against. `libwebkit2gtk-4.1-dev` lives in universe
+      # on 22.04, which is enabled by default on this image.
+      - name: Install Linux build dependencies
+        if: matrix.container
+        run: |
+          apt-get update
+          apt-get install --no-install-recommends -y \
+            build-essential ca-certificates curl file git \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libssl-dev libxdo-dev \
+            patchelf pkg-config wget xz-utils
+
       - *checkout
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -82,6 +111,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # No distribution packages a Syncplay server new enough to bind loopback
+      # (that needs 1.7.1; Ubuntu's newest is 1.7.0), so the .deb carries the
+      # pinned one. Verified against the same SHA-256 the app checks at
+      # runtime, so a mismatch fails the build instead of shipping.
+      - name: Vendor the pinned Syncplay server
+        if: matrix.bundles
+        run: node scripts/fetch-syncplay.mjs
+
       # TAURI_SIGNING_PRIVATE_KEY signs the *update package*, not the
       # installers — those stay unsigned. Losing it breaks auto-update only:
       # generate a new one and swap its public half into tauri.conf.json.
@@ -91,7 +128,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          args: --target ${{ matrix.target }}
+          args: >-
+            --target ${{ matrix.target }}
+            ${{ matrix.bundles && format('--bundles {0}', matrix.bundles) || '' }}
           tagName: ${{ github.ref_name }}
           releaseName: syncparty ${{ github.ref_name }}
           # Stays hidden until the publish job below flips it, so a half
@@ -103,19 +142,29 @@ jobs:
 
             **Windows** — the `.exe` setup file below (or the `.msi`)
             **macOS** — `aarch64.dmg` for Apple silicon, `x64.dmg` for Intel
+            **Debian / Ubuntu** — the `.deb` below: `sudo apt install ./syncparty_*.deb`
+            **Arch** — `syncparty-bin` from the AUR
+            **Anything else** — build from source, see `docs/building.md`
 
-            Everything syncparty needs — the Syncplay client, mpv, and the
-            Python environment for hosting — is checked on first launch and
-            installed for you if it is missing.
+            On Windows and macOS everything syncparty needs — the Syncplay
+            client, mpv, and the Python environment for hosting — is checked on
+            first launch and installed for you if it is missing. The Linux
+            packages declare the same things as dependencies instead, so your
+            package manager has already installed them by the time the app
+            opens.
 
-            From this release on, syncparty checks for updates on startup and
-            offers to install them in place — no need to come back here again.
+            syncparty checks for updates on startup. On Windows and macOS it
+            offers to install them in place. On Linux it tells you a new
+            version exists and leaves the installing to your package manager,
+            which is the only thing that can do it without fighting apt or
+            pacman.
 
             ## Before you open it
 
             These builds are unsigned. Windows SmartScreen will say "unknown
             publisher": choose **More info → Run anyway**. macOS Gatekeeper
-            will refuse the first launch: **right-click the app → Open**.
+            will refuse the first launch: **right-click the app → Open**. The
+            Linux packages are unsigned too, which apt will mention.
 
   publish:
     name: Publish complete release
@@ -133,3 +182,65 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  # Runs after `publish`, not alongside it: the PKGBUILD points at a release
+  # asset URL, and pushing it while the release is still a draft would publish
+  # a package whose `source` 404s for anyone who installs it in that window.
+  #
+  # Skipped silently when AUR_SSH_PRIVATE_KEY is absent, so a fork or a
+  # repository that has not set the AUR up does not fail its release over it.
+  aur:
+    name: Publish to the AUR
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - *checkout
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Render and push syncparty-bin
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "AUR_SSH_PRIVATE_KEY is not set — skipping the AUR push."
+            exit 0
+          fi
+
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+
+          # The checksum has to come from the asset people will actually
+          # download, so it is fetched back rather than taken from the build.
+          gh release download "$TAG" --pattern '*.deb' --dir dist-deb
+          deb=$(find dist-deb -name '*.deb' -print -quit)
+
+          node scripts/aur-package.mjs --deb "$deb" --out packaging/aur/out
+
+          git clone "ssh://aur@aur.archlinux.org/syncparty-bin.git" aur-repo
+          cp packaging/aur/out/PKGBUILD packaging/aur/out/.SRCINFO aur-repo/
+
+          cd aur-repo
+          git config user.name "syncparty release"
+          git config user.email "48881002+mertemr@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "The AUR package is already current."
+            exit 0
+          fi
+
+          git add PKGBUILD .SRCINFO
+          git commit -m "syncparty-bin ${TAG#v}"
+          git push

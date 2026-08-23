@@ -3,7 +3,15 @@ import type { PreflightReport } from "./PreflightReport";
 import type { SessionState } from "./SessionState";
 import type { TransportReport } from "./TransportReport";
 
-export type DiagnosticsReport = { appVersion: string, operatingSystem: string, dependencies: PreflightReport, 
+export type DiagnosticsReport = { appVersion: string, operatingSystem: string, 
+/**
+ * Where secrets actually ended up — `"keychain"` or `"file"`.
+ *
+ * Worth surfacing because the fallback is silent by design: the app keeps
+ * working without a keyring daemon, so without this line there would be
+ * no way to tell which store a machine is using.
+ */
+secretStorage: string, dependencies: PreflightReport, 
 /**
  * This machine's address on the syncparty network.
  *

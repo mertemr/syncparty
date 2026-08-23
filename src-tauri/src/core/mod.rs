@@ -17,3 +17,4 @@ pub mod paths;
 pub mod process;
 pub mod session;
 pub mod syncplay;
+pub mod update;

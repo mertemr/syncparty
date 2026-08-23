@@ -20,6 +20,7 @@ import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
+import type { UpdatePolicy } from "@/shared/types/UpdatePolicy";
 
 /** Must match `ipc::EVENT_CHANNEL`. */
 const EVENT_CHANNEL = "syncparty://event";
@@ -70,6 +71,9 @@ export const ipc = {
 
   updateSettings: (patch: SettingsPatch) =>
     invoke<AppSettings>("update_settings", { patch }),
+
+  /** How far this build may take an available update. */
+  updatePolicy: () => invoke<UpdatePolicy>("update_policy"),
 
   runPreflight: (mode: AppMode) =>
     invoke<PreflightReport>("run_preflight", { mode }),

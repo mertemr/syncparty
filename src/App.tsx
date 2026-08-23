@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
 import { GuestScreen } from "@/features/guest/GuestScreen";
@@ -14,6 +15,9 @@ import { useAppUpdate } from "@/shared/hooks/useAppUpdate";
 import { ipc } from "@/shared/ipc";
 import { Badge, Button, Rewind, Wordmark } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
+
+/** Where a package-managed install is pointed for release notes. */
+const RELEASES_URL = "https://github.com/Tahckn/syncparty/releases/latest";
 
 export default function App() {
   return (
@@ -291,6 +295,10 @@ function UpdateBanner() {
   const { session } = useAppState();
   const { state, install } = useAppUpdate();
 
+  if (state.status === "packageManaged") {
+    return <PackageManagedBanner version={state.version} />;
+  }
+
   if (state.status !== "ready") return null;
 
   const hosting = session.phase === "hosting";
@@ -314,6 +322,36 @@ function UpdateBanner() {
             {t("update.restart")}
           </Button>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Linux banner: says a version exists and stops there.
+ *
+ * No package-manager command is printed. Working out which one this machine
+ * uses means reading `/etc/os-release` and guessing, and a wrong command is
+ * worse than no command — the release page is correct everywhere.
+ */
+function PackageManagedBanner({ version }: { version: string }) {
+  const t = useTranslate();
+
+  return (
+    <div className="shrink-0 border-b border-accent/40 bg-accent/10 px-5 py-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="font-mono text-[11px] tracking-[0.16em] text-accent uppercase">
+            {t("update.available")} — v{version}
+          </p>
+          <p className="mt-0.5 text-xs text-ink-muted">
+            {t("update.packageManaged")}
+          </p>
+        </div>
+
+        <Button onClick={() => void openUrl(RELEASES_URL)}>
+          {t("update.releaseNotes")}
+        </Button>
       </div>
     </div>
   );

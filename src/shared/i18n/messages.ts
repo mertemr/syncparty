@@ -195,6 +195,9 @@ export const en = {
   "update.title": "Update ready",
   "update.restart": "Restart & update",
   "update.hostingNotice": "Will offer to restart once this party ends.",
+  "update.available": "Update available",
+  "update.packageManaged": "Update through your package manager.",
+  "update.releaseNotes": "Release notes",
 } as const;
 
 export type MessageKey = keyof typeof en;
@@ -387,6 +390,9 @@ export const tr: Messages = {
   "update.title": "Güncelleme hazır",
   "update.restart": "Yeniden başlat ve güncelle",
   "update.hostingNotice": "Bu film gecesi bitince yeniden başlatma seçeneği sunulacak.",
+  "update.available": "Yeni sürüm var",
+  "update.packageManaged": "Paket yöneticinizden güncelleyin.",
+  "update.releaseNotes": "Sürüm notları",
 };
 
 export const dictionaries: Record<string, Messages> = { en, tr };

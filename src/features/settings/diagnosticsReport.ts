@@ -5,6 +5,10 @@ export function safeToShare(report: DiagnosticsReport) {
   return {
     appVersion: report.appVersion,
     operatingSystem: report.operatingSystem,
+    // Names the store, never its contents. "file" is the single most useful
+    // line when a Linux host reports that room operator passwords keep
+    // breaking, because it says the keyring daemon is missing.
+    secretStorage: report.secretStorage,
     mode: report.dependencies.mode,
     dependencies: report.dependencies.items.map((item) => ({
       id: item.id,

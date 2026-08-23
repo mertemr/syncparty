@@ -65,7 +65,7 @@ impl AppState {
         let bus: Arc<dyn EventBus> = Arc::new(TauriEventBus::new(app.clone()));
 
         let settings = Arc::new(ConfigStore::load(paths.clone())?);
-        let secrets = Arc::new(SecretStore::new());
+        let secrets = Arc::new(SecretStore::new(paths.clone()));
         let discord = Arc::new(DiscordNotifier::new(Arc::clone(&secrets)));
 
         let server = Arc::new(UvManagedServer::new(paths.clone(), Arc::clone(&bus)));

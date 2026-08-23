@@ -1,8 +1,21 @@
 //! Starting and stopping the Syncplay server process.
 
+// Built bottom-up: nothing in production calls into these until Task 8 swaps
+// `UvManagedServer` for `NativeServer` in `lib.rs`. Until then every item in
+// them is dead code to the compiler, and under `-D warnings` that is two dozen
+// errors for a real lint regression to hide behind.
+//
+// `expect` would be the better tool, since an unfulfilled expectation removes
+// itself, but it is evaluated per target: the tests already use every item in
+// `auth` and `ignore`, so it fires there while still being needed for the
+// library. Task 8 Step 1 carries the instruction to delete these instead.
+#[allow(dead_code)]
 mod auth;
+#[allow(dead_code)]
 mod ignore;
+#[allow(dead_code)]
 mod registry;
+#[allow(dead_code)]
 mod room;
 
 use std::fs::OpenOptions;

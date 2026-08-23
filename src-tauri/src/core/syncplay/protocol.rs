@@ -20,7 +20,7 @@ const REAL_VERSION: &str = "1.7.5";
 /// Clients truncate against these, so they are part of the wire contract
 /// rather than our own policy.
 const MAX_CHAT_MESSAGE_LENGTH: usize = 150;
-const MAX_USERNAME_LENGTH: usize = 16;
+pub const MAX_USERNAME_LENGTH: usize = 16;
 const MAX_ROOM_NAME_LENGTH: usize = 35;
 const MAX_FILENAME_LENGTH: usize = 250;
 

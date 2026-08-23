@@ -6,9 +6,11 @@
 //! started with isolation on today, and this makes that the only shape it has.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
+use crate::core::syncplay::protocol::MAX_USERNAME_LENGTH;
 use crate::core::syncplay::server::room::{Room, User};
 
 #[derive(Default)]
@@ -20,6 +22,47 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// The registry as every connection sees it: one, shared, behind a lock.
+    pub fn shared() -> Arc<RwLock<Self>> {
+        Arc::new(RwLock::new(Self::default()))
+    }
+
+    /// The name `wanted` may actually be given, which is not always the one
+    /// asked for.
+    ///
+    /// Without this a second `ahmet` would not collide, they would *replace*
+    /// the first: [`Registry::join`] is keyed by name and detaches whoever
+    /// holds it. Upstream does this in `addWatcher`, and the shape of the
+    /// result is theirs too — trailing underscores, compared case-insensitively
+    /// across every room rather than just this one.
+    pub fn free_username(&self, wanted: &str) -> String {
+        let taken = |candidate: &str| {
+            let candidate = candidate.to_lowercase();
+            self.where_is
+                .keys()
+                .any(|held| held.to_lowercase() == candidate)
+        };
+
+        let mut name: String = wanted.chars().take(MAX_USERNAME_LENGTH).collect();
+
+        // Trim before growing, or a room of retries ends up wearing ever
+        // longer tails.
+        if taken(&name) && name.ends_with('_') {
+            let trimmed = name.trim_end_matches('_');
+            name = if trimmed.is_empty() {
+                "_".to_owned()
+            } else {
+                trimmed.to_owned()
+            };
+        }
+
+        while taken(&name) {
+            name.push('_');
+        }
+
+        name
+    }
+
     pub fn join(&mut self, user: &str, room: &str, outbound: mpsc::Sender<String>) {
         self.detach(user);
         self.room_or_create(room).add(user, outbound);
@@ -209,5 +252,65 @@ mod tests {
         registry.move_to("nobody", "OtherRoom");
 
         assert!(registry.room("OtherRoom").is_none());
+    }
+
+    #[test]
+    fn a_name_nobody_holds_is_given_out_unchanged() {
+        let mut registry = Registry::default();
+        registry.join("ahmet", "MovieNight", sender());
+
+        assert_eq!(registry.free_username("mehmet"), "mehmet");
+    }
+
+    /// The reason this exists: `join` is keyed by name, so without it the
+    /// second arrival would evict the first rather than collide with them.
+    #[test]
+    fn a_name_somebody_holds_grows_until_it_is_free() {
+        let mut registry = Registry::default();
+        registry.join("ahmet", "MovieNight", sender());
+
+        assert_eq!(registry.free_username("ahmet"), "ahmet_");
+    }
+
+    #[test]
+    fn a_name_taken_in_another_room_still_collides() {
+        let mut registry = Registry::default();
+        registry.join("ahmet", "OtherRoom", sender());
+
+        assert_eq!(
+            registry.free_username("ahmet"),
+            "ahmet_",
+            "isolation hides rooms from users, not names from the server"
+        );
+    }
+
+    #[test]
+    fn names_collide_whatever_their_case() {
+        let mut registry = Registry::default();
+        registry.join("Ahmet", "MovieNight", sender());
+
+        assert_eq!(registry.free_username("ahmet"), "ahmet_");
+    }
+
+    /// Upstream trims trailing underscores before growing again, so a room
+    /// full of retries does not end up with ever longer tails.
+    #[test]
+    fn a_name_already_ending_in_underscore_is_trimmed_before_it_grows() {
+        let mut registry = Registry::default();
+        registry.join("ahmet", "MovieNight", sender());
+        registry.join("ahmet_", "MovieNight", sender());
+
+        assert_eq!(registry.free_username("ahmet_"), "ahmet__");
+    }
+
+    #[test]
+    fn a_name_is_cut_to_the_length_we_advertise_before_it_is_checked() {
+        let registry = Registry::default();
+
+        assert_eq!(
+            registry.free_username(&"a".repeat(40)).chars().count(),
+            MAX_USERNAME_LENGTH,
+            "the greeting claims a limit; the server has to keep it"
+        );
     }
 }

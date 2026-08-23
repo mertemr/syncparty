@@ -17,6 +17,8 @@ mod ignore;
 mod registry;
 #[allow(dead_code)]
 mod room;
+#[allow(dead_code)]
+mod session;
 
 use std::fs::OpenOptions;
 use std::io::Write;

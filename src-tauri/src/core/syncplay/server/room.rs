@@ -6,7 +6,7 @@
 //! paused, and a room that empties forgets where it was.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -71,6 +71,39 @@ impl User {
     pub fn has_playback(&self) -> bool {
         self.position.is_some() && self.file.is_some()
     }
+}
+
+/// How long a room's own reading stays authoritative before it starts
+/// following its watchers instead.
+const SAMPLE_AFTER: Duration = Duration::from_secs(1);
+
+/// What a client's `State` message asks the room to become.
+///
+/// Every field is optional because a report is not a demand: a client that says
+/// nothing about pausing is not asking for a pause change.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StateUpdate {
+    pub position: Option<f64>,
+    pub paused: Option<bool>,
+    pub do_seek: bool,
+}
+
+/// What the room decided everyone should be told.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Force {
+    /// Drift. The client corrects itself; the room says nothing.
+    Nothing,
+    /// Somebody made a decision the whole room follows.
+    Broadcast(PlaybackState),
+    /// Somebody who may not move this room tried to.
+    ///
+    /// Two messages rather than one: `echo` repeats what they asked for and
+    /// exists only so clients we did not write keep working, and `real` carries
+    /// the state the room is actually in.
+    CorrectSender {
+        echo: PlaybackState,
+        real: PlaybackState,
+    },
 }
 
 pub struct Room {
@@ -145,6 +178,122 @@ impl Room {
         }
     }
 
+    /// The sender's own last reported position, whether or not they may move
+    /// the room.
+    pub fn user_position(&self, name: &str) -> Option<f64> {
+        self.users.get(name)?.position
+    }
+
+    pub fn set_file(&mut self, name: &str, file: Option<OpenFile>) {
+        if let Some(user) = self.users.get_mut(name) {
+            user.file = file;
+        }
+    }
+
+    pub fn set_position(&mut self, name: &str, position: f64) {
+        if let Some(user) = self.users.get_mut(name) {
+            user.position = Some(position);
+        }
+    }
+
+    /// Sets the room's pause flag without going through arbitration.
+    pub fn force_paused(&mut self, paused: bool) {
+        self.playback.paused = paused;
+        self.last_update = Instant::now();
+    }
+
+    /// Where the room is at `now`.
+    ///
+    /// Deliberately takes `now` rather than reading a clock, so the suite is
+    /// deterministic and never sleeps.
+    ///
+    /// Once the room's own reading has gone stale it follows its *slowest*
+    /// watcher rather than advancing by elapsed time. That is what stops a
+    /// party drifting apart: nobody is allowed to get ahead of the person
+    /// furthest behind. Advancing by elapsed time is only the fallback for a
+    /// room with nothing to sample.
+    pub fn position_at(&self, now: Instant) -> f64 {
+        let elapsed = now.saturating_duration_since(self.last_update);
+
+        if elapsed > SAMPLE_AFTER {
+            let slowest = self
+                .users
+                .values()
+                .filter(|user| user.has_playback())
+                .filter_map(|user| user.position)
+                .min_by(f64::total_cmp);
+
+            if let Some(position) = slowest {
+                return position;
+            }
+        }
+
+        if self.playback.paused {
+            self.playback.position
+        } else {
+            self.playback.position + elapsed.as_secs_f64()
+        }
+    }
+
+    /// Folds one client's report into the room and says what to send.
+    ///
+    /// The narrow part is what counts as a decision. Position drift alone
+    /// forces nothing — only an explicit seek or an actual pause change is
+    /// something somebody chose, and a server that also forced on drift would
+    /// fight every client that was slightly behind.
+    pub fn apply(
+        &mut self,
+        from: &str,
+        update: StateUpdate,
+        message_age: Duration,
+        now: Instant,
+    ) -> Force {
+        let may_control = self.can_control(from);
+        let pause_change = update
+            .paused
+            .filter(|paused| *paused != self.playback.paused);
+
+        if let Some(paused) = pause_change.filter(|_| may_control) {
+            self.playback.paused = paused;
+            self.playback.set_by = Some(from.to_owned());
+        }
+
+        // Recorded whatever their rights are: only the room-level state is
+        // refused, never the report itself. A report was already stale when it
+        // arrived, so while the film is playing it has moved on by its own age.
+        if let Some(position) = update.position {
+            let reported = if self.playback.paused {
+                position
+            } else {
+                position + message_age.as_secs_f64()
+            };
+            self.set_position(from, reported);
+        }
+
+        if !update.do_seek && pause_change.is_none() {
+            return Force::Nothing;
+        }
+
+        if !may_control {
+            return Force::CorrectSender {
+                echo: PlaybackState {
+                    position: self.user_position(from).unwrap_or(self.playback.position),
+                    paused: update.paused.unwrap_or(self.playback.paused),
+                    set_by: Some(from.to_owned()),
+                },
+                real: self.playback.clone(),
+            };
+        }
+
+        if let Some(position) = self.user_position(from) {
+            self.playback.position = position;
+        }
+        self.playback.set_by = Some(from.to_owned());
+        self.last_update = now;
+
+        Force::Broadcast(self.playback.clone())
+    }
+
     pub fn add(&mut self, name: &str, outbound: mpsc::Sender<String>) {
         self.insert(User {
             name: name.to_owned(),
@@ -190,6 +339,12 @@ pub(super) mod test_support {
         mpsc::channel(16).0
     }
 
+    /// The same file every arbitration test opens; only its presence matters
+    /// there, never its name.
+    pub fn watched_file() -> OpenFile {
+        open_file("Film.mkv")
+    }
+
     pub fn open_file(name: &str) -> OpenFile {
         OpenFile {
             name: name.to_owned(),
@@ -201,7 +356,7 @@ pub(super) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{open_file, sender};
+    use super::test_support::{open_file, sender, watched_file};
     use super::*;
 
     #[test]
@@ -289,5 +444,204 @@ mod tests {
 
         user.file = Some(open_file("Film.mkv"));
         assert!(user.has_playback());
+    }
+
+    /// An instant within a second of the room's last update, so `position_at`
+    /// does not take the slowest-watcher branch.
+    fn now() -> Instant {
+        Instant::now()
+    }
+
+    /// An instant far enough past the room's last update that the reading is
+    /// stale and the slowest-watcher branch is the one under test.
+    fn stale() -> Instant {
+        Instant::now() + Duration::from_secs(2)
+    }
+
+    fn five_seconds_on() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    fn pause_at(position: f64) -> StateUpdate {
+        StateUpdate {
+            position: Some(position),
+            paused: Some(true),
+            do_seek: false,
+        }
+    }
+
+    fn playing_at(position: f64) -> StateUpdate {
+        StateUpdate {
+            position: Some(position),
+            paused: Some(false),
+            do_seek: false,
+        }
+    }
+
+    fn seek_to(position: f64) -> StateUpdate {
+        StateUpdate {
+            position: Some(position),
+            paused: None,
+            do_seek: true,
+        }
+    }
+
+    fn playing_room_with(positions: &[(&str, f64)]) -> Room {
+        let mut room = Room::new("MovieNight");
+        for (name, position) in positions {
+            room.add(name, sender());
+            room.set_file(name, Some(watched_file()));
+            room.set_position(name, *position);
+        }
+        room.force_paused(false);
+        room
+    }
+
+    #[test]
+    fn a_rooms_position_is_its_slowest_watcher() {
+        let room = playing_room_with(&[("ahmet", 120.0), ("mehmet", 95.0)]);
+
+        assert!(
+            (room.position_at(stale()) - 95.0).abs() < 0.01,
+            "nobody may get ahead of the person furthest behind"
+        );
+    }
+
+    #[test]
+    fn somebody_with_no_file_open_does_not_drag_the_room_back() {
+        let mut room = playing_room_with(&[("ahmet", 120.0)]);
+        room.add("newcomer", sender());
+
+        assert!(
+            (room.position_at(stale()) - 120.0).abs() < 0.01,
+            "a watcher with nothing open is not a candidate for the minimum"
+        );
+    }
+
+    /// Split from the plan's single test, which asserted that a room paused
+    /// after five seconds of play still reads 5.0. It cannot: `force_paused`
+    /// takes no `now`, so it cannot capture the position at the moment of the
+    /// pause, and microseconds pass between the two calls in real time. What
+    /// the spec actually says is that a sampleless room advances by elapsed
+    /// time *only while playing*, which is these two tests.
+    #[test]
+    fn a_room_with_no_sample_advances_by_elapsed_time_while_playing() {
+        let mut room = Room::new("MovieNight");
+        room.force_paused(false);
+
+        assert!((room.position_at(five_seconds_on()) - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_paused_room_with_no_sample_does_not_move() {
+        let room = Room::new("MovieNight");
+
+        assert!(
+            room.position_at(five_seconds_on()).abs() < 0.01,
+            "a paused room does not move"
+        );
+    }
+
+    #[test]
+    fn a_pause_is_a_decision_and_is_broadcast() {
+        let mut room = playing_room_with(&[("ahmet", 10.0), ("mehmet", 10.0)]);
+
+        let force = room.apply("ahmet", pause_at(10.0), Duration::ZERO, now());
+
+        let Force::Broadcast(state) = force else {
+            panic!("a pause change must be broadcast, got {force:?}");
+        };
+        assert!(state.paused);
+        assert_eq!(state.set_by.as_deref(), Some("ahmet"));
+    }
+
+    #[test]
+    fn drift_alone_is_never_forced() {
+        let mut room = playing_room_with(&[("ahmet", 10.0), ("mehmet", 10.0)]);
+
+        let force = room.apply("mehmet", playing_at(70.0), Duration::ZERO, now());
+
+        assert!(
+            matches!(force, Force::Nothing),
+            "drift is the client's to correct, got {force:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_seek_is_broadcast_without_a_pause_change() {
+        let mut room = playing_room_with(&[("ahmet", 10.0), ("mehmet", 10.0)]);
+
+        let force = room.apply("ahmet", seek_to(600.0), Duration::ZERO, now());
+
+        let Force::Broadcast(state) = force else {
+            panic!("doSeek must be broadcast, got {force:?}");
+        };
+        assert!((state.position - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_stale_report_is_advanced_by_its_own_age_while_playing() {
+        let mut room = playing_room_with(&[("ahmet", 10.0), ("mehmet", 10.0)]);
+
+        room.apply("ahmet", seek_to(100.0), Duration::from_secs(2), now());
+
+        assert!(
+            (room.playback().position - 102.0).abs() < 0.01,
+            "the report was already two seconds old when it arrived"
+        );
+    }
+
+    #[test]
+    fn a_stale_report_is_not_advanced_while_paused() {
+        let mut room = playing_room_with(&[("ahmet", 10.0)]);
+
+        room.apply("ahmet", pause_at(100.0), Duration::from_secs(2), now());
+
+        assert!((room.playback().position - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_non_controller_is_corrected_with_both_messages() {
+        let mut room = Room::new("+MovieNight:ABCDEF012345");
+        room.add("ahmet", sender());
+        room.set_file("ahmet", Some(watched_file()));
+        room.force_paused(false);
+
+        let force = room.apply("ahmet", pause_at(10.0), Duration::ZERO, now());
+
+        let Force::CorrectSender { echo, real } = force else {
+            panic!("a non-controller must be corrected, got {force:?}");
+        };
+        assert!(echo.paused, "the first message echoes what they asked for");
+        assert!(!real.paused, "the second carries the room's real state");
+        assert!(!room.playback().paused, "the room must not have moved");
+    }
+
+    #[test]
+    fn a_controller_moves_a_controlled_room() {
+        let mut room = Room::new("+MovieNight:ABCDEF012345");
+        room.add("ahmet", sender());
+        room.set_file("ahmet", Some(watched_file()));
+        room.set_controller("ahmet", true);
+        room.force_paused(false);
+
+        let force = room.apply("ahmet", pause_at(10.0), Duration::ZERO, now());
+
+        assert!(matches!(force, Force::Broadcast(_)));
+        assert!(room.playback().paused);
+    }
+
+    #[test]
+    fn a_non_controllers_own_position_is_still_recorded() {
+        let mut room = Room::new("+MovieNight:ABCDEF012345");
+        room.add("ahmet", sender());
+        room.set_file("ahmet", Some(watched_file()));
+
+        room.apply("ahmet", playing_at(42.0), Duration::ZERO, now());
+
+        assert!(
+            (room.user_position("ahmet").expect("position") - 42.0).abs() < 0.01,
+            "only the room-level state is refused, not the report itself"
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! Starting and stopping the Syncplay server process.
 
 mod auth;
+mod ignore;
 mod registry;
 mod room;
 

@@ -61,6 +61,7 @@
         ],
         "recommends": ["gnome-keyring"],
         "section": "video",
+        "desktopTemplate": "packaging/syncparty.desktop",
         "postInstallScript": "packaging/postinst.sh",
         "files": {
           "/usr/lib/syncparty/syncplay-source": "syncplay-source"

@@ -1,6 +1,8 @@
 //! Starting and stopping the Syncplay server process.
 
 mod auth;
+mod registry;
+mod room;
 
 use std::fs::OpenOptions;
 use std::io::Write;

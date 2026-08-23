@@ -46,7 +46,12 @@ impl DiscordNotifier {
         self.secrets.delete(SecretKey::DiscordWebhook)
     }
 
-    /// Posts `content` to the configured channel.
+    /// The app's accent color (`--color-accent` in `src/styles.css`),
+    /// converted from OkLCH to sRGB, as the Discord embed color int.
+    const ACCENT_COLOR: u32 = 0xff61b7;
+
+    /// Posts `content` to the configured channel as an embed, so it carries
+    /// the app's accent color instead of showing up as bare text.
     ///
     /// Returns `false` when no webhook is set, which is a normal state rather
     /// than a failure — most people never turn this on.
@@ -57,7 +62,9 @@ impl DiscordNotifier {
 
         self.client
             .post(webhook)
-            .json(&serde_json::json!({ "content": content }))
+            .json(&serde_json::json!({
+                "embeds": [{ "description": content, "color": Self::ACCENT_COLOR }]
+            }))
             .send()
             .await?
             .error_for_status()?;

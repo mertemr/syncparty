@@ -5,35 +5,42 @@
 
 use crate::core::invite::Invite;
 
-/// The "we're live" announcement, including the one-click join link.
+/// The "we're live" announcement, including the invite code to paste into
+/// syncparty.
+///
+/// There's no one-click join link here on purpose: `invite.deep_link()`
+/// uses the custom `syncparty://` scheme, and Discord won't render that as
+/// a clickable link under any markdown (checked: plain content, masked
+/// `[label](url)` links, embeds — none of them render a non-http(s)
+/// scheme). Re-add the link once there's an `https://` redirect page that
+/// forwards to the deep link — Discord treats that scheme as clickable, and
+/// the redirect can hand off to `syncparty://` from there.
 pub fn party_ready(invite: &Invite, language: &str) -> String {
     if is_turkish(language) {
         format!(
             "🎬 **Film gecesi hazır!**\n\n\
-             **Tek tıkla katıl:** {link}\n\
-             **Davet kodu:** `{code}`\n\n\
+             **Davet kodu**\n\
+             ```\n{code}\n```\n\n\
              **Oda**\n\
              Oda adı: `{room}`\n\n\
              **İlk kez katılacaklar**\n\
-             1. syncparty'yi kurun ve davet bağlantısına tıklayın — gerisini o halleder.\n\
+             1. syncparty'yi kurun ve davet kodunu yapıştırın.\n\
              2. Hesap açmanız, ağ kurmanız veya port açmanız gerekmiyor.\n\n\
              Film dosyası herkeste yerel olarak bulunmalı; dosya internetten yayınlanmıyor.",
-            link = invite.deep_link(),
             code = invite.encode(),
             room = invite.room,
         )
     } else {
         format!(
             "🎬 **Movie night is up!**\n\n\
-             **One-click join:** {link}\n\
-             **Invite code:** `{code}`\n\n\
+             **Invite code**\n\
+             ```\n{code}\n```\n\n\
              **Room**\n\
              Room name: `{room}`\n\n\
              **First time joining**\n\
-             1. Install syncparty and open the invite link — it handles the rest.\n\
+             1. Install syncparty and paste in the invite code.\n\
              2. There is no account to create, no network to join and no port to open.\n\n\
              Everyone needs their own copy of the file locally — nothing is streamed.",
-            link = invite.deep_link(),
             code = invite.encode(),
             room = invite.room,
         )
@@ -89,7 +96,6 @@ mod tests {
         for language in ["tr", "en"] {
             let message = party_ready(&invite, language);
 
-            assert!(message.contains(&invite.deep_link()), "{language}");
             assert!(message.contains(&invite.encode()), "{language}");
             assert!(message.contains(&invite.room), "{language}");
         }

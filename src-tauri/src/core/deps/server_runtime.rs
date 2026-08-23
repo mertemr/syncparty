@@ -37,7 +37,6 @@ const SYNCPLAY_VERSION: &str = "1.7.5";
 /// checking at all — means unpacking whatever arrives.
 const SYNCPLAY_SHA256: &str = "6aef1e8351bccb97e6833fcae04c80f9d01b290b627f70df3e3870555c40deaa";
 
-
 /// Python the virtual environment is built against. `uv` downloads it if the
 /// machine has none, which is why the user never has to install Python.
 ///

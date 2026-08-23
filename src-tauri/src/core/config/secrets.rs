@@ -351,7 +351,9 @@ mod tests {
     #[test]
     fn deleting_from_the_file_store_removes_the_value() {
         let store = temporary_store("delete");
-        store.set("discord-webhook", "https://example.invalid").expect("set");
+        store
+            .set("discord-webhook", "https://example.invalid")
+            .expect("set");
         store.delete("discord-webhook").expect("delete");
 
         assert_eq!(store.get("discord-webhook").expect("get"), None);

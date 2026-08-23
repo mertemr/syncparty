@@ -21,6 +21,11 @@ const PACKAGED_SOURCE_DIRS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     data_dir: PathBuf,
+    /// Whether [`Self::syncplay_source_dir`] may answer with a packaged copy
+    /// outside `data_dir`. False for test roots, which promise that every path
+    /// stays under the root they were given.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    packaged_source_allowed: bool,
 }
 
 impl AppPaths {
@@ -29,13 +34,21 @@ impl AppPaths {
         let base = platform_data_root()?;
         let data_dir = base.join(APP_DIR_NAME);
         std::fs::create_dir_all(&data_dir)?;
-        Ok(Self { data_dir })
+        Ok(Self {
+            data_dir,
+            packaged_source_allowed: true,
+        })
     }
 
     /// Points every path at `root`. Used by tests to stay off the real profile.
+    ///
+    /// That includes the packaged Syncplay server: consulting `/usr/lib` here
+    /// would make results depend on whether the machine running the tests
+    /// happens to have syncparty installed.
     pub fn rooted_at(root: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: root.into(),
+            packaged_source_allowed: false,
         }
     }
 
@@ -78,12 +91,14 @@ impl AppPaths {
     /// downloaded one and behaves as Windows and macOS do.
     pub fn syncplay_source_dir(&self) -> PathBuf {
         #[cfg(target_os = "linux")]
-        if let Some(packaged) = PACKAGED_SOURCE_DIRS
-            .iter()
-            .map(PathBuf::from)
-            .find(|dir| dir.join("syncplayServer.py").is_file())
-        {
-            return packaged;
+        if self.packaged_source_allowed {
+            if let Some(packaged) = PACKAGED_SOURCE_DIRS
+                .iter()
+                .map(PathBuf::from)
+                .find(|dir| dir.join("syncplayServer.py").is_file())
+            {
+                return packaged;
+            }
         }
 
         self.managed_source_dir()
@@ -103,7 +118,7 @@ impl AppPaths {
     pub fn server_python(&self) -> PathBuf {
         #[cfg(target_os = "linux")]
         {
-            return which::which("python3").unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            which::which("python3").unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"))
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -163,7 +178,9 @@ mod tests {
 
         assert!(paths.settings_file().starts_with("/tmp/syncparty-test"));
         assert!(paths.secrets_file().starts_with("/tmp/syncparty-test"));
-        assert!(paths.managed_source_dir().starts_with("/tmp/syncparty-test"));
+        assert!(paths
+            .managed_source_dir()
+            .starts_with("/tmp/syncparty-test"));
         assert!(paths.server_entrypoint().ends_with("syncplayServer.py"));
     }
 

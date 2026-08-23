@@ -1,5 +1,7 @@
 //! Starting and stopping the Syncplay server process.
 
+mod auth;
+
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

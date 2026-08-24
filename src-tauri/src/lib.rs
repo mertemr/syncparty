@@ -15,6 +15,7 @@ use tauri::Manager;
 
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
+use crate::core::paths::AppPaths;
 use crate::ipc::{commands, AppState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -55,6 +56,7 @@ pub fn run() {
             let bus = Arc::clone(&state.bus);
             app.manage(state);
 
+            reclaim_the_old_server_runtime();
             register_deep_links(&handle, bus);
             Ok(())
         })
@@ -120,5 +122,26 @@ fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+/// Deletes the Python environment older versions kept on disk.
+///
+/// Hundreds of megabytes that nothing runs any more and nobody would find by
+/// hand. Every failure here is swallowed: reclaiming space is a courtesy, and
+/// refusing to open the app over it would be a far worse trade.
+fn reclaim_the_old_server_runtime() {
+    let Ok(paths) = AppPaths::resolve() else {
+        return;
+    };
+
+    let runtime = paths.server_runtime_dir();
+    if !runtime.exists() {
+        return;
+    }
+
+    match paths.remove_legacy_server_runtime() {
+        Ok(()) => tracing::info!(path = %runtime.display(), "reclaimed the old server runtime"),
+        Err(error) => tracing::warn!(%error, "could not remove the old server runtime"),
     }
 }

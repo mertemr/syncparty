@@ -48,6 +48,21 @@ impl AppPaths {
     pub fn server_runtime_dir(&self) -> PathBuf {
         self.data_dir.join("server-runtime")
     }
+
+    /// Deletes the virtual environment and Syncplay checkout an older version
+    /// left behind — hundreds of megabytes nobody would find by hand.
+    ///
+    /// Takes no argument on purpose. The path is derived from `AppPaths` and
+    /// so can only ever be a directory syncparty created; a parameter would
+    /// turn a cleanup into an arbitrary recursive delete.
+    pub fn remove_legacy_server_runtime(&self) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(self.server_runtime_dir()) {
+            // A fresh install has nothing to reclaim. That is the normal case
+            // from now on, not a failure.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
 }
 
 fn platform_data_root() -> Result<PathBuf> {
@@ -77,6 +92,12 @@ fn platform_data_root() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("syncparty-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
     #[test]
     fn derives_every_path_from_the_data_dir() {
         let paths = AppPaths::rooted_at("/tmp/syncparty-test");
@@ -86,5 +107,31 @@ mod tests {
         assert!(paths
             .server_runtime_dir()
             .starts_with("/tmp/syncparty-test"));
+    }
+
+    #[test]
+    fn removes_the_directory_it_created_and_nothing_else() {
+        let root = temp_root("legacy-cleanup");
+        let paths = AppPaths::rooted_at(&root);
+        std::fs::create_dir_all(paths.server_runtime_dir().join("venv")).expect("seed");
+        std::fs::write(paths.settings_file(), "{}").expect("settings");
+
+        paths.remove_legacy_server_runtime().expect("cleanup");
+
+        assert!(!paths.server_runtime_dir().exists());
+        assert!(
+            paths.settings_file().exists(),
+            "cleanup must not reach anything else in the data directory"
+        );
+    }
+
+    #[test]
+    fn a_fresh_install_has_nothing_to_clean_and_says_so_quietly() {
+        let paths = AppPaths::rooted_at(temp_root("legacy-cleanup-fresh"));
+
+        assert!(
+            paths.remove_legacy_server_runtime().is_ok(),
+            "an absent directory is the normal case, not an error"
+        );
     }
 }

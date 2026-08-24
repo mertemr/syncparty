@@ -68,7 +68,7 @@ export function HostScreen() {
     // breakpoint would mean the two-column layout never appeared in the app
     // it was designed for. The 720px minimum still stacks.
     <div className="mx-auto grid max-w-5xl gap-5 px-8 py-8 md:grid-cols-[1.15fr_1fr]">
-      <div className="space-y-5">
+      <div className="min-w-0 space-y-5">
         <Card>
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
@@ -152,7 +152,7 @@ export function HostScreen() {
         )}
       </div>
 
-      <div className="space-y-5">
+      <div className="min-w-0 space-y-5">
         {hosting && (
           <>
             {session.monitorAttached && <LobbyPanel snapshot={room} />}

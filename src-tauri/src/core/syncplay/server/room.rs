@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::core::syncplay::server::auth;
+use crate::core::syncplay::server::ignore::IgnoreGate;
 
 /// What the room is holding everyone to.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +61,15 @@ pub struct User {
     /// has stopped reading is a peer that has left, and buffering without
     /// limit would turn one stalled client into the whole server's problem.
     pub outbound: mpsc::Sender<String>,
+    /// This connection's `ignoringOnTheFly` counters.
+    ///
+    /// Still per connection — one `User` is one connection — but kept here
+    /// rather than beside the socket because a forced broadcast has to stamp
+    /// *every recipient's* own counter, and the only thing that can reach them
+    /// all is the registry. Upstream does the same: `forcePositionUpdate`
+    /// calls each watcher's `sendState(..., forced=True)`, and each of those
+    /// bumps that watcher's own counter.
+    pub gate: IgnoreGate,
 }
 
 impl User {
@@ -138,6 +148,12 @@ impl Room {
 
     pub fn user_mut(&mut self, name: &str) -> Option<&mut User> {
         self.users.get_mut(name)
+    }
+
+    /// Every watcher, mutably, so a forced broadcast can stamp each one's
+    /// counter as it renders their copy.
+    pub fn users_mut(&mut self) -> impl Iterator<Item = (&String, &mut User)> {
+        self.users.iter_mut()
     }
 
     pub fn playback(&self) -> &PlaybackState {
@@ -302,6 +318,7 @@ impl Room {
             is_controller: false,
             position: None,
             outbound,
+            gate: IgnoreGate::default(),
         });
     }
 

@@ -19,7 +19,7 @@ const REAL_VERSION: &str = "1.7.5";
 /// The limits a server reports in `Hello`, from Syncplay's `constants.py`.
 /// Clients truncate against these, so they are part of the wire contract
 /// rather than our own policy.
-const MAX_CHAT_MESSAGE_LENGTH: usize = 150;
+pub const MAX_CHAT_MESSAGE_LENGTH: usize = 150;
 pub const MAX_USERNAME_LENGTH: usize = 16;
 const MAX_ROOM_NAME_LENGTH: usize = 35;
 const MAX_FILENAME_LENGTH: usize = 250;
@@ -257,6 +257,17 @@ pub enum ServerToClient {
         message: String,
     },
     List(ServerRoomList),
+    /// Relayed verbatim with the sender's name attached. The server does not
+    /// interpret playlists, which is what lets the UI grow one later without
+    /// this file changing again.
+    SetPlaylistChange {
+        user: String,
+        files: serde_json::Value,
+    },
+    SetPlaylistIndex {
+        user: String,
+        index: serde_json::Value,
+    },
     State {
         position: f64,
         paused: bool,
@@ -359,6 +370,14 @@ impl ServerToClient {
             }),
 
             Self::List(rooms) => serde_json::json!({ "List": rooms }),
+
+            Self::SetPlaylistChange { user, files } => serde_json::json!({
+                "Set": { "playlistChange": { "user": user, "files": files } }
+            }),
+
+            Self::SetPlaylistIndex { user, index } => serde_json::json!({
+                "Set": { "playlistIndex": { "user": user, "index": index } }
+            }),
 
             Self::State {
                 position,
@@ -928,5 +947,30 @@ mod tests {
         assert_eq!(entry["file"]["name"], "Film.mkv");
         assert_eq!(entry["isReady"], true);
         assert_eq!(entry["controller"], false);
+    }
+
+    #[test]
+    fn a_playlist_change_names_who_made_it() {
+        let value = parsed(ServerToClient::SetPlaylistChange {
+            user: "ahmet".to_owned(),
+            files: serde_json::json!(["one.mkv", "two.mkv"]),
+        });
+
+        assert_eq!(value["Set"]["playlistChange"]["user"], "ahmet");
+        assert_eq!(
+            value["Set"]["playlistChange"]["files"][1], "two.mkv",
+            "the list is relayed as it arrived"
+        );
+    }
+
+    #[test]
+    fn a_playlist_index_names_who_moved_it() {
+        let value = parsed(ServerToClient::SetPlaylistIndex {
+            user: "ahmet".to_owned(),
+            index: serde_json::json!(2),
+        });
+
+        assert_eq!(value["Set"]["playlistIndex"]["user"], "ahmet");
+        assert_eq!(value["Set"]["playlistIndex"]["index"], 2);
     }
 }

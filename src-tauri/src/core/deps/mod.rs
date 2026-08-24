@@ -8,7 +8,6 @@
 mod installer;
 mod manager;
 mod mpv;
-mod server_runtime;
 mod syncplay_client;
 
 use async_trait::async_trait;
@@ -22,7 +21,6 @@ use crate::core::events::ProgressSink;
 pub use installer::{PackageSpec, SystemPackageManager};
 pub use manager::DependencyManager;
 pub use mpv::MpvDependency;
-pub use server_runtime::ServerRuntimeDependency;
 pub use syncplay_client::SyncplayClientDependency;
 
 /// Stable identifier for each dependency, shared with the frontend.
@@ -34,8 +32,6 @@ pub enum DependencyId {
     SyncplayClient,
     /// The video player Syncplay drives.
     Mpv,
-    /// The managed Python environment that runs the Syncplay server.
-    ServerRuntime,
 }
 
 /// Which player an automatic install should fetch.
@@ -127,8 +123,7 @@ pub trait Dependency: Send + Sync {
     /// Whether the user can point syncparty at this program by hand.
     ///
     /// True for anything with a portable distribution — an extracted zip is
-    /// invisible to both `PATH` and the registry. False for the managed
-    /// server runtime, which syncparty puts where it likes.
+    /// invisible to both `PATH` and the registry.
     fn supports_manual_path(&self) -> bool {
         false
     }

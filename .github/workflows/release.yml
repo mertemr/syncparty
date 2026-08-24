@@ -111,14 +111,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # No distribution packages a Syncplay server new enough to bind loopback
-      # (that needs 1.7.1; Ubuntu's newest is 1.7.0), so the .deb carries the
-      # pinned one. Verified against the same SHA-256 the app checks at
-      # runtime, so a mismatch fails the build instead of shipping.
-      - name: Vendor the pinned Syncplay server
-        if: matrix.bundles
-        run: node scripts/fetch-syncplay.mjs
-
       # TAURI_SIGNING_PRIVATE_KEY signs the *update package*, not the
       # installers — those stay unsigned. Losing it breaks auto-update only:
       # generate a new one and swap its public half into tauri.conf.json.

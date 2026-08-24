@@ -79,7 +79,7 @@ impl SystemPackageManager {
 /// The install half of a dependency that comes from a package manager.
 ///
 /// Composed into [`Dependency`] implementations rather than inherited, so a
-/// dependency installed some other way — the managed Python environment, for
+/// dependency installed some other way — a portable extracted zip, for
 /// one — simply does not have this piece.
 pub(crate) struct PackageManagedInstall {
     pub display_name: &'static str,

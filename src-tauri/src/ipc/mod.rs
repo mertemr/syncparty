@@ -79,7 +79,7 @@ impl AppState {
         );
 
         Ok(Self {
-            dependencies: DependencyManager::standard(paths, Arc::clone(&settings)),
+            dependencies: DependencyManager::standard(Arc::clone(&settings)),
             settings,
             secrets,
             session,

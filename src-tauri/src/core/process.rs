@@ -1,7 +1,7 @@
 //! Running external programs without flashing console windows at the user.
 //!
-//! Every subprocess syncparty starts — `winget`, `uv`, `python`,
-//! the Syncplay client — goes through here. On Windows a bare
+//! Every subprocess syncparty starts — `winget`, the Syncplay client — goes
+//! through here. On Windows a bare
 //! [`tokio::process::Command`] pops a console window for a fraction of a
 //! second, which looks broken in a GUI app; `CREATE_NO_WINDOW` suppresses it.
 

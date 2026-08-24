@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::{mpsc, RwLock};
 
 use crate::core::error::Result;
+use crate::core::events::{AppEvent, EventBus};
 use crate::core::syncplay::protocol::{
     self, ListEntry, ServerFeatures, ServerRoomList, ServerToClient, MAX_CHAT_MESSAGE_LENGTH,
 };
@@ -30,6 +31,7 @@ pub async fn serve<S>(
     stream: S,
     registry: Arc<RwLock<Registry>>,
     config: Arc<ServerConfig>,
+    bus: Arc<dyn EventBus>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -51,6 +53,7 @@ where
     let mut session = Session {
         registry,
         config,
+        bus,
         outbound,
         username: None,
     };
@@ -69,6 +72,7 @@ where
 struct Session {
     registry: Arc<RwLock<Registry>>,
     config: Arc<ServerConfig>,
+    bus: Arc<dyn EventBus>,
     outbound: mpsc::Sender<String>,
     /// `None` until the greeting is accepted. Once set, it is the name the
     /// registry knows, which is not always the one that was asked for.
@@ -183,8 +187,20 @@ impl Session {
         })
         .await;
         self.send_list().await;
+        self.log(format!(
+            "{} joined {room}",
+            self.username.as_deref().unwrap_or_default()
+        ));
 
         true
+    }
+
+    /// Server-side diagnostics, which used to be the Python child's stdout.
+    fn log(&self, line: String) {
+        self.bus.publish(AppEvent::ServerLog {
+            line,
+            is_error: false,
+        });
     }
 
     /// A server with no password configured lets anybody in, which is what an
@@ -300,7 +316,7 @@ impl Session {
             do_seek: payload["playstate"]["doSeek"].as_bool().unwrap_or_default(),
         };
 
-        let (room_name, force) = {
+        let (room_name, force, room_position) = {
             let mut registry = self.registry.write().await;
             let Some(room) = registry.room_of_mut(&username) else {
                 return;
@@ -314,13 +330,16 @@ impl Session {
                 }
             }
 
+            let now = Instant::now();
             let name = room.name().to_owned();
             // `message_age` is zero until there is a ping service to measure
             // it; `Room::apply` already knows what to do with a real one.
-            (
-                name,
-                room.apply(&username, update, Duration::ZERO, Instant::now()),
-            )
+            let force = room.apply(&username, update, Duration::ZERO, now);
+
+            // Read after applying, the way upstream reads `room.getPosition()`
+            // after `updateState`: the sender's own report is part of what the
+            // room is now.
+            (name, force, room.position_at(now))
         };
 
         match force {
@@ -336,12 +355,17 @@ impl Session {
             Force::CorrectSender { echo, real } => {
                 let forced = [
                     Forced {
-                        position: real.position,
+                        position: room_position,
                         paused: echo.paused,
                         do_seek: false,
                         set_by: Some(username.clone()),
                     },
-                    Forced::from_state(&real, true),
+                    Forced {
+                        position: room_position,
+                        paused: real.paused,
+                        do_seek: true,
+                        set_by: real.set_by,
+                    },
                 ];
                 self.send_forced(&room_name, Some(&username), &forced).await;
             }
@@ -617,6 +641,8 @@ impl Session {
             return;
         };
 
+        self.log(format!("{username} left {room}"));
+
         let farewell = ServerToClient::SetUser {
             username: username.clone(),
             room: room.clone(),
@@ -701,7 +727,12 @@ mod tests {
     /// No socket, no port, and no ordering between tests.
     fn connect(registry: Arc<RwLock<Registry>>) -> DuplexStream {
         let (client, server) = tokio::io::duplex(8192);
-        tokio::spawn(serve(server, registry, test_config()));
+        tokio::spawn(serve(
+            server,
+            registry,
+            test_config(),
+            Arc::new(crate::core::events::NullEventBus),
+        ));
         client
     }
 
@@ -1094,5 +1125,47 @@ mod tests {
 
         let announcement = read_until(&mut mehmet, "left").await;
         assert!(announcement.contains("ahmet"), "got {announcement}");
+    }
+
+    fn controller_auth_line(room: &str, password: &str) -> String {
+        serde_json::json!({
+            "Set": { "controllerAuth": { "password": password, "room": room } }
+        })
+        .to_string()
+    }
+
+    /// A correction has to carry where the room *is*, not the last position
+    /// recorded against it. Those are the same thing only for the first second
+    /// after somebody moves it; after that a playing room has gone on without
+    /// anybody writing it down, and handing back the stale number would drag
+    /// the watcher backwards.
+    #[tokio::test]
+    async fn a_correction_carries_where_the_room_is_now_not_what_was_last_recorded() {
+        let room = auth::controlled_room_name("MovieNight", "AB-123-456", "PEPPER");
+        let (mut ahmet, mut mehmet) = two_in_room(&room).await;
+
+        write_line(&mut mehmet, &controller_auth_line(&room, "AB-123-456")).await;
+        let _ = read_until(&mut mehmet, "controllerAuth").await;
+
+        // The controller starts the room playing from zero.
+        write_line(&mut mehmet, &state_line(0.0, false)).await;
+        let _ = read_until(&mut mehmet, "playstate").await;
+        let _ = read_until(&mut ahmet, "playstate").await;
+
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        // ahmet may not move this room, so he is corrected instead.
+        write_line(&mut ahmet, &acked_state_line(600.0, true, 1)).await;
+
+        let correction = read_until(&mut ahmet, "playstate").await;
+        let value: serde_json::Value = serde_json::from_str(&correction).expect("json");
+        let position = value["State"]["playstate"]["position"]
+            .as_f64()
+            .expect("position");
+
+        assert!(
+            position > 1.0,
+            "the room has been playing for over a second: {correction}"
+        );
     }
 }

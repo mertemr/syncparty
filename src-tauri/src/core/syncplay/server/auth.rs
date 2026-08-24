@@ -19,6 +19,12 @@ const HASH_LENGTH: usize = 12;
 
 /// Builds the controlled room name for a password, which is also how a
 /// password is checked — there is nothing else to compare against.
+///
+/// Nothing in production calls this yet: syncparty names its own rooms and has
+/// no flow for turning one into a controlled room. It is the other half of
+/// `check_controlled_room` and the only way to produce a name that function
+/// will accept, so it stays.
+#[allow(dead_code)]
 pub fn controlled_room_name(room: &str, password: &str, salt: &str) -> String {
     format!("+{room}:{}", compute_room_hash(room, password, salt))
 }

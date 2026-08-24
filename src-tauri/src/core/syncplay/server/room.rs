@@ -156,12 +156,17 @@ impl Room {
         self.users.iter_mut()
     }
 
+    /// Read only by tests today: the wire never carries a room's playback on
+    /// its own, only inside a forced `State` that `apply` already returns.
+    #[allow(dead_code)]
     pub fn playback(&self) -> &PlaybackState {
         &self.playback
     }
 
     /// Sets the room's playback state outright, without going through
-    /// arbitration. For tests and for the paths that have already decided.
+    /// arbitration. Nothing in production may skip arbitration, so this exists
+    /// only to put a room into a known state for a test.
+    #[cfg(test)]
     pub fn force_playback(&mut self, playback: PlaybackState) {
         self.playback = playback;
         self.last_update = Instant::now();
@@ -171,6 +176,9 @@ impl Room {
         self.users.is_empty()
     }
 
+    /// Whether the room's own name says it is controlled. `can_control` is
+    /// what production asks; this is the underlying fact, read by tests.
+    #[allow(dead_code)]
     pub fn is_controlled(&self) -> bool {
         self.controlled
     }
@@ -212,7 +220,9 @@ impl Room {
         }
     }
 
-    /// Sets the room's pause flag without going through arbitration.
+    /// Sets the room's pause flag without going through arbitration. Same
+    /// reasoning as `force_playback`: a test fixture, never a code path.
+    #[cfg(test)]
     pub fn force_paused(&mut self, paused: bool) {
         self.playback.paused = paused;
         self.last_update = Instant::now();

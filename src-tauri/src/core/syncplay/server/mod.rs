@@ -1,23 +1,9 @@
-//! Starting and stopping the Syncplay server process.
+//! Starting and stopping the sync server.
 
-// Built bottom-up: nothing in production calls into these until Task 8 swaps
-// `UvManagedServer` for `NativeServer` in `lib.rs`. Until then every item in
-// them is dead code to the compiler, and under `-D warnings` that is two dozen
-// errors for a real lint regression to hide behind.
-//
-// `expect` would be the better tool, since an unfulfilled expectation removes
-// itself, but it is evaluated per target: the tests already use every item in
-// `auth` and `ignore`, so it fires there while still being needed for the
-// library. Task 8 Step 1 carries the instruction to delete these instead.
-#[allow(dead_code)]
 mod auth;
-#[allow(dead_code)]
 mod ignore;
-#[allow(dead_code)]
 mod registry;
-#[allow(dead_code)]
 mod room;
-#[allow(dead_code)]
 mod session;
 
 use std::fs::OpenOptions;
@@ -30,18 +16,25 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::{JoinHandle, JoinSet};
 use ts_rs::TS;
 
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::paths::AppPaths;
 use crate::core::process;
+use crate::core::syncplay::server::registry::Registry;
 
 /// How long to wait for the server to start listening before giving up.
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long the accept loop waits after a failed accept. A transient failure
+/// should not end the party, but a permanent one would spin at full speed.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// The address the Syncplay server listens on.
 ///
@@ -92,6 +85,142 @@ pub trait ServerController: Send + Sync {
     async fn stop(&self) -> Result<()>;
 
     async fn state(&self) -> ServerState;
+}
+
+/// Runs the sync server in this process.
+///
+/// Takes no `AppPaths`: unlike the Python-backed implementation it has no
+/// interpreter to find and no child whose output needs a log file. What it
+/// used to learn by watching stdout it now simply knows.
+pub struct NativeServer {
+    bus: Arc<dyn EventBus>,
+    running: Mutex<Option<RunningNativeServer>>,
+}
+
+struct RunningNativeServer {
+    port: u16,
+    /// Aborting this drops the listener and, with it, every live connection.
+    accept: JoinHandle<()>,
+}
+
+impl NativeServer {
+    pub fn new(bus: Arc<dyn EventBus>) -> Self {
+        Self {
+            bus,
+            running: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl ServerController for NativeServer {
+    /// Binds and returns.
+    ///
+    /// There is no readiness to wait for: the listener either binds or it does
+    /// not, and the answer arrives now rather than after a poll loop discovers
+    /// that a child died at startup.
+    async fn start(&self, config: &ServerConfig) -> Result<()> {
+        let mut running = self.running.lock().await;
+
+        if running.is_some() {
+            return Err(SyncPartyError::ServerAlreadyRunning);
+        }
+
+        let address = config.local_address();
+        let listener = TcpListener::bind(address).await.map_err(|error| {
+            SyncPartyError::ServerStartFailed(format!("could not listen on {address}: {error}"))
+        })?;
+
+        self.bus.publish(AppEvent::ServerLog {
+            line: format!("sync server listening on {address}"),
+            is_error: false,
+        });
+
+        let port = config.port;
+        let accept = tokio::spawn(accept_loop(
+            listener,
+            Registry::shared(),
+            Arc::new(config.clone()),
+            Arc::clone(&self.bus),
+        ));
+
+        *running = Some(RunningNativeServer { port, accept });
+
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let mut running = self.running.lock().await;
+
+        let Some(server) = running.take() else {
+            return Ok(());
+        };
+
+        server.accept.abort();
+        // Awaited rather than left to wind down on its own: until the task is
+        // really gone it is still holding the port, and the next start would
+        // fail on an address that looks in use.
+        let _ = server.accept.await;
+
+        self.bus.publish(AppEvent::ServerLog {
+            line: "sync server stopped".to_owned(),
+            is_error: false,
+        });
+
+        Ok(())
+    }
+
+    async fn state(&self) -> ServerState {
+        match self.running.lock().await.as_ref() {
+            Some(server) => ServerState::Running { port: server.port },
+            None => ServerState::Stopped,
+        }
+    }
+}
+
+/// Accepts connections until it is aborted.
+///
+/// The connections are owned here rather than detached, because that is what
+/// makes stopping mean something: aborting this task drops the `JoinSet`, and
+/// a dropped `JoinSet` aborts everything still in it. Detached tasks would
+/// leave guests connected to a party that had ended.
+async fn accept_loop(
+    listener: TcpListener,
+    registry: Arc<RwLock<Registry>>,
+    config: Arc<ServerConfig>,
+    bus: Arc<dyn EventBus>,
+) {
+    let mut sessions = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer)) => {
+                    let registry = Arc::clone(&registry);
+                    let config = Arc::clone(&config);
+                    let bus = Arc::clone(&bus);
+
+                    sessions.spawn(async move {
+                        if let Err(error) = session::serve(stream, registry, config, Arc::clone(&bus)).await {
+                            bus.publish(AppEvent::ServerLog {
+                                line: format!("{peer} disconnected: {error}"),
+                                is_error: true,
+                            });
+                        }
+                    });
+                }
+                Err(error) => {
+                    bus.publish(AppEvent::ServerLog {
+                        line: format!("could not accept a connection: {error}"),
+                        is_error: true,
+                    });
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                }
+            },
+            // Reaped so a long party does not accumulate finished tasks.
+            Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
+        }
+    }
 }
 
 /// Runs Syncplay out of the `uv`-managed virtual environment.
@@ -303,7 +432,7 @@ mod tests {
     use super::*;
     use crate::core::events::NullEventBus;
 
-    fn server() -> UvManagedServer {
+    fn uv_server() -> UvManagedServer {
         UvManagedServer::new(
             AppPaths::rooted_at(std::env::temp_dir().join("syncparty-server-test")),
             Arc::new(NullEventBus),
@@ -318,9 +447,117 @@ mod tests {
         }
     }
 
+    fn server() -> NativeServer {
+        NativeServer::new(Arc::new(NullEventBus))
+    }
+
+    /// A port the kernel has just confirmed is free, so tests can run in
+    /// parallel. A fixed one would mean whichever test bound it first broke
+    /// every other.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a free port")
+            .local_addr()
+            .expect("address")
+            .port()
+    }
+
+    fn config_on(port: u16) -> ServerConfig {
+        ServerConfig {
+            port,
+            password: "swordfish".to_owned(),
+            salt: "PEPPER".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_controller_reports_itself_stopped() {
+        assert_eq!(server().state().await, ServerState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stopping_something_that_never_started_is_not_an_error() {
+        assert!(server().stop().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn starting_twice_is_refused() {
+        let server = server();
+        let config = config_on(free_port());
+        server.start(&config).await.expect("first start");
+
+        assert!(matches!(
+            server.start(&config).await,
+            Err(SyncPartyError::ServerAlreadyRunning)
+        ));
+
+        server.stop().await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn a_started_server_reports_the_port_it_is_on() {
+        let server = server();
+        let config = config_on(free_port());
+        server.start(&config).await.expect("start");
+
+        assert_eq!(
+            server.state().await,
+            ServerState::Running { port: config.port }
+        );
+
+        server.stop().await.expect("stop");
+    }
+
+    #[tokio::test]
+    async fn a_started_server_accepts_a_connection_on_loopback() {
+        let server = server();
+        let config = config_on(free_port());
+        server.start(&config).await.expect("start");
+
+        assert!(
+            tokio::net::TcpStream::connect(config.local_address())
+                .await
+                .is_ok(),
+            "the port is listening the moment start returns"
+        );
+
+        server.stop().await.expect("stop");
+    }
+
+    /// There is no readiness to poll for any more, so a bind failure is
+    /// immediate rather than something a fifteen-second loop discovers.
+    #[tokio::test]
+    async fn a_port_already_in_use_fails_immediately_rather_than_after_a_timeout() {
+        let config = config_on(free_port());
+        let _squatter = tokio::net::TcpListener::bind(config.local_address())
+            .await
+            .expect("squatter");
+
+        let started = tokio::time::timeout(Duration::from_secs(1), server().start(&config))
+            .await
+            .expect("start must not sit in a fifteen-second poll loop");
+
+        assert!(started.is_err());
+    }
+
+    #[tokio::test]
+    async fn stopping_closes_the_listener() {
+        let server = server();
+        let config = config_on(free_port());
+        server.start(&config).await.expect("start");
+        server.stop().await.expect("stop");
+
+        assert!(
+            tokio::net::TcpStream::connect(config.local_address())
+                .await
+                .is_err(),
+            "a stopped server must not still be holding the port"
+        );
+    }
+
     #[test]
     fn the_password_and_salt_never_reach_the_command_line() {
-        let arguments = server().arguments(&config());
+        let arguments = uv_server().arguments(&config());
 
         assert!(
             !arguments.iter().any(|a| a.contains("swordfish")),
@@ -333,7 +570,7 @@ mod tests {
 
     #[test]
     fn binds_only_to_loopback_so_nothing_on_the_network_can_reach_it() {
-        let arguments = server().arguments(&config());
+        let arguments = uv_server().arguments(&config());
 
         let index = arguments
             .iter()
@@ -357,20 +594,10 @@ mod tests {
 
     #[test]
     fn isolates_rooms_and_runs_python_unbuffered() {
-        let arguments = server().arguments(&config());
+        let arguments = uv_server().arguments(&config());
 
         assert!(arguments.contains(&"--isolate-rooms".to_owned()));
         assert_eq!(arguments[0], "-u");
-    }
-
-    #[tokio::test]
-    async fn a_fresh_controller_reports_itself_stopped() {
-        assert_eq!(server().state().await, ServerState::Stopped);
-    }
-
-    #[tokio::test]
-    async fn stopping_something_that_never_started_is_not_an_error() {
-        assert!(server().stop().await.is_ok());
     }
 
     #[test]

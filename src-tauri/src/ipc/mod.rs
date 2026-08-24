@@ -17,7 +17,7 @@ use crate::core::events::{AppEvent, EventBus};
 use crate::core::notify::DiscordNotifier;
 use crate::core::paths::AppPaths;
 use crate::core::session::PartySession;
-use crate::core::syncplay::UvManagedServer;
+use crate::core::syncplay::NativeServer;
 
 /// The single Tauri event name everything travels on.
 ///
@@ -68,7 +68,7 @@ impl AppState {
         let secrets = Arc::new(SecretStore::new(paths.clone()));
         let discord = Arc::new(DiscordNotifier::new(Arc::clone(&secrets)));
 
-        let server = Arc::new(UvManagedServer::new(paths.clone(), Arc::clone(&bus)));
+        let server = Arc::new(NativeServer::new(Arc::clone(&bus)));
 
         let session = PartySession::new(
             Arc::clone(&settings),

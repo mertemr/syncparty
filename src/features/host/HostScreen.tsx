@@ -63,123 +63,139 @@ export function HostScreen() {
     }
   }
 
+  const statusCard = (
+    <Card>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2.5">
+            <span
+              aria-hidden
+              className={cx(
+                "size-2.5 rounded-full",
+                hosting
+                  ? "bg-bad phosphor"
+                  : starting
+                    ? "bg-warn"
+                    : "bg-ink-faint",
+              )}
+            />
+            <span className="font-mono text-[11px] tracking-[0.22em] text-ink-muted uppercase">
+              {hosting ? "REC" : starting ? t("host.starting") : "STANDBY"}
+            </span>
+            {hosting && startedAt !== null && <Counter since={startedAt} />}
+            {hosting && <Badge tone="good">{t("host.live")}</Badge>}
+          </div>
+
+          <h1 className="mt-2 font-display text-xl font-extrabold tracking-tight text-ink [font-stretch:110%]">
+            {t("host.title")}
+          </h1>
+
+          {starting ? (
+            <div className="mt-3 max-w-xs">
+              <Rewind label={t(STEP_LABELS[session.step])} />
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-ink-muted">
+              {hosting
+                ? `${session.invite.endpoint.slice(0, 8)}…`
+                : t("host.idle.hint")}
+            </p>
+          )}
+        </div>
+
+        {hosting ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="primary"
+              disabled={joinState === "opening"}
+              onClick={() => void join()}
+            >
+              {joinState === "opening" ? t("host.joining") : t("host.join")}
+            </Button>
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() => {
+                setJoinState("idle");
+                void run(ipc.stopHosting);
+              }}
+            >
+              {t("host.stop")}
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="primary"
+            disabled={busy || starting}
+            onClick={() => void run(ipc.startHosting)}
+          >
+            {busy || starting ? t("host.starting") : t("host.start")}
+          </Button>
+        )}
+      </div>
+    </Card>
+  );
+
+  const logsCard = (
+    <Card
+      title={t("host.logs.title")}
+      action={
+        <Button variant="ghost" onClick={() => setLogOpen((open) => !open)}>
+          {logOpen ? t("host.logs.hide") : t("host.logs.show")}
+        </Button>
+      }
+    >
+      {/* Collapsed shows nothing rather than a line count: the count is not
+          information anyone acts on, and the header already says the log is
+          there. */}
+      {logOpen &&
+        (serverLog.length === 0 ? (
+          <EmptyState title={t("host.logs.empty")} />
+        ) : (
+          <pre className="selectable max-h-64 overflow-auto rounded-[var(--radius-control)] bg-canvas p-3 font-mono text-xs leading-relaxed text-ink-muted">
+            {serverLog.join("\n")}
+          </pre>
+        ))}
+    </Card>
+  );
+
+  // Before hosting starts there is nothing to fill a second column with —
+  // the log is secondary, so it sits quietly under the hero card instead of
+  // beside it, where a two-column grid gave it equal billing with the one
+  // button that matters.
+  if (!hosting) {
+    return (
+      <div className="mx-auto max-w-2xl space-y-5 px-8 py-8">
+        {statusCard}
+        {logsCard}
+      </div>
+    );
+  }
+
   return (
     // `md` rather than `lg`: the default window is 940px wide, so an `lg`
     // breakpoint would mean the two-column layout never appeared in the app
     // it was designed for. The 720px minimum still stacks.
     <div className="mx-auto grid max-w-5xl gap-5 px-8 py-8 md:grid-cols-[1.15fr_1fr]">
-      <div className="space-y-5">
-        <Card>
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2.5">
-                <span
-                  aria-hidden
-                  className={cx(
-                    "size-2.5 rounded-full",
-                    hosting
-                      ? "bg-bad phosphor"
-                      : starting
-                        ? "bg-warn"
-                        : "bg-ink-faint",
-                  )}
-                />
-                <span className="font-mono text-[11px] tracking-[0.22em] text-ink-muted uppercase">
-                  {hosting ? "REC" : starting ? t("host.starting") : "STANDBY"}
-                </span>
-                {hosting && startedAt !== null && <Counter since={startedAt} />}
-                {hosting && <Badge tone="good">{t("host.live")}</Badge>}
-              </div>
+      {/* `min-w-0`: without it the invite link/code — unbreakable base64,
+          rendered `truncate` — sets this column's grid auto-minimum to its
+          full unwrapped width, so the track ignores its `1.15fr` share and
+          the other column gets squeezed down to whatever is left over. */}
+      <div className="min-w-0 space-y-5">
+        {statusCard}
 
-              <h1 className="mt-2 font-display text-xl font-extrabold tracking-tight text-ink [font-stretch:110%]">
-                {t("host.title")}
-              </h1>
-
-              {starting ? (
-                <div className="mt-3 max-w-xs">
-                  <Rewind label={t(STEP_LABELS[session.step])} />
-                </div>
-              ) : (
-                <p className="mt-1 text-sm text-ink-muted">
-                  {hosting
-                    ? `${session.invite.endpoint.slice(0, 8)}…`
-                    : t("host.idle.hint")}
-                </p>
-              )}
-            </div>
-
-            {hosting ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <Button
-                  variant="primary"
-                  disabled={joinState === "opening"}
-                  onClick={() => void join()}
-                >
-                  {joinState === "opening" ? t("host.joining") : t("host.join")}
-                </Button>
-                <Button
-                  variant="danger"
-                  disabled={busy}
-                  onClick={() => {
-                    setJoinState("idle");
-                    void run(ipc.stopHosting);
-                  }}
-                >
-                  {t("host.stop")}
-                </Button>
-              </div>
-            ) : (
-              <Button
-                variant="primary"
-                disabled={busy || starting}
-                onClick={() => void run(ipc.startHosting)}
-              >
-                {busy || starting ? t("host.starting") : t("host.start")}
-              </Button>
-            )}
-          </div>
-        </Card>
-
-        {hosting && (
-          <>
-            {joinState === "opened" && (
-              <p className="rounded-panel border border-good/40 bg-good/10 px-4 py-3 text-sm text-good">
-                {t("host.joined")}
-              </p>
-            )}
-            <InviteCard hosting={session} />
-          </>
+        {joinState === "opened" && (
+          <p className="rounded-panel border border-good/40 bg-good/10 px-4 py-3 text-sm text-good">
+            {t("host.joined")}
+          </p>
         )}
+        <InviteCard hosting={session} />
       </div>
 
-      <div className="space-y-5">
-        {hosting && (
-          <>
-            {session.monitorAttached && <LobbyPanel snapshot={room} />}
-            <RoomPanel snapshot={room} monitorAttached={session.monitorAttached} />
-          </>
-        )}
-
-        <Card
-          title={t("host.logs.title")}
-          action={
-            <Button variant="ghost" onClick={() => setLogOpen((open) => !open)}>
-              {logOpen ? t("host.logs.hide") : t("host.logs.show")}
-            </Button>
-          }
-        >
-          {/* Collapsed shows nothing rather than a line count: the count is not
-              information anyone acts on, and the header already says the log is
-              there. */}
-          {logOpen &&
-            (serverLog.length === 0 ? (
-              <EmptyState title={t("host.logs.empty")} />
-            ) : (
-              <pre className="selectable max-h-64 overflow-auto rounded-[var(--radius-control)] bg-canvas p-3 font-mono text-xs leading-relaxed text-ink-muted">
-                {serverLog.join("\n")}
-              </pre>
-            ))}
-        </Card>
+      <div className="min-w-0 space-y-5">
+        {session.monitorAttached && <LobbyPanel snapshot={room} />}
+        <RoomPanel snapshot={room} monitorAttached={session.monitorAttached} />
+        {logsCard}
       </div>
     </div>
   );

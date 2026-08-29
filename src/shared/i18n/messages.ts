@@ -221,9 +221,9 @@ export const tr: Messages = {
   "nav.leaveHosting.confirm": "Durdur ve geri dön",
 
   "onboarding.title": "Bu akşam ne yapıyorsun?",
-  "onboarding.eyebrow": "Birlikte, sadece size özel",
+  "onboarding.eyebrow": "Aynı film, aynı an",
   "onboarding.subtitle":
-    "Bunu sonra değiştirebilirsin. Hiçbir şey yayınlanmaz — herkes kendi dosyasını oynatır.",
+    "Bunu sonra değiştirebilirsin. Kimseye yayın gitmez, herkes filmi kendi bilgisayarından oynatır.",
   "onboarding.host.title": "Ben kuruyorum",
   "onboarding.host.detail":
     "Sunucuyu bu bilgisayarda çalıştırır ve paylaşacağın davet bağlantısını üretir.",
@@ -361,7 +361,7 @@ export const tr: Messages = {
   "settings.diagnostics.nat.routable": "Ulaşılabilir adres",
   "settings.diagnostics.nat.carrier":
     "Operatör NAT'ı (CGNAT) arkasında — parti relay üzerinden yürür",
-  "settings.diagnostics.nat.unknown": "Public adres bulunamadı",
+  "settings.diagnostics.nat.unknown": "Herkese açık adres bulunamadı",
   "settings.diagnostics.paths": "Canlı bağlantılar",
   "settings.diagnostics.paths.none": "Bağlı kimse yok",
   "settings.diagnostics.path.direct": "doğrudan",
@@ -382,7 +382,7 @@ export const tr: Messages = {
   "error.dependency_missing": "Gerekli bir program eksik.",
   "error.endpoint_offline":
     "Bu bilgisayardan syncparty ağına ulaşılamadı.",
-  "error.party_unreachable": "Host'a ulaşılamadı.",
+  "error.party_unreachable": "Sunucuya ulaşılamadı.",
 
   "update.title": "Güncelleme hazır",
   "update.restart": "Yeniden başlat ve güncelle",

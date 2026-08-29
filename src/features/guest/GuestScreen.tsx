@@ -131,7 +131,7 @@ export function GuestScreen() {
               <p className="font-display text-lg font-extrabold text-ink [font-stretch:110%]">
                 {invite.room}
               </p>
-              <p className="selectable font-mono text-xs text-ink-faint">
+              <p className="selectable font-mono text-xs break-all text-ink-faint">
                 {invite.endpoint}
               </p>
             </div>

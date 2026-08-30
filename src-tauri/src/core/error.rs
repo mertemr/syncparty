@@ -38,6 +38,12 @@ pub enum SyncPartyError {
     #[error("the Syncplay server is already running")]
     ServerAlreadyRunning,
 
+    #[error("not currently in a party")]
+    NotInParty,
+
+    #[error("TMDB is not configured — add an API key in Settings")]
+    MovieProviderNotConfigured,
+
     #[error("the Syncplay server failed to start: {0}")]
     ServerStartFailed(String),
 
@@ -92,6 +98,8 @@ impl SyncPartyError {
             Self::EndpointOffline => "endpoint_offline",
             Self::ServerNotRunning => "server_not_running",
             Self::ServerAlreadyRunning => "server_already_running",
+            Self::NotInParty => "not_in_party",
+            Self::MovieProviderNotConfigured => "movie_provider_not_configured",
             Self::ServerStartFailed(_) => "server_start_failed",
             Self::InvalidInvite(_) => "invalid_invite",
             Self::MonitorFailed(_) => "monitor_failed",

@@ -15,14 +15,19 @@ import {
   type ReactNode,
 } from "react";
 
+import { dictionaries, en, type MessageKey } from "@/shared/i18n/messages";
 import { errorMessage, ipc, onAppEvent } from "@/shared/ipc";
+import { pushToast } from "@/shared/toast";
 import type { AppEvent } from "@/shared/types/AppEvent";
 import type { AppSettings } from "@/shared/types/AppSettings";
 import type { DependencyId } from "@/shared/types/DependencyId";
 import type { Invite } from "@/shared/types/Invite";
+import type { MovieVoteSnapshot } from "@/shared/types/MovieVoteSnapshot";
 import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
+
+import { movieVoteToastMessage } from "./movieVoteToast";
 
 /** How many server log lines to keep. Enough to diagnose a failed start. */
 const LOG_LIMIT = 300;
@@ -46,6 +51,9 @@ interface AppStateValue {
   room: RoomSnapshot | null;
   serverLog: string[];
 
+  /** The active movie vote, if any — pushed by the backend, never polled. */
+  movieVote: MovieVoteSnapshot | null;
+
   /** Keyed by dependency; present only while that install is running. */
   installs: Partial<Record<DependencyId, InstallProgress>>;
 
@@ -65,6 +73,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<SessionState>({ phase: "idle" });
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [serverLog, setServerLog] = useState<string[]>([]);
+  const [movieVote, setMovieVote] = useState<MovieVoteSnapshot | null>(null);
   const [installs, setInstalls] = useState<
     Partial<Record<DependencyId, InstallProgress>>
   >({});
@@ -74,6 +83,16 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   // Held in a ref so the event handler never needs to be re-registered when
   // an unrelated piece of state changes.
   const handleEvent = useRef<(event: AppEvent) => void>(() => {});
+
+  // A standalone translator rather than `useTranslate()`: `AppStateProvider`
+  // sits outside `TranslationProvider` in the tree (it has to — the chosen
+  // language lives in the settings this very provider fetches), so the
+  // context isn't there to read yet. This mirrors exactly what
+  // `TranslationProvider` itself does with the same dictionaries.
+  const translate = (key: MessageKey): string => {
+    const base = (settings?.language ?? "en").split(/[-_]/)[0];
+    return dictionaries[base]?.[key] ?? en[key] ?? key;
+  };
 
   handleEvent.current = (event: AppEvent) => {
     switch (event.kind) {
@@ -87,6 +106,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       case "roomUpdated":
         setRoom(event.snapshot);
         break;
+
+      case "movieVoteChanged": {
+        const toast = movieVoteToastMessage(movieVote, event.snapshot, translate);
+        if (toast) pushToast(toast);
+        setMovieVote(event.snapshot);
+        break;
+      }
 
       case "serverLog":
         setServerLog((lines) =>
@@ -131,6 +157,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
     void ipc.getSettings().then(setSettings).catch(reportInitialFailure);
     void ipc.sessionState().then(setSession).catch(reportInitialFailure);
+    void ipc.getMovieVote().then(setMovieVote).catch(reportInitialFailure);
 
     return () => {
       cancelled = true;
@@ -163,6 +190,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       session,
       room,
       serverLog,
+      movieVote,
       installs,
       pendingInvite,
       clearPendingInvite: () => setPendingInvite(null),
@@ -176,6 +204,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       session,
       room,
       serverLog,
+      movieVote,
       installs,
       pendingInvite,
       failure,

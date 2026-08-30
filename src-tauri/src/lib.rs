@@ -15,7 +15,7 @@ use tauri::Manager;
 
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
-use crate::ipc::{commands, AppState};
+use crate::ipc::{commands, movie_commands, AppState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -78,6 +78,29 @@ pub fn run() {
             commands::set_discord_webhook,
             commands::clear_discord_webhook,
             commands::test_discord_webhook,
+            movie_commands::tmdb_status,
+            movie_commands::set_tmdb_api_key,
+            movie_commands::clear_tmdb_api_key,
+            movie_commands::search_movies,
+            movie_commands::get_popular_movies,
+            movie_commands::get_now_playing_movies,
+            movie_commands::get_upcoming_movies,
+            movie_commands::get_top_rated_movies,
+            movie_commands::discover_movies,
+            movie_commands::get_genres,
+            movie_commands::get_movie_details,
+            movie_commands::start_movie_vote,
+            movie_commands::add_movie_candidate,
+            movie_commands::remove_movie_candidate,
+            movie_commands::open_movie_vote,
+            movie_commands::close_movie_vote,
+            movie_commands::resolve_movie_vote_tie,
+            movie_commands::cancel_movie_vote,
+            movie_commands::cast_movie_vote,
+            movie_commands::set_movie_vote_participation,
+            movie_commands::get_movie_vote,
+            movie_commands::get_session_history,
+            movie_commands::get_watched_movies,
         ])
         .run(tauri::generate_context!())
         .expect("syncparty failed to start");

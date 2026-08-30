@@ -26,8 +26,9 @@ use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
 use iroh::endpoint::Connection;
@@ -35,6 +36,46 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::net::{PathKind, PeerPath, ALPN};
+
+/// Receives whatever the other side sends down the control channel — the one
+/// stream per connection that carries application data instead of Syncplay's.
+///
+/// Implemented by whatever domain owns that data (movie voting, say); `net`
+/// itself has no opinion on what the bytes mean, only that they arrived.
+/// Takes `Arc<Self>` rather than `&self` because handling a message is
+/// typically async work (locking state, broadcasting a reply), which needs an
+/// owned, `'static` handle to spawn onto its own task.
+pub trait ControlChannel: Send + Sync {
+    fn on_message(self: Arc<Self>, peer: EndpointId, bytes: Vec<u8>);
+
+    /// Called once a peer's control channel is up, before anything has
+    /// necessarily arrived on it. The default does nothing; a host-side
+    /// implementation can use this moment to push a freshly connected guest
+    /// the current state instead of waiting for it to ask.
+    fn on_connected(self: Arc<Self>, _peer: EndpointId) {}
+}
+
+type BoxedWriter = Box<dyn AsyncWrite + Unpin + Send>;
+type BoxedReader = Box<dyn AsyncRead + Unpin + Send>;
+
+/// The live control-channel write halves, one per connected guest, so a
+/// broadcast can reach everyone without the caller tracking connections
+/// itself.
+type ControlWriters = Arc<Mutex<BTreeMap<EndpointId, Arc<AsyncMutex<BoxedWriter>>>>>;
+
+/// Writes one length-prefixed frame. The prefix is what lets a stream of
+/// otherwise-opaque JSON blobs be split back into messages on the other end.
+async fn write_frame(writer: &mut (dyn AsyncWrite + Unpin + Send), bytes: &[u8]) -> io::Result<()> {
+    writer.write_u32(bytes.len() as u32).await?;
+    writer.write_all(bytes).await
+}
+
+async fn read_frame(reader: &mut (dyn AsyncRead + Unpin + Send)) -> io::Result<Vec<u8>> {
+    let len = reader.read_u32().await?;
+    let mut buffer = vec![0_u8; len as usize];
+    reader.read_exact(&mut buffer).await?;
+    Ok(buffer)
+}
 
 /// The connections currently being served, so the diagnostics screen can say
 /// how each one is carried.
@@ -48,6 +89,7 @@ type Peers = Arc<Mutex<BTreeMap<EndpointId, Connection>>>;
 pub struct HostTunnel {
     task: JoinHandle<()>,
     peers: Peers,
+    control_writers: ControlWriters,
 }
 
 impl HostTunnel {
@@ -58,13 +100,20 @@ impl HostTunnel {
     /// guest makes is one stream inside it. Syncplay reconnects rather than
     /// giving up when a connection drops, so a stream ending is routine and
     /// must not bring the tunnel down with it.
-    pub fn start(endpoint: Endpoint, target: SocketAddr) -> Self {
+    ///
+    /// `control` receives whatever a guest sends down its control channel —
+    /// the one stream every guest opens before dialling Syncplay at all.
+    pub fn start(endpoint: Endpoint, target: SocketAddr, control: Arc<dyn ControlChannel>) -> Self {
         let peers: Peers = Arc::new(Mutex::new(BTreeMap::new()));
+        let control_writers: ControlWriters = Arc::new(Mutex::new(BTreeMap::new()));
 
         let accepted = Arc::clone(&peers);
+        let accepted_writers = Arc::clone(&control_writers);
         let task = tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
                 let peers = Arc::clone(&accepted);
+                let control_writers = Arc::clone(&accepted_writers);
+                let control = Arc::clone(&control);
                 tokio::spawn(async move {
                     let connection = match incoming.await {
                         Ok(connection) => connection,
@@ -74,12 +123,16 @@ impl HostTunnel {
                         }
                     };
 
-                    serve(connection, target, peers).await;
+                    serve(connection, target, peers, control_writers, control).await;
                 });
             }
         });
 
-        Self { task, peers }
+        Self {
+            task,
+            peers,
+            control_writers,
+        }
     }
 
     /// How each guest currently in the party is reached.
@@ -90,6 +143,47 @@ impl HostTunnel {
     pub fn peers(&self) -> Vec<PeerPath> {
         let peers = self.peers.lock().expect("the peer map is never poisoned");
         peers.values().map(describe).collect()
+    }
+
+    /// Sends `bytes` down every guest's control channel.
+    ///
+    /// Best-effort: a guest whose control channel has gone quiet (mid
+    /// reconnect, say) is skipped rather than failing the whole broadcast —
+    /// it gets caught up by the next one, since the host always sends a full
+    /// snapshot rather than a delta.
+    pub async fn broadcast_control(&self, bytes: &[u8]) {
+        let writers: Vec<_> = self
+            .control_writers
+            .lock()
+            .expect("the control writer map is never poisoned")
+            .values()
+            .cloned()
+            .collect();
+
+        for writer in writers {
+            let mut writer = writer.lock().await;
+            if let Err(error) = write_frame(&mut *writer, bytes).await {
+                tracing::warn!(%error, "a guest's control channel could not be written to");
+            }
+        }
+    }
+
+    /// Sends `bytes` down one guest's control channel, if it is still
+    /// connected. Used to hydrate a single guest — on reconnect, say — rather
+    /// than disturbing everyone else with a broadcast.
+    pub async fn send_control_to(&self, peer: EndpointId, bytes: &[u8]) {
+        let writer = self
+            .control_writers
+            .lock()
+            .expect("the control writer map is never poisoned")
+            .get(&peer)
+            .cloned();
+
+        let Some(writer) = writer else { return };
+        let mut writer = writer.lock().await;
+        if let Err(error) = write_frame(&mut *writer, bytes).await {
+            tracing::warn!(%error, %peer, "a guest's control channel could not be written to");
+        }
     }
 }
 
@@ -103,7 +197,18 @@ impl Drop for HostTunnel {
 }
 
 /// Serves one guest until it disconnects.
-async fn serve(connection: Connection, target: SocketAddr, peers: Peers) {
+///
+/// The guest always opens its control channel before dialling Syncplay at
+/// all (see [`GuestTunnel::open`]), so the first stream accepted here is
+/// always that one — no header byte or negotiation needed to tell it apart
+/// from the Syncplay passthrough streams that follow.
+async fn serve(
+    connection: Connection,
+    target: SocketAddr,
+    peers: Peers,
+    control_writers: ControlWriters,
+    control: Arc<dyn ControlChannel>,
+) {
     let guest = connection.remote_id();
     tracing::info!(%guest, "a guest joined the party");
 
@@ -111,6 +216,33 @@ async fn serve(connection: Connection, target: SocketAddr, peers: Peers) {
         .lock()
         .expect("the peer map is never poisoned")
         .insert(guest, connection.clone());
+
+    let Ok((send, recv)) = connection.accept_bi().await else {
+        tracing::warn!(%guest, "a guest never opened its control channel");
+        peers
+            .lock()
+            .expect("the peer map is never poisoned")
+            .remove(&guest);
+        return;
+    };
+
+    let writer: Arc<AsyncMutex<BoxedWriter>> = Arc::new(AsyncMutex::new(Box::new(send)));
+    control_writers
+        .lock()
+        .expect("the control writer map is never poisoned")
+        .insert(guest, Arc::clone(&writer));
+
+    Arc::clone(&control).on_connected(guest);
+
+    let mut reader: BoxedReader = Box::new(recv);
+    tokio::spawn(async move {
+        loop {
+            match read_frame(&mut *reader).await {
+                Ok(bytes) => Arc::clone(&control).on_message(guest, bytes),
+                Err(_) => break,
+            }
+        }
+    });
 
     // Ends when the guest closes the connection or it times out, which is what
     // terminates this task — there is nothing else to poll for.
@@ -131,6 +263,10 @@ async fn serve(connection: Connection, target: SocketAddr, peers: Peers) {
     peers
         .lock()
         .expect("the peer map is never poisoned")
+        .remove(&guest);
+    control_writers
+        .lock()
+        .expect("the control writer map is never poisoned")
         .remove(&guest);
 
     tracing::info!(%guest, "a guest left the party");
@@ -175,6 +311,9 @@ pub struct GuestTunnel {
     /// diagnostics screen can ask how it is carried. Cloning a [`Connection`]
     /// clones a handle, not the connection.
     connection: Connection,
+    /// The write half of the control channel opened in [`Self::open`], kept
+    /// so [`Self::send_control`] can be called any time after connecting.
+    control_writer: Arc<AsyncMutex<BoxedWriter>>,
     /// Kept alive, never used again.
     ///
     /// An [`Endpoint`] is a handle to the QUIC stack, and dropping the last
@@ -197,7 +336,15 @@ impl GuestTunnel {
     /// is all an invite carries and the transport resolves the rest, or a full
     /// [`EndpointAddr`] when the addresses are already known and there is no
     /// lookup service to ask.
-    pub async fn open(endpoint: Endpoint, host: impl Into<EndpointAddr>) -> Result<Self> {
+    ///
+    /// Opens the control channel — the first bi-stream on the connection —
+    /// before anything else, so the host's `serve` loop can rely on it always
+    /// being first. `control` receives whatever the host sends back down it.
+    pub async fn open(
+        endpoint: Endpoint,
+        host: impl Into<EndpointAddr>,
+        control: Arc<dyn ControlChannel>,
+    ) -> Result<Self> {
         let host = host.into();
         let id = host.id;
 
@@ -207,6 +354,29 @@ impl GuestTunnel {
                 reason: error.to_string(),
             }
         })?;
+
+        let (control_send, control_recv) =
+            connection
+                .open_bi()
+                .await
+                .map_err(|error| SyncPartyError::PartyUnreachable {
+                    host: id.to_string(),
+                    reason: error.to_string(),
+                })?;
+
+        let control_writer: Arc<AsyncMutex<BoxedWriter>> =
+            Arc::new(AsyncMutex::new(Box::new(control_send)));
+
+        let mut control_reader: BoxedReader = Box::new(control_recv);
+        let peer = connection.remote_id();
+        tokio::spawn(async move {
+            loop {
+                match read_frame(&mut *control_reader).await {
+                    Ok(bytes) => Arc::clone(&control).on_message(peer, bytes),
+                    Err(_) => break,
+                }
+            }
+        });
 
         // Port 0 asks the OS for a free one: a fixed port would collide with
         // the guest's own Syncplay server if they ever host, and with a second
@@ -237,6 +407,7 @@ impl GuestTunnel {
             local,
             task,
             connection,
+            control_writer,
             _endpoint: endpoint,
         })
     }
@@ -250,6 +421,14 @@ impl GuestTunnel {
     /// How this guest is reaching the host.
     pub fn host_path(&self) -> PeerPath {
         describe(&self.connection)
+    }
+
+    /// Sends `bytes` to the host down the control channel.
+    pub async fn send_control(&self, bytes: &[u8]) -> Result<()> {
+        let mut writer = self.control_writer.lock().await;
+        write_frame(&mut *writer, bytes)
+            .await
+            .map_err(|error| SyncPartyError::Other(format!("control channel write failed: {error}")))
     }
 }
 
@@ -290,7 +469,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Discards whatever arrives — these tests are exercising Syncplay
+    /// passthrough, not the control channel itself.
+    struct NullControl;
+    impl ControlChannel for NullControl {
+        fn on_message(self: Arc<Self>, _peer: EndpointId, _bytes: Vec<u8>) {}
+    }
 
     /// A stand-in for the Syncplay server: echoes whatever it is sent.
     async fn echo_server() -> SocketAddr {
@@ -412,9 +597,9 @@ mod tests {
             .expect("guest endpoint");
 
         let host_addr = addr_of(&host_endpoint).await;
-        let _host = HostTunnel::start(host_endpoint, syncplay);
+        let _host = HostTunnel::start(host_endpoint, syncplay, Arc::new(NullControl));
 
-        let guest = GuestTunnel::open(guest_endpoint, host_addr)
+        let guest = GuestTunnel::open(guest_endpoint, host_addr, Arc::new(NullControl))
             .await
             .expect("the tunnel should open");
 
@@ -484,9 +669,9 @@ mod tests {
 
         let guest_endpoint = Endpoint::bind(presets::N0).await.expect("guest endpoint");
 
-        let host = HostTunnel::start(host_endpoint, syncplay);
+        let host = HostTunnel::start(host_endpoint, syncplay, Arc::new(NullControl));
 
-        let guest = GuestTunnel::open(guest_endpoint, invited)
+        let guest = GuestTunnel::open(guest_endpoint, invited, Arc::new(NullControl))
             .await
             .expect("the code alone should be enough to reach the host");
 

@@ -56,6 +56,40 @@ pub fn webhook_test(language: &str) -> String {
     }
 }
 
+/// `candidate_count` is announced rather than the titles themselves — the
+/// channel message is a heads-up to go vote, not a spoiler of the options.
+pub fn movie_vote_started(candidate_count: usize, language: &str) -> String {
+    if is_turkish(language) {
+        format!("🍿 **Film oylaması başladı!** {candidate_count} film arasından seçim yapılıyor.")
+    } else {
+        format!("🍿 **Movie vote is open!** Choosing between {candidate_count} movies.")
+    }
+}
+
+pub fn movie_vote_cancelled(language: &str) -> String {
+    if is_turkish(language) {
+        "🚫 **Film oylaması iptal edildi.**".to_owned()
+    } else {
+        "🚫 **The movie vote was cancelled.**".to_owned()
+    }
+}
+
+pub fn movie_vote_completed(language: &str) -> String {
+    if is_turkish(language) {
+        "🗳️ **Film oylaması kapandı.**".to_owned()
+    } else {
+        "🗳️ **Voting has closed.**".to_owned()
+    }
+}
+
+pub fn movie_selected(title: &str, language: &str) -> String {
+    if is_turkish(language) {
+        format!("🎬 **Bu akşamın filmi belli oldu: {title}**")
+    } else {
+        format!("🎬 **Tonight's movie is {title}!**")
+    }
+}
+
 /// Matches `tr` and any regional variant such as `tr-TR`.
 fn is_turkish(language: &str) -> bool {
     language.split(['-', '_']).next().unwrap_or(language) == "tr"
@@ -112,5 +146,18 @@ mod tests {
     #[test]
     fn falls_back_to_english_for_an_unknown_language() {
         assert_eq!(party_stopped("de"), party_stopped("en"));
+    }
+
+    #[test]
+    fn the_movie_vote_started_message_names_the_candidate_count() {
+        assert!(movie_vote_started(5, "en").contains('5'));
+        assert!(movie_vote_started(5, "tr").contains('5'));
+    }
+
+    #[test]
+    fn the_movie_selected_message_names_the_winner() {
+        for language in ["tr", "en"] {
+            assert!(movie_selected("Interstellar", language).contains("Interstellar"));
+        }
     }
 }

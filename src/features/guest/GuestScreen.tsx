@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useAppState } from "@/app/AppState";
+import { GuestMoviePanel } from "@/features/movie-voting/GuestMoviePanel";
 import { useTranslate } from "@/shared/i18n";
 import { errorMessage, ipc } from "@/shared/ipc";
 import {
@@ -102,7 +103,7 @@ export function GuestScreen() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 px-8 py-10">
+    <div className="mx-auto max-w-2xl space-y-5 px-8 py-10">
       {/* The same status line the host screen opens with, so the two sides of
           the app read as one deck rather than two products. */}
       <div className="flex items-center gap-2.5">
@@ -151,7 +152,11 @@ export function GuestScreen() {
             </Button>
           </div>
         </Card>
-      ) : (
+      ) : null}
+
+      {joined && <GuestMoviePanel />}
+
+      {!invite && (
         <Card>
           <div className="space-y-4">
             <Field label={t("guest.paste.label")} hint={t("guest.paste.hint")}>

@@ -15,7 +15,7 @@ use crate::core::config::{ConfigStore, SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
-use crate::core::net::{GuestTunnel, HostTunnel, PartyEndpoint, TransportReport};
+use crate::core::net::{ControlChannel, GuestTunnel, HostTunnel, PartyEndpoint, TransportReport};
 use crate::core::notify::{self, DiscordNotifier};
 use crate::core::syncplay::{
     ClientLauncher, MonitorConfig, RoomMonitor, ServerConfig, ServerController, ServerState,
@@ -91,6 +91,9 @@ pub struct PartySession {
     server: Arc<dyn ServerController>,
     discord: Arc<DiscordNotifier>,
     bus: Arc<dyn EventBus>,
+    /// Whoever owns the control channel's application data — movie voting,
+    /// today. `session` only knows it needs handing to every tunnel it opens.
+    control: Arc<dyn ControlChannel>,
     state: Mutex<SessionState>,
     monitor: Mutex<Option<RoomMonitor>>,
     network: Mutex<Option<HostNetwork>>,
@@ -104,6 +107,7 @@ impl PartySession {
         server: Arc<dyn ServerController>,
         discord: Arc<DiscordNotifier>,
         bus: Arc<dyn EventBus>,
+        control: Arc<dyn ControlChannel>,
     ) -> Self {
         Self {
             settings,
@@ -111,10 +115,36 @@ impl PartySession {
             server,
             discord,
             bus,
+            control,
             state: Mutex::new(SessionState::Idle),
             monitor: Mutex::new(None),
             network: Mutex::new(None),
             guest: Mutex::new(None),
+        }
+    }
+
+    /// Sends `bytes` down every guest's control channel. A no-op with no
+    /// party running or no guests connected.
+    pub async fn broadcast_control(&self, bytes: Vec<u8>) {
+        if let Some(network) = self.network.lock().await.as_ref() {
+            network.tunnel.broadcast_control(&bytes).await;
+        }
+    }
+
+    /// Sends `bytes` to the host down this guest's control channel. An error
+    /// if this machine is not currently in a party as a guest.
+    pub async fn send_control(&self, bytes: Vec<u8>) -> Result<()> {
+        match self.guest.lock().await.as_ref() {
+            Some(guest) => guest.tunnel.send_control(&bytes).await,
+            None => Err(SyncPartyError::NotInParty),
+        }
+    }
+
+    /// Sends `bytes` down one guest's control channel — used to hydrate a
+    /// single guest (on reconnect, say) without broadcasting to everyone.
+    pub async fn send_control_to(&self, peer: iroh::EndpointId, bytes: Vec<u8>) {
+        if let Some(network) = self.network.lock().await.as_ref() {
+            network.tunnel.send_control_to(peer, &bytes).await;
         }
     }
 
@@ -215,7 +245,11 @@ impl PartySession {
 
         // Started only once the server is answering, so a guest that arrives
         // in the same instant is forwarded to something that exists.
-        let tunnel = HostTunnel::start(endpoint.inner().clone(), config.local_address());
+        let tunnel = HostTunnel::start(
+            endpoint.inner().clone(),
+            config.local_address(),
+            Arc::clone(&self.control),
+        );
         *self.network.lock().await = Some(HostNetwork { tunnel, endpoint });
 
         let invite = Invite {
@@ -337,7 +371,12 @@ impl PartySession {
         let launcher = ClientLauncher::discover(&self.settings)?;
 
         let endpoint = PartyEndpoint::bind_joining().await?;
-        let tunnel = GuestTunnel::open(endpoint.inner().clone(), invite.endpoint_id()?).await?;
+        let tunnel = GuestTunnel::open(
+            endpoint.inner().clone(),
+            invite.endpoint_id()?,
+            Arc::clone(&self.control),
+        )
+        .await?;
         let address = tunnel.local_addr();
 
         launcher.join(invite, address, &nickname).await?;
@@ -422,6 +461,13 @@ mod tests {
     use crate::core::events::test_support::RecordingEventBus;
     use crate::core::paths::AppPaths;
 
+    /// Discards whatever arrives on the control channel — these tests are not
+    /// exercising movie voting.
+    struct NullControl;
+    impl ControlChannel for NullControl {
+        fn on_message(self: Arc<Self>, _peer: iroh::EndpointId, _bytes: Vec<u8>) {}
+    }
+
     /// A server that records what it was asked to do without starting Python.
     #[derive(Default)]
     struct FakeServer {
@@ -474,6 +520,7 @@ mod tests {
             server,
             Arc::new(DiscordNotifier::new(secrets)),
             Arc::clone(&bus) as Arc<dyn EventBus>,
+            Arc::new(NullControl),
         );
 
         (session, bus)

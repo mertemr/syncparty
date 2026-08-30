@@ -6,8 +6,8 @@ use tauri::State;
 use crate::core::config::AppSettings;
 use crate::core::error::Result;
 use crate::core::movie::{
-    DiscoverFilter, Genre, MovieDetails, MovieProvider, MovieSummary, SessionHistoryEntry,
-    WatchedMovie,
+    DiscoverFilter, Genre, MovieDetails, MovieProvider, MovieSummary, PartyLogEntry,
+    SessionHistoryEntry, UserMovie, WatchedMovie,
 };
 use crate::core::movie_vote::{MovieCandidate, MovieVoteSnapshot, ParticipationStatus};
 use crate::core::session::SessionState;
@@ -248,4 +248,51 @@ pub fn get_session_history(state: State<'_, AppState>) -> Result<Vec<SessionHist
 #[tauri::command]
 pub fn get_watched_movies(state: State<'_, AppState>) -> Result<Vec<WatchedMovie>> {
     state.movie_store.list_watched_movies()
+}
+
+#[tauri::command]
+pub fn list_user_movies(state: State<'_, AppState>) -> Result<Vec<UserMovie>> {
+    state.movie_store.list_user_movies()
+}
+
+/// Sets the favourite and watched marks for one movie in one call. Both
+/// flags travel together because they share a row: sending only the one that
+/// changed would mean reading the other back first to avoid clearing it.
+#[tauri::command]
+pub fn set_user_movie(
+    state: State<'_, AppState>,
+    movie: MovieSummary,
+    favorite: bool,
+    watched: bool,
+) -> Result<()> {
+    state
+        .movie_store
+        .set_user_movie(&movie, favorite, watched, now_seconds())
+}
+
+#[tauri::command]
+pub fn get_party_log(state: State<'_, AppState>) -> Result<Vec<PartyLogEntry>> {
+    state.movie_store.list_party_logs()
+}
+
+/// Records what the room is watching tonight, against the running party.
+/// `movie` of `None` clears it.
+#[tauri::command]
+pub async fn set_now_watching(
+    state: State<'_, AppState>,
+    movie: Option<MovieCandidate>,
+) -> Result<()> {
+    match movie {
+        Some(movie) => {
+            state
+                .session
+                .set_now_watching(
+                    Some(movie.tmdb_id),
+                    Some(&movie.title),
+                    movie.poster.as_deref(),
+                )
+                .await
+        }
+        None => state.session.set_now_watching(None, None, None).await,
+    }
 }

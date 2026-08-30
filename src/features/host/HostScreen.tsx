@@ -7,6 +7,8 @@ import { Badge, Button, Card, Counter, EmptyState, Rewind, cx } from "@/shared/u
 import type { StartupStep } from "@/shared/types/StartupStep";
 
 import { FavoritesCard } from "@/features/movie/FavoritesCard";
+import { NowWatchingCard } from "@/features/movie/NowWatchingCard";
+import { PartyLogCard } from "@/features/movie/PartyLogCard";
 import { HostMoviePanel } from "@/features/movie-voting/HostMoviePanel";
 
 import { InviteCard } from "./InviteCard";
@@ -184,12 +186,16 @@ export function HostScreen() {
     // screen. `md` rather than `lg` for the same reason as ever — the
     // default window is 940px wide, and an `lg` breakpoint would mean this
     // never renders as three columns in the app it was built for.
-    <div className="mx-auto grid max-w-6xl gap-5 px-8 py-8 md:grid-cols-[260px_minmax(0,1fr)_260px]">
+    // The rails stay the width they need; every pixel the window gains goes
+    // to the middle, where the poster grid turns it into another column.
+    // Capped at 112rem so an ultrawide gets a readable page rather than a
+    // 3000px band of posters.
+    <div className="mx-auto grid max-w-[112rem] gap-5 px-8 py-8 md:grid-cols-[240px_minmax(0,1fr)_240px] xl:grid-cols-[260px_minmax(0,1fr)_260px]">
       {/* `min-w-0` on every track: without it the invite link/code —
           unbreakable base64, rendered `truncate` — sets a column's grid
           auto-minimum to its full unwrapped width, which starves its
           siblings down to whatever is left over. */}
-      <div className="min-w-0 space-y-5">
+      <div className="min-w-0 space-y-5 md:tall:sticky md:tall:top-4 md:tall:self-start">
         {statusCard}
 
         {joinState === "opened" && (
@@ -198,6 +204,7 @@ export function HostScreen() {
           </p>
         )}
         <InviteCard hosting={session} />
+        <NowWatchingCard />
         <FavoritesCard />
       </div>
 
@@ -205,9 +212,10 @@ export function HostScreen() {
         <HostMoviePanel />
       </div>
 
-      <div className="min-w-0 space-y-5">
+      <div className="min-w-0 space-y-5 md:tall:sticky md:tall:top-4 md:tall:self-start">
         {session.monitorAttached && <LobbyPanel snapshot={room} />}
         <RoomPanel snapshot={room} monitorAttached={session.monitorAttached} />
+        <PartyLogCard />
         {logsCard}
       </div>
     </div>

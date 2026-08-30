@@ -96,6 +96,7 @@ impl AppState {
         let tmdb = Arc::new(TmdbClient::new(Arc::clone(&secrets)));
         let movie_store = Arc::new(MovieStore::open(&paths.movies_database())?);
         movie_vote.attach_store(Arc::clone(&movie_store));
+        session.attach_store(Arc::clone(&movie_store));
         movie_vote.attach_notify(Arc::clone(&discord), Arc::clone(&settings));
 
         Ok(Self {

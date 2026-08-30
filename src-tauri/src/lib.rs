@@ -101,6 +101,10 @@ pub fn run() {
             movie_commands::get_movie_vote,
             movie_commands::get_session_history,
             movie_commands::get_watched_movies,
+            movie_commands::list_user_movies,
+            movie_commands::set_user_movie,
+            movie_commands::get_party_log,
+            movie_commands::set_now_watching,
         ])
         .run(tauri::generate_context!())
         .expect("syncparty failed to start");

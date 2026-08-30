@@ -3,6 +3,8 @@
 //! Written in the host's own language, because the people reading it are the
 //! host's friends rather than the host.
 
+use serde_json::{json, Value};
+
 use crate::core::invite::Invite;
 
 /// The "we're live" announcement, including the one-click join link.
@@ -64,6 +66,77 @@ pub fn movie_vote_started(candidate_count: usize, language: &str) -> String {
     } else {
         format!("🍿 **Movie vote is open!** Choosing between {candidate_count} movies.")
     }
+}
+
+/// One movie, reduced to what a channel card can show: what it is, when it
+/// came out, and how it scored.
+pub struct PosterCard<'a> {
+    pub title: &'a str,
+    pub poster: Option<&'a str>,
+    pub release_date: Option<&'a str>,
+    pub rating: f64,
+}
+
+impl PosterCard<'_> {
+    fn line(&self) -> String {
+        let year = self
+            .release_date
+            .and_then(|date| date.get(..4))
+            .unwrap_or("—");
+        format!("**{}** · {year} · ★ {:.1}", self.title, self.rating)
+    }
+}
+
+/// Discord's accent bar, as the app's own magenta.
+const EMBED_COLOUR: u32 = 0xE8_4C_9A;
+const EMBED_COLOUR_WINNER: u32 = 0x4A_D9_95;
+
+/// The ballot as a card: every candidate listed, with the first one's poster
+/// as the thumbnail. A line of text saying "5 movies" told nobody which five,
+/// which is the thing that decides whether anyone opens the app to vote.
+pub fn movie_vote_started_card(candidates: &[PosterCard<'_>], language: &str) -> Value {
+    let turkish = is_turkish(language);
+    let listing: Vec<String> = candidates.iter().map(PosterCard::line).collect();
+
+    let mut embed = json!({
+        "title": if turkish { "🍿 Film oylaması başladı" } else { "🍿 Movie vote is open" },
+        "description": listing.join("
+    "),
+        "color": EMBED_COLOUR,
+        "footer": {
+            "text": if turkish {
+                format!("{} film arasından seçim yapılıyor", candidates.len())
+            } else {
+                format!("Choosing between {} movies", candidates.len())
+            }
+        },
+    });
+
+    // The first candidate's artwork, purely so the card is not a wall of
+    // text — there is no "main" candidate before anyone has voted.
+    if let Some(poster) = candidates.first().and_then(|card| card.poster) {
+        embed["thumbnail"] = json!({ "url": poster });
+    }
+
+    json!({ "embeds": [embed] })
+}
+
+/// The winner, with its poster at full width — this is the one announcement
+/// worth the space, and the only one people will scroll back to find.
+pub fn movie_selected_card(card: &PosterCard<'_>, language: &str) -> Value {
+    let turkish = is_turkish(language);
+
+    let mut embed = json!({
+        "title": if turkish { "🎬 Bu akşamın filmi" } else { "🎬 Tonight's movie" },
+        "description": card.line(),
+        "color": EMBED_COLOUR_WINNER,
+    });
+
+    if let Some(poster) = card.poster {
+        embed["image"] = json!({ "url": poster });
+    }
+
+    json!({ "embeds": [embed] })
 }
 
 pub fn movie_vote_cancelled(language: &str) -> String {

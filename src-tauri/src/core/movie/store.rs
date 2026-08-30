@@ -19,7 +19,7 @@ use ts_rs::TS;
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::movie_vote::MovieVoteSnapshot;
 
-use super::MovieDetails;
+use super::{MovieDetails, MovieSummary};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -42,7 +42,45 @@ pub struct WatchedMovie {
     pub participants: Vec<String>,
 }
 
-const CURRENT_VERSION: i32 = 1;
+/// One person's own marks on a movie — a favourite, a "seen it", or both.
+///
+/// The summary is stored alongside the flags rather than looked up again:
+/// a favourites list or a watched grid is a list of posters, and re-fetching
+/// every one of them from TMDB to draw a screen the user has already seen
+/// turns a local list into a network round trip per movie.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMovie {
+    pub movie: MovieSummary,
+    pub favorite: bool,
+    pub watched: bool,
+    /// When the flags last changed. Sorts a list newest first.
+    pub marked_at: i64,
+}
+
+/// One night: when it ran, what was on, and who was in the room.
+///
+/// Separate from `SessionHistoryEntry`, which is a *vote's* record — a party
+/// can run without a vote ever being held, and a vote's clock starts when the
+/// ballot was drafted rather than when anyone actually sat down.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct PartyLogEntry {
+    pub id: String,
+    pub started_at: i64,
+    /// `None` while the party is still running.
+    pub ended_at: Option<i64>,
+    pub movie_tmdb_id: Option<i64>,
+    pub movie_title: Option<String>,
+    pub movie_poster: Option<String>,
+    /// Everyone seen in the room over the whole night, not just whoever was
+    /// still there at the end — people drop out of a call and come back.
+    pub participants: Vec<String>,
+}
+
+const CURRENT_VERSION: i32 = 3;
 
 const SCHEMA_V1: &str = "
     CREATE TABLE movie_cache (
@@ -71,11 +109,46 @@ const SCHEMA_V1: &str = "
     );
 ";
 
+/// Favourites and manual "seen it" marks. Both used to live in the
+/// webview's `localStorage`, which is neither backed up with the rest of the
+/// app's data nor readable by anything but the window that wrote it.
+const SCHEMA_V2: &str = "
+    CREATE TABLE user_movies (
+        tmdb_id INTEGER PRIMARY KEY,
+        favorite INTEGER NOT NULL,
+        watched INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        marked_at INTEGER NOT NULL
+    );
+";
+
+/// The party log. `user_movies` (v2) is one person's marks on a movie; this
+/// is the record of an evening, which nothing until now wrote down.
+const SCHEMA_V3: &str = "
+    CREATE TABLE party_sessions (
+        id TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        movie_tmdb_id INTEGER,
+        movie_title TEXT,
+        movie_poster TEXT,
+        participants TEXT NOT NULL
+    );
+";
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     if version < 1 {
         conn.execute_batch(SCHEMA_V1)?;
+    }
+
+    if version < 2 {
+        conn.execute_batch(SCHEMA_V2)?;
+    }
+
+    if version < 3 {
+        conn.execute_batch(SCHEMA_V3)?;
     }
 
     conn.pragma_update(None, "user_version", CURRENT_VERSION)?;
@@ -202,6 +275,144 @@ impl MovieStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Every movie the user has marked, most recently marked first.
+    pub fn list_user_movies(&self) -> Result<Vec<UserMovie>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT favorite, watched, payload, marked_at FROM user_movies ORDER BY marked_at DESC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            let favorite: i64 = row.get(0)?;
+            let watched: i64 = row.get(1)?;
+            let payload: String = row.get(2)?;
+            let marked_at: i64 = row.get(3)?;
+            Ok((favorite != 0, watched != 0, payload, marked_at))
+        })?;
+
+        let mut movies = Vec::new();
+        for row in rows {
+            let (favorite, watched, payload, marked_at) = row?;
+            movies.push(UserMovie {
+                movie: serde_json::from_str(&payload)?,
+                favorite,
+                watched,
+                marked_at,
+            });
+        }
+        Ok(movies)
+    }
+
+    /// Sets both flags for one movie. Clearing both deletes the row rather
+    /// than keeping a record that says nothing — the movie is simply not
+    /// marked any more, and the summary is re-fetchable at any time.
+    pub fn set_user_movie(
+        &self,
+        movie: &MovieSummary,
+        favorite: bool,
+        watched: bool,
+        now: i64,
+    ) -> Result<()> {
+        if !favorite && !watched {
+            self.conn().execute(
+                "DELETE FROM user_movies WHERE tmdb_id = ?1",
+                params![movie.tmdb_id],
+            )?;
+            return Ok(());
+        }
+
+        let payload = serde_json::to_string(movie)?;
+        self.conn().execute(
+            "INSERT INTO user_movies (tmdb_id, favorite, watched, payload, marked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (tmdb_id) DO UPDATE SET
+                favorite = excluded.favorite,
+                watched = excluded.watched,
+                payload = excluded.payload,
+                marked_at = excluded.marked_at",
+            params![movie.tmdb_id, favorite as i64, watched as i64, payload, now],
+        )?;
+        Ok(())
+    }
+
+    /// Starts a party's record. Called the moment hosting comes up, so a
+    /// night that is never given a movie still leaves a trace of having
+    /// happened.
+    pub fn open_party_log(&self, id: &str, started_at: i64) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO party_sessions (id, started_at, ended_at, participants)
+             VALUES (?1, ?2, NULL, '[]')
+             ON CONFLICT (id) DO NOTHING",
+            params![id, started_at],
+        )?;
+        Ok(())
+    }
+
+    /// Sets what the room is watching. Overwrites — changing your mind
+    /// halfway through the evening is the normal case, not an error.
+    pub fn set_party_movie(
+        &self,
+        id: &str,
+        tmdb_id: Option<i64>,
+        title: Option<&str>,
+        poster: Option<&str>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "UPDATE party_sessions
+             SET movie_tmdb_id = ?2, movie_title = ?3, movie_poster = ?4
+             WHERE id = ?1",
+            params![id, tmdb_id, title, poster],
+        )?;
+        Ok(())
+    }
+
+    /// Closes a party's record with its end time and its roster.
+    pub fn close_party_log(&self, id: &str, ended_at: i64, participants: &[String]) -> Result<()> {
+        let participants = serde_json::to_string(participants)?;
+        self.conn().execute(
+            "UPDATE party_sessions SET ended_at = ?2, participants = ?3 WHERE id = ?1",
+            params![id, ended_at, participants],
+        )?;
+        Ok(())
+    }
+
+    /// Every night on file, most recent first.
+    pub fn list_party_logs(&self) -> Result<Vec<PartyLogEntry>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT id, started_at, ended_at, movie_tmdb_id, movie_title, movie_poster, participants
+             FROM party_sessions ORDER BY started_at DESC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            let (id, started_at, ended_at, movie_tmdb_id, movie_title, movie_poster, participants) =
+                row?;
+            entries.push(PartyLogEntry {
+                id,
+                started_at,
+                ended_at,
+                movie_tmdb_id,
+                movie_title,
+                movie_poster,
+                participants: serde_json::from_str(&participants)?,
+            });
+        }
+        Ok(entries)
     }
 
     pub fn list_watched_movies(&self) -> Result<Vec<WatchedMovie>> {
@@ -435,5 +646,72 @@ mod tests {
 
         let store = MovieStore::open(&path).expect("reopen");
         assert!(store.cached_movie(1, "en-US", 1).expect("read").is_some());
+    }
+
+    fn sample_summary(tmdb_id: i64) -> MovieSummary {
+        MovieSummary {
+            tmdb_id,
+            title: "Inception".to_owned(),
+            original_title: "Inception".to_owned(),
+            poster: Some("/poster.jpg".to_owned()),
+            backdrop: None,
+            release_date: Some("2010-07-16".to_owned()),
+            overview: "A thief who steals corporate secrets.".to_owned(),
+            genre_ids: vec![28],
+            rating: 8.4,
+            vote_count: 35000,
+            popularity: 1.0,
+        }
+    }
+
+    #[test]
+    fn user_marks_round_trip_newest_first() {
+        let store = store_at("user-movies-order");
+
+        store
+            .set_user_movie(&sample_summary(1), true, false, 100)
+            .expect("write");
+        store
+            .set_user_movie(&sample_summary(2), false, true, 300)
+            .expect("write");
+
+        let marked = store.list_user_movies().expect("read");
+        assert_eq!(marked.len(), 2);
+        assert_eq!(marked[0].movie.tmdb_id, 2);
+        assert!(marked[0].watched && !marked[0].favorite);
+        assert_eq!(marked[1].movie.tmdb_id, 1);
+        assert!(marked[1].favorite && !marked[1].watched);
+        assert_eq!(marked[1].movie.poster.as_deref(), Some("/poster.jpg"));
+    }
+
+    #[test]
+    fn setting_a_second_flag_updates_the_same_row() {
+        let store = store_at("user-movies-update");
+
+        store
+            .set_user_movie(&sample_summary(7), true, false, 100)
+            .expect("write");
+        store
+            .set_user_movie(&sample_summary(7), true, true, 200)
+            .expect("write");
+
+        let marked = store.list_user_movies().expect("read");
+        assert_eq!(marked.len(), 1);
+        assert!(marked[0].favorite && marked[0].watched);
+        assert_eq!(marked[0].marked_at, 200);
+    }
+
+    #[test]
+    fn clearing_both_flags_removes_the_row() {
+        let store = store_at("user-movies-clear");
+
+        store
+            .set_user_movie(&sample_summary(9), true, true, 100)
+            .expect("write");
+        store
+            .set_user_movie(&sample_summary(9), false, false, 200)
+            .expect("write");
+
+        assert!(store.list_user_movies().expect("read").is_empty());
     }
 }

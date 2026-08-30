@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { useTranslate } from "@/shared/i18n";
 import { errorMessage, ipc } from "@/shared/ipc";
@@ -54,7 +55,13 @@ export function MovieDetailModal({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  return (
+  // Rendered into `body`, not where it was called from. `position: fixed`
+  // and a high `z-index` are both measured against the nearest ancestor that
+  // creates a stacking context, and the sidebar this is opened from is
+  // `position: sticky`, which creates one — so the dialog was pinned to the
+  // viewport correctly and then painted underneath the poster grid, because
+  // the whole sidebar paints before the column next to it.
+  return createPortal(
     <div
       role="presentation"
       className="fixed inset-0 z-50 flex items-center justify-center bg-canvas/80 p-4 backdrop-blur-sm"
@@ -195,6 +202,7 @@ export function MovieDetailModal({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -1,53 +1,32 @@
 /**
- * Manual "mark as watched" flags, kept in `localStorage` — same shape as
- * `favorites.ts`, and for the same reason: this is a personal tag ("I saw
- * this, however I saw it"), not the real watched history TMDB vote outcomes
- * already produce on the backend. That real history still wins wherever the
- * two disagree; this only adds a mark, it can't remove one that came from
- * an actual movie night.
+ * How the watched grid orders itself.
+ *
+ * The marks themselves live in `userMovies.ts` (and in SQLite behind it);
+ * this is only the rule for merging them with the backend's real movie-night
+ * history, kept apart because it is the one part worth testing on its own.
  */
-const STORAGE_KEY = "syncparty.movie.watched-manual";
 
-function readAll(): Set<string> {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
-  } catch {
-    return new Set();
+/**
+ * The order the watched grid shows: real movie nights newest first, then
+ * manual marks that never had a night of their own.
+ *
+ * Real history wins on a tie, which is why it is laid down first — a movie
+ * both marked by hand and actually watched should sit with the date it was
+ * watched on, not at the end of the list.
+ */
+export function watchedIdOrder(
+  history: Array<{ tmdbId: bigint; watchedAt: bigint }>,
+  manual: string[],
+): string[] {
+  const ordered = [...history]
+    .sort((a, b) => (a.watchedAt === b.watchedAt ? 0 : a.watchedAt > b.watchedAt ? -1 : 1))
+    .map((movie) => movie.tmdbId.toString());
+
+  const seen = new Set(ordered);
+  for (const id of manual) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ordered.push(id);
   }
-}
-
-function writeAll(ids: Set<string>) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([...ids]));
-  } catch {
-    // Quota exceeded or storage unavailable — the toggle just doesn't stick.
-  }
-}
-
-const listeners = new Set<() => void>();
-
-/** See the identical pattern in `favorites.ts` — lets the picker grid and
- * anything else reading this react to a toggle happening elsewhere. */
-export function subscribeWatchedManual(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-export function isWatchedManual(tmdbId: bigint): boolean {
-  return readAll().has(tmdbId.toString());
-}
-
-/** Toggles the manual mark for `tmdbId`. Returns the new state. */
-export function toggleWatchedManual(tmdbId: bigint): boolean {
-  const ids = readAll();
-  const key = tmdbId.toString();
-  const nowWatched = !ids.has(key);
-
-  if (nowWatched) ids.add(key);
-  else ids.delete(key);
-
-  writeAll(ids);
-  for (const listener of listeners) listener();
-  return nowWatched;
+  return ordered;
 }

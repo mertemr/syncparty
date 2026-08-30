@@ -27,6 +27,8 @@ import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
 
+import { hydrateUserMovies } from "@/features/movie/userMovies";
+
 import { movieVoteToastMessage } from "./movieVoteToast";
 
 /** How many server log lines to keep. Enough to diagnose a failed start. */
@@ -158,6 +160,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     void ipc.getSettings().then(setSettings).catch(reportInitialFailure);
     void ipc.sessionState().then(setSession).catch(reportInitialFailure);
     void ipc.getMovieVote().then(setMovieVote).catch(reportInitialFailure);
+    // Loads favourites and watched marks into memory so every poster card
+    // can ask about them synchronously — see `userMovies.ts`.
+    void hydrateUserMovies().catch(reportInitialFailure);
 
     return () => {
       cancelled = true;

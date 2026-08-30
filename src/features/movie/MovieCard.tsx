@@ -11,28 +11,55 @@ function year(releaseDate: string | null): string | null {
   return releaseDate ? releaseDate.slice(0, 4) : null;
 }
 
-/** A drop shadow standing in for a background: these sit directly on the
- * poster, whose brightness varies, so a plain glyph needs something to stay
- * legible without going back to a badge behind it. */
-const INDICATOR_SHADOW = "drop-shadow-[0_1px_3px_rgb(0_0_0_/_0.85)]";
-
-function EyeIcon() {
+/** Both marks are drawn the same way — one outline, filled in when set —
+ * so the control strip reads as one family rather than a heart glyph next
+ * to an icon next to a button. `fill` is what carries the state. */
+function HeartIcon({ filled }: { filled: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" className="size-4 fill-none stroke-current" strokeWidth="2" aria-hidden>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" strokeLinejoin="round" />
-      <circle cx="12" cy="12" r="3" />
+    <svg
+      viewBox="0 0 24 24"
+      className={cx("size-3.5 stroke-current", filled ? "fill-current" : "fill-none")}
+      strokeWidth="2"
+      aria-hidden
+    >
+      <path d="M12 20s-7-4.5-7-9.5A4.5 4.5 0 0 1 12 7a4.5 4.5 0 0 1 7 3.5c0 5-7 9.5-7 9.5Z" strokeLinejoin="round" />
     </svg>
   );
 }
 
+function EyeIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={cx("size-3.5 stroke-current", filled ? "fill-current" : "fill-none")}
+      strokeWidth="2"
+      aria-hidden
+    >
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="3" className="fill-none" />
+    </svg>
+  );
+}
+
+/** The two icon buttons beside Add, and Add itself, share this. */
+const CARD_CONTROL =
+  "pointer-events-auto flex items-center justify-center rounded-[var(--radius-control)] py-1.5 text-xs font-semibold tracking-wide transition-colors duration-[var(--duration-fast)] disabled:cursor-not-allowed disabled:opacity-45";
+
 /** A poster card for the browse grid — the same shape whether it opens the
  * detail view or doubles as a candidate the host can add/remove.
  *
- * Favourite and watched are plain coloured glyphs (top-left) rather than
- * badges — a card already showing title, year, rating and genres has no
- * room for another pill, and a heart or an eye reads on its own without one.
- * The add/remove control (top-right) stays a solid button: it is an action,
- * not a status. */
+ * The poster is the whole card: title, year, rating and the add control all
+ * sit on a scrim over its lower third rather than in a strip below it. Three
+ * to a row in a 260px-flanked centre column leaves each card about 190px
+ * wide, and a separate meta block at that width costs a third of the card's
+ * height to say what fits over the artwork for free.
+ *
+ * Add, favourite and watched sit together in one strip at the bottom of the
+ * scrim, drawn in one grammar: an outline is off, a fill is on. They were
+ * three different shapes in two different corners before — a text heart and
+ * an eye glyph floating on the artwork, and a real button below them — which
+ * read as three unrelated things rather than three switches on one card.
+ */
 export function MovieCard({
   movie,
   genreNames,
@@ -41,6 +68,7 @@ export function MovieCard({
   favorite,
   selected,
   addDisabled,
+  showWatchedMark = true,
   onOpen,
   onToggle,
   onToggleFavorite,
@@ -55,127 +83,134 @@ export function MovieCard({
   favorite: boolean;
   selected: boolean;
   addDisabled: boolean;
+  /** Off in a grid where everything is watched — marking every poster in
+   * the list says nothing and just makes the page look broken. */
+  showWatchedMark?: boolean;
   onOpen: () => void;
   onToggle?: () => void;
   onToggleFavorite?: () => void;
   onToggleWatched?: () => void;
 }) {
   const t = useTranslate();
+  const genre = genreNames[0];
+  const released = year(movie.releaseDate);
 
   return (
     <div
       className={cx(
-        "group relative flex flex-col overflow-hidden rounded-panel border bg-surface/85 transition-colors",
-        selected ? "border-accent/70" : "border-line hover:border-ink-faint",
+        // `isolate`: the scrim and the indicator row below stack against
+        // each other, not against the page. Without it a card's `z-20` scrim
+        // outranks the panel's sticky action bar and paints over it.
+        "group relative isolate aspect-2/3 overflow-hidden rounded-panel border bg-surface transition-colors",
+        selected ? "border-accent shadow-[0_0_0_1px_var(--color-accent)]" : "border-line",
       )}
     >
-      <div className="relative">
-        <button
-          type="button"
-          onClick={onOpen}
-          className="block w-full text-left focus-visible:outline-2 focus-visible:outline-accent"
-        >
-          <img
-            src={movie.poster ?? POSTER_PLACEHOLDER}
-            alt=""
-            loading="lazy"
-            className="aspect-[2/3] w-full object-cover"
-          />
-        </button>
+      <img
+        src={movie.poster ?? POSTER_PLACEHOLDER}
+        alt=""
+        loading="lazy"
+        className={cx(
+          "absolute inset-0 size-full object-cover",
+          "transition-[transform,filter] duration-[var(--duration-slow)] group-hover:scale-[1.04]",
+          // Already seen reads at a glance without spending a badge on it.
+          // Hovering clears it — a dimmed poster is a hint, not a verdict.
+          watched &&
+            showWatchedMark &&
+            "saturate-50 brightness-75 group-hover:saturate-100 group-hover:brightness-100",
+          "motion-reduce:transform-none motion-reduce:transition-none",
+        )}
+      />
 
-        <div className="absolute top-2 left-2 flex items-center gap-2">
+      {/* The card's own hit area, under every control and over the poster.
+          Everything above it that should stay clickable opts back in with
+          `pointer-events-auto`; the scrim's text does not, so a click on the
+          title still opens the detail view. */}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-label={movie.title}
+        className="absolute inset-0 z-10 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      />
+
+      {/* Two stops rather than a plain fade: a linear gradient over a poster
+          leaves the title floating in the middle of the image, and a solid
+          band cuts the artwork in half. This is opaque under the text and
+          gone by the time it reaches the middle of the card. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-linear-to-t from-canvas via-canvas/85 via-40% to-transparent px-2.5 pt-10 pb-2.5">
+        <p className="line-clamp-2 text-sm leading-tight font-semibold text-ink">{movie.title}</p>
+
+        <div className="mt-1 flex items-center gap-1.5 overflow-hidden font-mono text-[10px] whitespace-nowrap text-ink-faint">
+          {released && <span>{released}</span>}
+          <span className="text-accent">★ {movie.rating.toFixed(1)}</span>
+          {genre && (
+            <span style={{ color: genreAccent(genre) }} className="truncate uppercase">
+              {genre}
+            </span>
+          )}
+        </div>
+
+        {/* One strip, three controls, one grammar: outline means off, filled
+            means on. The marks used to be loose glyphs floating on the
+            poster's top corner, in a different shape and a different size
+            from every other control in the app — they sit with Add now
+            because they are the same kind of thing, a switch on this card. */}
+        <div className="mt-2 flex gap-1.5">
+          {onToggle && (
+            <button
+              type="button"
+              disabled={!selected && addDisabled}
+              onClick={onToggle}
+              className={cx(
+                CARD_CONTROL,
+                "min-w-0 flex-1 gap-1.5 px-2",
+                selected
+                  ? "bg-accent text-accent-ink hover:bg-accent-strong"
+                  : "border border-line bg-surface-raised/80 text-ink hover:border-accent/60 hover:bg-surface-raised",
+              )}
+            >
+              <span className="truncate">
+                {selected ? `✓ ${t("movie.card.added")}` : `+ ${t("movie.card.add")}`}
+              </span>
+            </button>
+          )}
+
           {onToggleFavorite && (
             <button
               type="button"
               aria-label={t(favorite ? "movie.card.unfavorite" : "movie.card.favorite")}
               aria-pressed={favorite}
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleFavorite();
-              }}
+              onClick={onToggleFavorite}
               className={cx(
-                INDICATOR_SHADOW,
-                "text-lg leading-none transition-opacity",
+                CARD_CONTROL,
+                "w-8 shrink-0",
                 favorite
-                  ? "text-accent opacity-100"
-                  : "text-ink opacity-0 hover:text-accent focus-visible:opacity-100 group-hover:opacity-100",
+                  ? "bg-accent text-accent-ink hover:bg-accent-strong"
+                  : "border border-line bg-surface-raised/80 text-ink-muted hover:border-accent/60 hover:text-accent",
               )}
             >
-              {favorite ? "♥" : "♡"}
+              <HeartIcon filled={favorite} />
             </button>
           )}
 
           {onToggleWatched && (
             <button
               type="button"
-              aria-label={t(
-                watched ? "movie.card.unmarkWatched" : "movie.card.markWatched",
-              )}
+              aria-label={t(watched ? "movie.card.unmarkWatched" : "movie.card.markWatched")}
               aria-pressed={watched}
               disabled={watchedLocked}
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleWatched();
-              }}
+              onClick={onToggleWatched}
               className={cx(
-                INDICATOR_SHADOW,
-                "transition-opacity disabled:cursor-default",
+                CARD_CONTROL,
+                "w-8 shrink-0",
                 watched
-                  ? "text-good opacity-100"
-                  : "text-ink opacity-0 hover:text-good focus-visible:opacity-100 group-hover:opacity-100",
+                  ? "bg-good text-canvas hover:bg-good/85"
+                  : "border border-line bg-surface-raised/80 text-ink-muted hover:border-good/60 hover:text-good",
               )}
             >
-              <EyeIcon />
+              <EyeIcon filled={watched} />
             </button>
           )}
         </div>
-
-        {onToggle && (
-          <button
-            type="button"
-            aria-label={t(selected ? "movie.card.remove" : "movie.card.add")}
-            aria-pressed={selected}
-            disabled={!selected && addDisabled}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggle();
-            }}
-            className={cx(
-              "absolute top-2 right-2 flex size-7 items-center justify-center rounded-full text-sm font-bold backdrop-blur-sm transition-opacity disabled:cursor-not-allowed disabled:opacity-40",
-              selected
-                ? "bg-accent text-accent-ink opacity-100"
-                : "bg-canvas/75 text-ink-muted opacity-0 hover:text-accent focus-visible:opacity-100 group-hover:opacity-100",
-            )}
-          >
-            {selected ? "✓" : "+"}
-          </button>
-        )}
-      </div>
-
-      <div className="flex flex-1 flex-col gap-1.5 p-3">
-        <button type="button" onClick={onOpen} className="text-left">
-          <p className="line-clamp-2 text-sm font-semibold text-ink">{movie.title}</p>
-        </button>
-
-        <div className="flex items-center gap-2 font-mono text-[11px] text-ink-faint">
-          {year(movie.releaseDate) && <span>{year(movie.releaseDate)}</span>}
-          <span aria-hidden>·</span>
-          <span>★ {movie.rating.toFixed(1)}</span>
-        </div>
-
-        {genreNames.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {genreNames.slice(0, 2).map((name) => (
-              <span
-                key={name}
-                style={{ color: genreAccent(name) }}
-                className="rounded-full border border-current/30 px-1.5 py-0.5 font-mono text-[9px] tracking-wide uppercase"
-              >
-                {name}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );

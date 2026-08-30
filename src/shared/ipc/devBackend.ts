@@ -34,6 +34,8 @@ import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
 import type { StartupStep } from "@/shared/types/StartupStep";
+import type { PartyLogEntry } from "@/shared/types/PartyLogEntry";
+import type { UserMovie } from "@/shared/types/UserMovie";
 import type { VoteParticipant } from "@/shared/types/VoteParticipant";
 
 const scenario = new URLSearchParams(globalThis.location?.search ?? "").get(
@@ -293,6 +295,32 @@ const MOVIES: MovieSummary[] = [
 
 const WATCHED_TMDB_IDS = new Set<string>(["129"]);
 
+/** Favourites and manual marks, for the length of the page. */
+const devUserMovies = new Map<string, UserMovie>();
+
+/** One night still running plus one already over, so both shapes of row in
+ * the party log can be looked at without hosting anything. */
+const devPartyLog: PartyLogEntry[] = [
+  {
+    id: "dev-tonight",
+    startedAt: BigInt(Date.now() - 45 * 60_000),
+    endedAt: null,
+    movieTmdbId: null,
+    movieTitle: null,
+    moviePoster: null,
+    participants: ["taha", "mert"],
+  },
+  {
+    id: "dev-last-week",
+    startedAt: BigInt(Date.now() - 7 * 86_400_000),
+    endedAt: BigInt(Date.now() - 7 * 86_400_000 + 107 * 60_000),
+    movieTmdbId: 27205n,
+    movieTitle: "Inception",
+    moviePoster: null,
+    participants: ["taha", "mert", "ada"],
+  },
+];
+
 /** Fakes a second page of results (offset ids so React keys stay unique) and
  * an end of catalogue after that, so infinite scroll has something to do
  * and somewhere to stop. */
@@ -494,6 +522,34 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
     })),
 
   get_session_history: () => [],
+
+  get_party_log: () => devPartyLog,
+
+  set_now_watching: ({ movie }) => {
+    const candidate = movie as MovieCandidate | null;
+    const open = devPartyLog.find((entry) => entry.endedAt === null);
+    if (!open) return;
+    open.movieTmdbId = candidate ? BigInt(candidate.tmdbId) : null;
+    open.movieTitle = candidate?.title ?? null;
+    open.moviePoster = candidate?.poster ?? null;
+  },
+
+  // The real store is SQLite; here it is a module-level map that resets with
+  // the page, which is all a design pass on the marked-up states needs.
+  list_user_movies: () => [...devUserMovies.values()],
+
+  set_user_movie: ({ movie, favorite, watched }) => {
+    const summary = movie as MovieSummary;
+    const key = summary.tmdbId.toString();
+    if (!favorite && !watched) devUserMovies.delete(key);
+    else
+      devUserMovies.set(key, {
+        movie: summary,
+        favorite: favorite as boolean,
+        watched: watched as boolean,
+        markedAt: BigInt(Date.now()),
+      });
+  },
 
   get_movie_vote: () => cloneSnapshot(movieVote),
 

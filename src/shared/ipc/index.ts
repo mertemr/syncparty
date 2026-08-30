@@ -22,12 +22,14 @@ import type { MovieCandidate } from "@/shared/types/MovieCandidate";
 import type { MovieDetails } from "@/shared/types/MovieDetails";
 import type { MovieSummary } from "@/shared/types/MovieSummary";
 import type { MovieVoteSnapshot } from "@/shared/types/MovieVoteSnapshot";
+import type { PartyLogEntry } from "@/shared/types/PartyLogEntry";
 import type { ParticipationStatus } from "@/shared/types/ParticipationStatus";
 import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 import type { SessionHistoryEntry } from "@/shared/types/SessionHistoryEntry";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
+import type { UserMovie } from "@/shared/types/UserMovie";
 import type { WatchedMovie } from "@/shared/types/WatchedMovie";
 
 /** Must match `ipc::EVENT_CHANNEL`. */
@@ -45,7 +47,37 @@ export const insideTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const useDevBackend = import.meta.env.DEV && !insideTauri;
 
-const invoke = useDevBackend ? devInvoke : tauriInvoke;
+const rawInvoke = useDevBackend ? devInvoke : tauriInvoke;
+
+/**
+ * Replaces every `bigint` in an argument with a plain number.
+ *
+ * Tauri serialises command arguments with `JSON.stringify`, which throws
+ * outright on a `bigint` — "Do not know how to serialize a BigInt" — before
+ * the call ever leaves the webview. The generated bindings use `bigint` for
+ * Rust's `i64`, so a tmdb id or a vote count reaching a command as-is fails
+ * every time, and the failure looks like the backend refusing rather than
+ * the frontend never asking.
+ *
+ * Every one of these is an `i64` on the Rust side and a TMDB id or a count
+ * on this one, all far inside the range a double represents exactly, so
+ * converting loses nothing. Return values are untouched — those arrive as
+ * `bigint` from Tauri's own deserialiser and the UI expects them that way.
+ */
+function withoutBigints(value: unknown): unknown {
+  if (typeof value === "bigint") return Number(value);
+  if (Array.isArray(value)) return value.map(withoutBigints);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, withoutBigints(entry)]),
+    );
+  }
+  return value;
+}
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return rawInvoke<T>(command, args && (withoutBigints(args) as Record<string, unknown>));
+}
 
 /**
  * The shape `SyncPartyError` serialises to.
@@ -174,6 +206,14 @@ export const ipc = {
   getSessionHistory: () =>
     invoke<SessionHistoryEntry[]>("get_session_history"),
   getWatchedMovies: () => invoke<WatchedMovie[]>("get_watched_movies"),
+
+  getPartyLog: () => invoke<PartyLogEntry[]>("get_party_log"),
+  setNowWatching: (movie: MovieCandidate | null) =>
+    invoke<void>("set_now_watching", { movie }),
+
+  listUserMovies: () => invoke<UserMovie[]>("list_user_movies"),
+  setUserMovie: (movie: MovieSummary, favorite: boolean, watched: boolean) =>
+    invoke<void>("set_user_movie", { movie, favorite, watched }),
 };
 
 /**

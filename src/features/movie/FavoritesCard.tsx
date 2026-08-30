@@ -3,13 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useAppState } from "@/app/AppState";
 import { useTranslate } from "@/shared/i18n";
 import { ipc } from "@/shared/ipc";
-import { Card, EmptyState } from "@/shared/ui";
+import { Card, cx, EmptyState, Input } from "@/shared/ui";
 import type { Genre } from "@/shared/types/Genre";
 import type { MovieCandidate } from "@/shared/types/MovieCandidate";
 import type { MovieSummary } from "@/shared/types/MovieSummary";
 import type { WatchedMovie } from "@/shared/types/WatchedMovie";
 
-import { listFavorites, subscribeFavorites, toggleFavorite } from "./favorites";
+import { listFavorites, subscribeUserMovies, toggleFavorite } from "./userMovies";
 import { MovieDetailModal } from "./MovieDetailModal";
 
 const POSTER_PLACEHOLDER =
@@ -47,6 +47,7 @@ export function FavoritesCard() {
   const [watched, setWatched] = useState<WatchedMovie[]>([]);
   const [genres, setGenres] = useState<Genre[]>([]);
   const [openDetail, setOpenDetail] = useState<bigint | null>(null);
+  const [filter, setFilter] = useState("");
 
   useEffect(() => {
     void ipc.getWatchedMovies().then(setWatched).catch(() => setWatched([]));
@@ -54,14 +55,24 @@ export function FavoritesCard() {
   }, []);
 
   // Re-reads favourites whenever the picker grid (or this card's own heart
-  // button) changes them — see `favorites.ts`.
-  useEffect(() => subscribeFavorites(() => setFavorites(listFavorites())), []);
+  // button) changes them — see `userMovies.ts`.
+  useEffect(() => subscribeUserMovies(() => setFavorites(listFavorites())), []);
 
   const genreNames = useMemo(() => {
     const map = new Map<number, string>();
     for (const genre of genres) map.set(genre.id, genre.name);
     return (ids: number[]) => ids.map((id) => map.get(id)).filter((name): name is string => Boolean(name));
   }, [genres]);
+
+  // Filtering in the rail rather than fetching: both lists are already in
+  // memory and short enough that a substring match is the whole feature.
+  const needle = filter.trim().toLocaleLowerCase();
+  const shownFavorites = needle
+    ? favorites.filter((movie) => movie.title.toLocaleLowerCase().includes(needle))
+    : favorites;
+  const shownWatched = needle
+    ? watched.filter((movie) => movie.title.toLocaleLowerCase().includes(needle))
+    : watched;
 
   const draft = movieVote?.phase === "draft" ? movieVote : null;
   const selectedIds = useMemo(
@@ -108,12 +119,28 @@ export function FavoritesCard() {
           ))}
         </div>
 
+        {/* Only once the list is long enough to need it — a search box over
+            three favourites is a control looking for a job. */}
+        {(section === "favorites" ? favorites.length : watched.length) > 6 && (
+          <Input
+            type="search"
+            value={filter}
+            placeholder={t("movie.search.placeholder")}
+            aria-label={t("movie.search.placeholder")}
+            onChange={(event) => setFilter(event.target.value)}
+            className="py-1.5 text-xs"
+          />
+        )}
+
         {section === "favorites" &&
-          (favorites.length === 0 ? (
+          (shownFavorites.length === 0 ? (
             <EmptyState title={t("movie.favorites.empty")} />
           ) : (
-            <ul className="space-y-2">
-              {favorites.map((movie) => {
+            // The rail is a fixed-height column beside a page that scrolls;
+            // a hundred favourites in it pushed everything below off the
+            // screen, so the list keeps its own bounds and scrolls inside.
+            <ul className="max-h-72 space-y-2 overflow-y-auto pr-1">
+              {shownFavorites.map((movie) => {
                 const key = movie.tmdbId.toString();
                 const selected = selectedIds.has(key);
                 return (
@@ -147,11 +174,17 @@ export function FavoritesCard() {
                         aria-pressed={selected}
                         disabled={!selected && full}
                         onClick={() => void addOrRemove(movie)}
-                        className={
+                        className={cx(
+                          // A bordered circle around a glyph sat a pixel off
+                          // its own centre at this size and read as a stray
+                          // mark next to the row. Unselected is now a plain
+                          // hit area; the ring only appears once there is a
+                          // state worth drawing.
+                          "flex size-7 shrink-0 items-center justify-center rounded-full text-sm leading-none transition-colors",
                           selected
-                            ? "flex size-6 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-bold text-accent-ink"
-                            : "flex size-6 shrink-0 items-center justify-center rounded-full border border-line text-xs text-ink-muted hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
-                        }
+                            ? "bg-accent font-bold text-accent-ink"
+                            : "text-ink-faint hover:bg-surface-raised/70 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40",
+                        )}
                       >
                         {selected ? "✓" : "+"}
                       </button>
@@ -163,11 +196,11 @@ export function FavoritesCard() {
           ))}
 
         {section === "watched" &&
-          (watched.length === 0 ? (
+          (shownWatched.length === 0 ? (
             <EmptyState title={t("movie.watched.empty")} />
           ) : (
-            <ul className="space-y-2">
-              {watched.map((movie) => (
+            <ul className="max-h-72 space-y-2 overflow-y-auto pr-1">
+              {shownWatched.map((movie) => (
                 <li key={`${movie.tmdbId}-${movie.sessionId}`} className="text-xs">
                   <p className="truncate text-ink">{movie.title}</p>
                   <p className="text-ink-faint">

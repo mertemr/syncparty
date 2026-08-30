@@ -15,7 +15,7 @@ use ts_rs::TS;
 
 use crate::core::error::Result;
 
-pub use store::{MovieStore, SessionHistoryEntry, WatchedMovie};
+pub use store::{MovieStore, PartyLogEntry, SessionHistoryEntry, UserMovie, WatchedMovie};
 pub use tmdb::TmdbClient;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

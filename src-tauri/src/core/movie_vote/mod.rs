@@ -562,10 +562,7 @@ impl MovieVote {
             return Err(host_only());
         }
         let snapshot = self.mutate(logic::open).await?;
-        self.announce_with_language(|language| {
-            notify::movie_vote_started(snapshot.candidates.len(), language)
-        })
-        .await;
+        self.announce_card(&snapshot).await;
         Ok(snapshot)
     }
 
@@ -634,9 +631,43 @@ impl MovieVote {
         let Some(candidate) = snapshot.candidates.iter().find(|c| c.tmdb_id == tmdb_id) else {
             return;
         };
-        let title = candidate.title.clone();
-        self.announce_with_language(|language| notify::movie_selected(&title, language))
-            .await;
+        let candidate = candidate.clone();
+        self.announce_payload(|language| {
+            notify::movie_selected_card(&Self::poster_card(&candidate), language)
+        })
+        .await;
+    }
+
+    /// The opened ballot, as a Discord card listing every candidate.
+    async fn announce_card(&self, snapshot: &MovieVoteSnapshot) {
+        let candidates = snapshot.candidates.clone();
+        self.announce_payload(|language| {
+            let cards: Vec<_> = candidates.iter().map(Self::poster_card).collect();
+            notify::movie_vote_started_card(&cards, language)
+        })
+        .await;
+    }
+
+    async fn announce_payload(&self, build: impl FnOnce(&str) -> serde_json::Value) {
+        let Some((discord, settings)) = self.notify.get() else {
+            return;
+        };
+        let settings = settings.get();
+        if !settings.discord_enabled {
+            return;
+        }
+        let _ = discord.send_payload(&build(&settings.language)).await;
+    }
+
+    /// A candidate as the notifier wants it. Borrowing rather than copying
+    /// the strings — the card is built and posted in one go.
+    fn poster_card(candidate: &MovieCandidate) -> notify::PosterCard<'_> {
+        notify::PosterCard {
+            title: &candidate.title,
+            poster: candidate.poster.as_deref(),
+            release_date: candidate.release_date.as_deref(),
+            rating: candidate.rating,
+        }
     }
 
     async fn announce_with_language(&self, build: impl FnOnce(&str) -> String) {

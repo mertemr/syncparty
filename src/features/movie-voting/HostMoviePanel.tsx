@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { useAppState } from "@/app/AppState";
 import { MoviePicker } from "@/features/movie/MoviePicker";
 import { useTranslate } from "@/shared/i18n";
 import { ipc } from "@/shared/ipc";
-import { Badge, Button, Card, Choice, Field, Input } from "@/shared/ui";
+import { Badge, Button, Card, Choice, cx, Field, Input } from "@/shared/ui";
 import type { MovieCandidate } from "@/shared/types/MovieCandidate";
 import type { VoteParticipant } from "@/shared/types/VoteParticipant";
 
@@ -57,77 +57,181 @@ export function HostMoviePanel() {
 
   if (movieVote.phase === "open") {
     return (
-      <Card title={t("movieVote.title")} action={<Badge tone="good">{t("movieVote.open")}</Badge>}>
-        <div className="space-y-5">
-          {movieVote.schedule && (
-            <p className="text-sm text-ink-muted">{formatSchedule(movieVote.schedule, locale)}</p>
-          )}
+      <div className="space-y-4">
+        <Card title={t("movieVote.title")} action={<Badge tone="good">{t("movieVote.open")}</Badge>}>
+          <div className="space-y-5">
+            {movieVote.schedule && (
+              <p className="text-sm text-ink-muted">{formatSchedule(movieVote.schedule, locale)}</p>
+            )}
 
-          <ParticipationPicker
-            value={me?.participation ?? null}
-            disabled={busy}
-            onChange={(status) => void run(() => ipc.setMovieVoteParticipation(status))}
-          />
-
-          <VoteCandidateList
-            candidates={movieVote.candidates}
-            counts={counts}
-            myVote={me?.selectedMovie ?? null}
-            disabled={busy}
-            onVote={(tmdbId) => void run(() => ipc.castMovieVote(tmdbId))}
-          />
-
-          <ParticipantList participants={movieVote.participants} />
-
-          <div className="flex gap-2">
-            <Button
-              variant="primary"
-              className="flex-1"
+            <ParticipationPicker
+              value={me?.participation ?? null}
               disabled={busy}
-              onClick={() => void run(() => ipc.closeMovieVote())}
-            >
-              {t("movieVote.close")}
-            </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void run(() => ipc.cancelMovieVote())}>
-              {t("movieVote.cancel")}
-            </Button>
+              onChange={(status) => void run(() => ipc.setMovieVoteParticipation(status))}
+            />
+
+            <VoteCandidateList
+              candidates={movieVote.candidates}
+              counts={counts}
+              myVote={me?.selectedMovie ?? null}
+              disabled={busy}
+              onVote={(tmdbId) => void run(() => ipc.castMovieVote(tmdbId))}
+            />
+
+            <ParticipantList participants={movieVote.participants} />
           </div>
-        </div>
-      </Card>
+        </Card>
+
+        <ActionBar>
+          <Button
+            variant="primary"
+            className="flex-1"
+            disabled={busy}
+            onClick={() => void run(() => ipc.closeMovieVote())}
+          >
+            {t("movieVote.close")}
+          </Button>
+          <Button variant="danger" disabled={busy} onClick={() => void run(() => ipc.cancelMovieVote())}>
+            {t("movieVote.cancel")}
+          </Button>
+        </ActionBar>
+      </div>
     );
   }
 
   // completed
   const result = movieVote.result;
   return (
-    <Card title={t("movieVote.title")} action={<Badge tone="neutral">{t("movieVote.completed")}</Badge>}>
-      <div className="space-y-5">
-        {result?.tied && result.tied.length > 0 && (
-          <p className="text-sm text-warn">
-            {t("movieVote.tie")} — {t("movieVote.tie.detail")}
-          </p>
-        )}
+    <div className="space-y-4">
+      <Card title={t("movieVote.title")} action={<Badge tone="neutral">{t("movieVote.completed")}</Badge>}>
+        <div className="space-y-5">
+          {result?.tied && result.tied.length > 0 && (
+            <p className="text-sm text-warn">
+              {t("movieVote.tie")} — {t("movieVote.tie.detail")}
+            </p>
+          )}
 
-        <VoteCandidateList
-          candidates={movieVote.candidates}
-          counts={counts}
-          winner={result?.winner ?? null}
-          tied={result?.tied ?? []}
-          onResolveTie={(tmdbId) => void run(() => ipc.resolveMovieVoteTie(tmdbId))}
-        />
+          <VoteCandidateList
+            candidates={movieVote.candidates}
+            counts={counts}
+            winner={result?.winner ?? null}
+            tied={result?.tied ?? []}
+            onResolveTie={(tmdbId) => void run(() => ipc.resolveMovieVoteTie(tmdbId))}
+          />
 
-        <ParticipantList participants={movieVote.participants} />
+          <ParticipantList participants={movieVote.participants} />
+        </div>
+      </Card>
 
+      <ActionBar>
         <Button
           variant="primary"
-          className="w-full"
+          className="flex-1"
           disabled={busy}
           onClick={() => void run(() => ipc.startMovieVote(null))}
         >
           {t("movieVote.start")}
         </Button>
+      </ActionBar>
+    </div>
+  );
+}
+
+/**
+ * What is on the ballot so far, folded into the bar that is already on
+ * screen.
+ *
+ * The chips used to sit at the top of the panel, which meant they scrolled
+ * away the moment you started browsing — the one moment you actually want to
+ * know what you have picked. A second fixed strip would have been a second
+ * thing competing for the bottom of the window, so this rides in the bar
+ * that is already there: a count you can always see, and the posters
+ * themselves one click away.
+ */
+function CandidateTray({
+  candidates,
+  onRemove,
+}: {
+  candidates: MovieCandidate[];
+  onRemove: (tmdbId: bigint) => void;
+}) {
+  const t = useTranslate();
+  const [open, setOpen] = useState(false);
+
+  // Nothing picked yet is not worth a control — the count says it, and the
+  // grid behind is where you go next either way.
+  const empty = candidates.length === 0;
+
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        disabled={empty}
+        aria-expanded={open && !empty}
+        onClick={() => setOpen((current) => !current)}
+        className={cx(
+          "flex w-full items-center justify-between gap-2 rounded-[var(--radius-control)] px-2 py-1.5",
+          "font-mono text-[11px] tracking-[0.14em] uppercase transition-colors",
+          empty
+            ? "cursor-default text-ink-faint"
+            : "text-ink-muted hover:bg-surface-raised/60 hover:text-ink",
+        )}
+      >
+        <span className="truncate">
+          {t("movieVote.candidates")} · {candidates.length}/{MAX_CANDIDATES}
+        </span>
+        {!empty && (
+          <span aria-hidden className={cx("transition-transform", open && "rotate-180")}>
+            ▾
+          </span>
+        )}
+      </button>
+
+      {open && !empty && (
+        <ul className="mt-2 flex max-h-40 flex-col gap-1.5 overflow-y-auto">
+          {candidates.map((candidate) => (
+            <li
+              key={candidate.tmdbId.toString()}
+              className="flex items-center gap-2 rounded-[var(--radius-control)] bg-surface-raised/50 py-1 pr-1 pl-2"
+            >
+              <span className="min-w-0 flex-1 truncate text-xs text-ink">{candidate.title}</span>
+              <button
+                type="button"
+                aria-label={`${t("movie.card.remove")} — ${candidate.title}`}
+                onClick={() => onRemove(candidate.tmdbId)}
+                className="flex size-6 shrink-0 items-center justify-center rounded-full text-xs text-ink-faint transition-colors hover:bg-bad/15 hover:text-bad"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ActionBar({ children, tray }: { children: ReactNode; tray?: ReactNode }) {
+  return (
+    <>
+      {/* Fixed, not sticky. A sticky element is laid out in the document and
+          re-resolved against the scroll position every frame, which on a list
+          this long shows up as the bar shivering a pixel as you scroll. Fixed
+          is resolved against the viewport once and simply does not move.
+          It also frees the bar from the column it used to sit in: centred on
+          the window as a floating strip, clear of the page edge on every
+          side, rather than a panel welded to the bottom of the grid. */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 flex justify-center px-6 pb-6">
+        <div className="pointer-events-auto w-full max-w-lg rounded-panel border border-line bg-surface/90 px-4 py-3 shadow-[0_8px_32px_rgb(0_0_0_/_0.45)] backdrop-blur-xl">
+          {tray}
+          <div className={cx("flex gap-2", tray ? "mt-2" : null)}>{children}</div>
+        </div>
       </div>
-    </Card>
+
+      {/* The bar floats over the page, so the page has to end above it —
+          without this the last row of posters is unreachable under it. */}
+      <div aria-hidden className="h-24" />
+    </>
   );
 }
 
@@ -247,59 +351,54 @@ function DraftPanel({
   const canOpen = candidates.length >= 2;
 
   return (
-    <Card title={t("movieVote.title")}>
-      <div className="space-y-5">
-        {schedule && <p className="text-sm text-ink-muted">{formatSchedule(schedule, locale)}</p>}
+    <div className="space-y-4">
+      <Card title={t("movieVote.title")}>
+        <div className="space-y-5">
+          {schedule && <p className="text-sm text-ink-muted">{formatSchedule(schedule, locale)}</p>}
 
-        <div>
-          <p className="mb-2 font-mono text-[11px] tracking-[0.14em] text-ink-faint uppercase">
-            {t("movieVote.candidates")} ({candidates.length}/{MAX_CANDIDATES})
-          </p>
-          <p className="mb-3 text-xs text-ink-faint">{t("movieVote.pickMovies")}</p>
+          <div>
+            <p className="mb-2 font-mono text-[11px] tracking-[0.14em] text-ink-faint uppercase">
+              {t("movieVote.candidates")} ({candidates.length}/{MAX_CANDIDATES})
+            </p>
+            <p className="mb-3 text-xs text-ink-faint">{t("movieVote.pickMovies")}</p>
 
-          {candidates.length > 0 && (
-            <div className="mb-3 flex flex-wrap gap-2">
-              {candidates.map((candidate) => (
-                <div
-                  key={candidate.tmdbId.toString()}
-                  className="flex items-center gap-2 rounded-[var(--radius-control)] border border-line bg-surface-raised/60 py-1 pr-1 pl-2"
-                >
-                  <span className="max-w-32 truncate text-xs text-ink">{candidate.title}</span>
-                  <Button
-                    variant="ghost"
-                    className="min-h-0 px-1.5 py-1"
-                    onClick={() => void run(() => ipc.removeMovieCandidate(candidate.tmdbId))}
-                  >
-                    ✕
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
+            <MoviePicker
+              candidates={candidates}
+              full={full}
+              onAdd={(candidate) => void run(() => ipc.addMovieCandidate(candidate))}
+              onRemove={(tmdbId) => void run(() => ipc.removeMovieCandidate(tmdbId))}
+            />
+          </div>
+        </div>
+      </Card>
 
-          <MoviePicker
+      <ActionBar
+        tray={
+          <CandidateTray
             candidates={candidates}
-            full={full}
-            onAdd={(candidate) => void run(() => ipc.addMovieCandidate(candidate))}
             onRemove={(tmdbId) => void run(() => ipc.removeMovieCandidate(tmdbId))}
           />
+        }
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex gap-2">
+            <Button
+              variant="primary"
+              className="flex-1"
+              disabled={busy || !canOpen}
+              onClick={() => void run(() => ipc.openMovieVote())}
+            >
+              {t("movieVote.start")}
+            </Button>
+            <Button variant="danger" disabled={busy} onClick={() => void run(() => ipc.cancelMovieVote())}>
+              {t("movieVote.cancel")}
+            </Button>
+          </div>
+          {!canOpen && (
+            <p className="mt-2 text-xs text-ink-faint">{t("movieVote.startHint")}</p>
+          )}
         </div>
-
-        <div className="flex gap-2">
-          <Button
-            variant="primary"
-            className="flex-1"
-            disabled={busy || !canOpen}
-            onClick={() => void run(() => ipc.openMovieVote())}
-          >
-            {t("movieVote.start")}
-          </Button>
-          <Button variant="danger" disabled={busy} onClick={() => void run(() => ipc.cancelMovieVote())}>
-            {t("movieVote.cancel")}
-          </Button>
-        </div>
-        {!canOpen && <p className="text-xs text-ink-faint">{t("movieVote.startHint")}</p>}
-      </div>
-    </Card>
+      </ActionBar>
+    </div>
   );
 }

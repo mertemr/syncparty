@@ -28,6 +28,7 @@ export function CopyRow({
             than being reused. */}
         <code
           key={String(copied)}
+          title={value}
           className={cx(
             "selectable min-w-0 flex-1 truncate rounded-[var(--radius-control)] border border-dashed border-line bg-canvas/70 px-3.5 py-2.5 font-mono text-xs tracking-wide text-ink",
             copied && "tracking-glitch border-accent/60",

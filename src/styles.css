@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* Vertical room, not horizontal. Pinning a sidebar is only an improvement
+   when the whole sidebar fits on screen — otherwise it needs a scrollbar of
+   its own, and two scrollbars moving at once is worse than none. Every
+   `tall:` rule below is a thing that pins when there is height to pin it
+   in and goes back to normal flow in a short window. */
+@custom-variant tall (@media (min-height: 900px));
+
 /* Tube black with a chromatic accent pair. The identity is a CRT: saturated
    phosphor on a surface that is never pure black, because a real tube is
    never off. */

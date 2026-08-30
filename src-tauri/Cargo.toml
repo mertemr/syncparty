@@ -1,6 +1,6 @@
 [package]
 name = "syncparty"
-version = "0.6.0"
+version = "0.6.1"
 description = "Synchronised movie nights, peer to peer"
 authors = ["Taha Çeken", "Mert Emir <48881002+mertemr@users.noreply.github.com>"]
 edition = "2021"

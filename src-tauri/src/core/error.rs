@@ -140,7 +140,14 @@ impl From<serde_json::Error> for SyncPartyError {
 
 impl From<reqwest::Error> for SyncPartyError {
     fn from(value: reqwest::Error) -> Self {
-        Self::Network(value.to_string())
+        let mut message = value.to_string();
+        let mut source = std::error::Error::source(&value);
+        while let Some(err) = source {
+            message.push_str(": ");
+            message.push_str(&err.to_string());
+            source = err.source();
+        }
+        Self::Network(message)
     }
 }
 

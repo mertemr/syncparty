@@ -236,11 +236,8 @@ async fn serve(
 
     let mut reader: BoxedReader = Box::new(recv);
     tokio::spawn(async move {
-        loop {
-            match read_frame(&mut *reader).await {
-                Ok(bytes) => Arc::clone(&control).on_message(guest, bytes),
-                Err(_) => break,
-            }
+        while let Ok(bytes) = read_frame(&mut *reader).await {
+            Arc::clone(&control).on_message(guest, bytes);
         }
     });
 
@@ -370,11 +367,8 @@ impl GuestTunnel {
         let mut control_reader: BoxedReader = Box::new(control_recv);
         let peer = connection.remote_id();
         tokio::spawn(async move {
-            loop {
-                match read_frame(&mut *control_reader).await {
-                    Ok(bytes) => Arc::clone(&control).on_message(peer, bytes),
-                    Err(_) => break,
-                }
+            while let Ok(bytes) = read_frame(&mut *control_reader).await {
+                Arc::clone(&control).on_message(peer, bytes);
             }
         });
 

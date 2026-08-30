@@ -577,7 +577,7 @@ impl MovieVote {
         let snapshot = self.mutate(logic::close).await?;
         self.persist_history(&snapshot).await;
 
-        self.announce_with_language(|language| notify::movie_vote_completed(language))
+        self.announce_with_language(notify::movie_vote_completed)
             .await;
 
         if let Some(winner) = snapshot.result.as_ref().and_then(|result| result.winner) {
@@ -621,7 +621,7 @@ impl MovieVote {
         self.persist_history(&result).await;
 
         if was_active {
-            self.announce_with_language(|language| notify::movie_vote_cancelled(language))
+            self.announce_with_language(notify::movie_vote_cancelled)
                 .await;
         }
         Ok(())

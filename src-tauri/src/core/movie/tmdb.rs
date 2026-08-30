@@ -4,9 +4,11 @@
 //! `append_to_response` — stays in this file. Callers only ever see the
 //! domain types in [`super`].
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::Deserialize;
 
 use crate::core::config::{SecretKey, SecretStore};
@@ -20,6 +22,72 @@ const BASE_URL: &str = "https://api.themoviedb.org/3";
 const IMAGE_BASE: &str = "https://image.tmdb.org/t/p/w500";
 const BACKDROP_BASE: &str = "https://image.tmdb.org/t/p/w1280";
 
+/// Some ISPs/routers (Turkish "Güvenli İnternet" family filters, most
+/// notably) sinkhole specific domains to 127.0.0.1 at the plain-DNS level.
+/// A browser's encrypted DNS quietly routes around that; a plain reqwest
+/// client does not, and gets "connection refused" instead. When the system
+/// resolver comes back with nothing but loopback addresses, fall back to
+/// Cloudflare's DNS-over-HTTPS, queried by IP so no DNS lookup is needed to
+/// reach it.
+struct DohFallbackResolver;
+
+impl Resolve for DohFallbackResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            let system_addrs = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map(Iterator::collect::<Vec<_>>)
+                .unwrap_or_default();
+
+            if system_addrs.iter().any(|addr| !addr.ip().is_loopback()) {
+                return Ok(Box::new(system_addrs.into_iter()) as Addrs);
+            }
+
+            let ips = doh_lookup(&host).await?;
+            Ok(Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0))) as Addrs)
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct DohAnswer {
+    data: String,
+    #[serde(rename = "type")]
+    kind: i32,
+}
+
+#[derive(Deserialize, Default)]
+struct DohResponse {
+    #[serde(default, rename = "Answer")]
+    answer: Vec<DohAnswer>,
+}
+
+async fn doh_lookup(
+    host: &str,
+) -> std::result::Result<Vec<IpAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::new();
+    let response: DohResponse = client
+        .get(format!("https://1.1.1.1/dns-query?name={host}&type=A"))
+        .header("accept", "application/dns-json")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let ips: Vec<IpAddr> = response
+        .answer
+        .into_iter()
+        .filter(|record| record.kind == 1)
+        .filter_map(|record| record.data.parse().ok())
+        .collect();
+
+    if ips.is_empty() {
+        return Err(format!("DNS-over-HTTPS fallback found no address for {host}").into());
+    }
+    Ok(ips)
+}
+
 pub struct TmdbClient {
     secrets: Arc<SecretStore>,
     client: reqwest::Client,
@@ -29,7 +97,10 @@ impl TmdbClient {
     pub fn new(secrets: Arc<SecretStore>) -> Self {
         Self {
             secrets,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .dns_resolver(Arc::new(DohFallbackResolver))
+                .build()
+                .expect("TLS backend and DNS resolver are always valid at build time"),
         }
     }
 
@@ -368,6 +439,30 @@ impl From<RawMovieDetails> for MovieDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Requires network access and only proves anything on a connection whose
+    /// plain DNS is actually hijacked to loopback for this host (as TR "Güvenli
+    /// İnternet" family filters do to api.themoviedb.org). Run manually with
+    /// `cargo test --package syncparty -- --ignored reaches_tmdb_even_when_dns_is_hijacked`.
+    #[tokio::test]
+    #[ignore]
+    async fn reaches_tmdb_even_when_dns_is_hijacked() {
+        let client = reqwest::Client::builder()
+            .dns_resolver(Arc::new(DohFallbackResolver))
+            .build()
+            .expect("client builds");
+
+        let status = client
+            .get(format!("{BASE_URL}/movie/popular"))
+            .send()
+            .await
+            .expect("request should reach TMDB, not be refused by a sinkholed DNS answer")
+            .status();
+
+        // No API key sent: TMDB should reply 401, which only happens once the
+        // TCP+TLS handshake to the real IP already succeeded.
+        assert_eq!(status.as_u16(), 401);
+    }
 
     #[test]
     fn a_movie_summary_gets_full_image_urls_and_drops_an_empty_release_date() {

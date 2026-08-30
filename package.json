@@ -1,7 +1,7 @@
 {
   "name": "syncparty",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "scripts": {

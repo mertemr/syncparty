@@ -69,9 +69,15 @@ pub async fn search_movies(
 }
 
 #[tauri::command]
-pub async fn get_popular_movies(state: State<'_, AppState>, page: Option<u32>) -> Result<Vec<MovieSummary>> {
+pub async fn get_popular_movies(
+    state: State<'_, AppState>,
+    page: Option<u32>,
+) -> Result<Vec<MovieSummary>> {
     let language = app_language(&state.settings.get());
-    state.tmdb.popular_movies(&language, page.unwrap_or(1)).await
+    state
+        .tmdb
+        .popular_movies(&language, page.unwrap_or(1))
+        .await
 }
 
 #[tauri::command]
@@ -80,19 +86,34 @@ pub async fn get_now_playing_movies(
     page: Option<u32>,
 ) -> Result<Vec<MovieSummary>> {
     let language = app_language(&state.settings.get());
-    state.tmdb.now_playing_movies(&language, page.unwrap_or(1)).await
+    state
+        .tmdb
+        .now_playing_movies(&language, page.unwrap_or(1))
+        .await
 }
 
 #[tauri::command]
-pub async fn get_upcoming_movies(state: State<'_, AppState>, page: Option<u32>) -> Result<Vec<MovieSummary>> {
+pub async fn get_upcoming_movies(
+    state: State<'_, AppState>,
+    page: Option<u32>,
+) -> Result<Vec<MovieSummary>> {
     let language = app_language(&state.settings.get());
-    state.tmdb.upcoming_movies(&language, page.unwrap_or(1)).await
+    state
+        .tmdb
+        .upcoming_movies(&language, page.unwrap_or(1))
+        .await
 }
 
 #[tauri::command]
-pub async fn get_top_rated_movies(state: State<'_, AppState>, page: Option<u32>) -> Result<Vec<MovieSummary>> {
+pub async fn get_top_rated_movies(
+    state: State<'_, AppState>,
+    page: Option<u32>,
+) -> Result<Vec<MovieSummary>> {
     let language = app_language(&state.settings.get());
-    state.tmdb.top_rated_movies(&language, page.unwrap_or(1)).await
+    state
+        .tmdb
+        .top_rated_movies(&language, page.unwrap_or(1))
+        .await
 }
 
 #[tauri::command]
@@ -118,14 +139,21 @@ pub async fn get_genres(state: State<'_, AppState>) -> Result<Vec<Genre>> {
 pub async fn get_movie_details(state: State<'_, AppState>, tmdb_id: i64) -> Result<MovieDetails> {
     let language = app_language(&state.settings.get());
 
-    if let Some(cached) = state.movie_store.cached_movie(tmdb_id, &language, now_seconds())? {
+    if let Some(cached) = state
+        .movie_store
+        .cached_movie(tmdb_id, &language, now_seconds())?
+    {
         return Ok(cached);
     }
 
     let details = state.tmdb.movie_details(tmdb_id, &language).await?;
-    state
-        .movie_store
-        .cache_movie(tmdb_id, &language, &details, now_seconds(), MOVIE_DETAILS_TTL_SECONDS)?;
+    state.movie_store.cache_movie(
+        tmdb_id,
+        &language,
+        &details,
+        now_seconds(),
+        MOVIE_DETAILS_TTL_SECONDS,
+    )?;
     Ok(details)
 }
 
@@ -148,7 +176,10 @@ pub async fn add_movie_candidate(
 }
 
 #[tauri::command]
-pub async fn remove_movie_candidate(state: State<'_, AppState>, tmdb_id: i64) -> Result<MovieVoteSnapshot> {
+pub async fn remove_movie_candidate(
+    state: State<'_, AppState>,
+    tmdb_id: i64,
+) -> Result<MovieVoteSnapshot> {
     let host = is_hosting(&state).await;
     state.movie_vote.remove_candidate(host, tmdb_id).await
 }
@@ -166,7 +197,10 @@ pub async fn close_movie_vote(state: State<'_, AppState>) -> Result<MovieVoteSna
 }
 
 #[tauri::command]
-pub async fn resolve_movie_vote_tie(state: State<'_, AppState>, tmdb_id: i64) -> Result<MovieVoteSnapshot> {
+pub async fn resolve_movie_vote_tie(
+    state: State<'_, AppState>,
+    tmdb_id: i64,
+) -> Result<MovieVoteSnapshot> {
     let host = is_hosting(&state).await;
     state.movie_vote.resolve_tie(host, tmdb_id).await
 }

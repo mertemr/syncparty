@@ -426,9 +426,9 @@ impl GuestTunnel {
     /// Sends `bytes` to the host down the control channel.
     pub async fn send_control(&self, bytes: &[u8]) -> Result<()> {
         let mut writer = self.control_writer.lock().await;
-        write_frame(&mut *writer, bytes)
-            .await
-            .map_err(|error| SyncPartyError::Other(format!("control channel write failed: {error}")))
+        write_frame(&mut *writer, bytes).await.map_err(|error| {
+            SyncPartyError::Other(format!("control channel write failed: {error}"))
+        })
     }
 }
 

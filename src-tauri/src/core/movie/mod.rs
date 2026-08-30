@@ -99,7 +99,12 @@ pub struct DiscoverFilter {
 
 #[async_trait]
 pub trait MovieProvider: Send + Sync {
-    async fn search_movies(&self, query: &str, language: &str, page: u32) -> Result<Vec<MovieSummary>>;
+    async fn search_movies(
+        &self,
+        query: &str,
+        language: &str,
+        page: u32,
+    ) -> Result<Vec<MovieSummary>>;
     async fn popular_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>>;
     async fn now_playing_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>>;
     async fn upcoming_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>>;

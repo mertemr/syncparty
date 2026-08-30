@@ -96,11 +96,18 @@ impl MovieStore {
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().expect("the movie store connection mutex is never poisoned")
+        self.conn
+            .lock()
+            .expect("the movie store connection mutex is never poisoned")
     }
 
     /// A cached movie's details, if one is on file and has not expired.
-    pub fn cached_movie(&self, tmdb_id: i64, language: &str, now: i64) -> Result<Option<MovieDetails>> {
+    pub fn cached_movie(
+        &self,
+        tmdb_id: i64,
+        language: &str,
+        now: i64,
+    ) -> Result<Option<MovieDetails>> {
         let conn = self.conn();
         let mut statement = conn.prepare(
             "SELECT payload FROM movie_cache WHERE tmdb_id = ?1 AND language = ?2 AND expires_at > ?3",
@@ -279,10 +286,18 @@ mod tests {
         let store = store_at("cache-roundtrip");
         let details = sample_details(27205);
 
-        assert!(store.cached_movie(27205, "en-US", 0).expect("read").is_none());
+        assert!(store
+            .cached_movie(27205, "en-US", 0)
+            .expect("read")
+            .is_none());
 
-        store.cache_movie(27205, "en-US", &details, 0, 3600).expect("write");
-        let cached = store.cached_movie(27205, "en-US", 100).expect("read").expect("hit");
+        store
+            .cache_movie(27205, "en-US", &details, 0, 3600)
+            .expect("write");
+        let cached = store
+            .cached_movie(27205, "en-US", 100)
+            .expect("read")
+            .expect("hit");
 
         assert_eq!(cached, details);
     }
@@ -292,7 +307,9 @@ mod tests {
         let store = store_at("cache-expiry");
         let details = sample_details(1);
 
-        store.cache_movie(1, "en-US", &details, 0, 60).expect("write");
+        store
+            .cache_movie(1, "en-US", &details, 0, 60)
+            .expect("write");
 
         assert!(store.cached_movie(1, "en-US", 61).expect("read").is_none());
     }
@@ -302,11 +319,18 @@ mod tests {
         let store = store_at("cache-overwrite");
         let mut details = sample_details(1);
 
-        store.cache_movie(1, "en-US", &details, 0, 3600).expect("first write");
+        store
+            .cache_movie(1, "en-US", &details, 0, 3600)
+            .expect("first write");
         details.rating = 9.0;
-        store.cache_movie(1, "en-US", &details, 0, 3600).expect("second write");
+        store
+            .cache_movie(1, "en-US", &details, 0, 3600)
+            .expect("second write");
 
-        let cached = store.cached_movie(1, "en-US", 1).expect("read").expect("hit");
+        let cached = store
+            .cached_movie(1, "en-US", 1)
+            .expect("read")
+            .expect("hit");
         assert_eq!(cached.rating, 9.0);
     }
 
@@ -404,7 +428,9 @@ mod tests {
 
         {
             let store = MovieStore::open(&path).expect("open");
-            store.cache_movie(1, "en-US", &sample_details(1), 0, 3600).expect("write");
+            store
+                .cache_movie(1, "en-US", &sample_details(1), 0, 3600)
+                .expect("write");
         }
 
         let store = MovieStore::open(&path).expect("reopen");

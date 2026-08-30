@@ -133,7 +133,7 @@ fn no_active_vote() -> SyncPartyError {
 mod logic {
     use super::{
         no_active_vote, CandidateTally, MovieCandidate, MovieVoteSnapshot, ParticipationStatus,
-        VotePhase, VoteResult, VoteParticipant, MAX_CANDIDATES, MIN_CANDIDATES,
+        VoteParticipant, VotePhase, VoteResult, MAX_CANDIDATES, MIN_CANDIDATES,
     };
     use crate::core::error::{Result, SyncPartyError};
 
@@ -158,7 +158,10 @@ mod logic {
         Ok(())
     }
 
-    pub fn add_candidate(snapshot: &mut MovieVoteSnapshot, candidate: MovieCandidate) -> Result<()> {
+    pub fn add_candidate(
+        snapshot: &mut MovieVoteSnapshot,
+        candidate: MovieCandidate,
+    ) -> Result<()> {
         require_draft(snapshot)?;
 
         if snapshot.candidates.len() >= MAX_CANDIDATES {
@@ -224,7 +227,12 @@ mod logic {
         Ok(())
     }
 
-    pub fn cast_vote(snapshot: &mut MovieVoteSnapshot, peer: &str, tmdb_id: i64, now: i64) -> Result<()> {
+    pub fn cast_vote(
+        snapshot: &mut MovieVoteSnapshot,
+        peer: &str,
+        tmdb_id: i64,
+        now: i64,
+    ) -> Result<()> {
         require_open(snapshot)?;
 
         if !snapshot.candidates.iter().any(|c| c.tmdb_id == tmdb_id) {
@@ -513,7 +521,11 @@ impl MovieVote {
     /// Starts a new draft, replacing whatever vote existed before — there is
     /// only ever one active at a time, and starting one after the last
     /// completed or was cancelled is exactly how the next movie night begins.
-    pub async fn start(&self, is_host: bool, schedule: Option<String>) -> Result<MovieVoteSnapshot> {
+    pub async fn start(
+        &self,
+        is_host: bool,
+        schedule: Option<String>,
+    ) -> Result<MovieVoteSnapshot> {
         if !is_host {
             return Err(host_only());
         }
@@ -533,14 +545,16 @@ impl MovieVote {
         if !is_host {
             return Err(host_only());
         }
-        self.mutate(|snapshot| logic::add_candidate(snapshot, candidate)).await
+        self.mutate(|snapshot| logic::add_candidate(snapshot, candidate))
+            .await
     }
 
     pub async fn remove_candidate(&self, is_host: bool, tmdb_id: i64) -> Result<MovieVoteSnapshot> {
         if !is_host {
             return Err(host_only());
         }
-        self.mutate(|snapshot| logic::remove_candidate(snapshot, tmdb_id)).await
+        self.mutate(|snapshot| logic::remove_candidate(snapshot, tmdb_id))
+            .await
     }
 
     pub async fn open(&self, is_host: bool) -> Result<MovieVoteSnapshot> {

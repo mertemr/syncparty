@@ -12,7 +12,9 @@ use serde::Deserialize;
 use crate::core::config::{SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 
-use super::{DiscoverFilter, Genre, MovieDetails, MovieProvider, MovieSummary, MovieVideo, WatchProvider};
+use super::{
+    DiscoverFilter, Genre, MovieDetails, MovieProvider, MovieSummary, MovieVideo, WatchProvider,
+};
 
 const BASE_URL: &str = "https://api.themoviedb.org/3";
 const IMAGE_BASE: &str = "https://image.tmdb.org/t/p/w500";
@@ -55,7 +57,11 @@ impl TmdbClient {
             .ok_or(SyncPartyError::MovieProviderNotConfigured)
     }
 
-    async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str, params: &[(String, String)]) -> Result<T> {
+    async fn get<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        params: &[(String, String)],
+    ) -> Result<T> {
         let mut query = vec![("api_key".to_owned(), self.api_key()?)];
         query.extend_from_slice(params);
 
@@ -86,7 +92,12 @@ impl TmdbClient {
 
 #[async_trait]
 impl MovieProvider for TmdbClient {
-    async fn search_movies(&self, query: &str, language: &str, page: u32) -> Result<Vec<MovieSummary>> {
+    async fn search_movies(
+        &self,
+        query: &str,
+        language: &str,
+        page: u32,
+    ) -> Result<Vec<MovieSummary>> {
         let raw: RawPage<RawMovieSummary> = self
             .get(
                 "/search/movie",
@@ -208,7 +219,9 @@ impl From<RawMovieSummary> for MovieSummary {
             title: raw.title,
             original_title: raw.original_title,
             poster: raw.poster_path.map(|path| format!("{IMAGE_BASE}{path}")),
-            backdrop: raw.backdrop_path.map(|path| format!("{BACKDROP_BASE}{path}")),
+            backdrop: raw
+                .backdrop_path
+                .map(|path| format!("{BACKDROP_BASE}{path}")),
             release_date: non_empty(raw.release_date),
             overview: raw.overview,
             genre_ids: raw.genre_ids,
@@ -242,7 +255,10 @@ fn pick_trailer(videos: Option<RawVideos>) -> Option<MovieVideo> {
     let best = list
         .iter()
         .find(|video| video.site == "YouTube" && video.kind == "Trailer" && video.official)
-        .or_else(|| list.iter().find(|video| video.site == "YouTube" && video.kind == "Trailer"))
+        .or_else(|| {
+            list.iter()
+                .find(|video| video.site == "YouTube" && video.kind == "Trailer")
+        })
         .or_else(|| list.iter().find(|video| video.site == "YouTube"))?;
 
     Some(MovieVideo {
@@ -275,12 +291,18 @@ struct RawWatchProvidersWrapper {
 /// region" in this response — it returns every region it has data for — so
 /// this prefers the US listing, which is the most complete, and otherwise
 /// takes whichever region happens to be first rather than showing nothing.
-fn pick_watch_providers(wrapper: Option<RawWatchProvidersWrapper>) -> (Vec<WatchProvider>, Option<String>) {
+fn pick_watch_providers(
+    wrapper: Option<RawWatchProvidersWrapper>,
+) -> (Vec<WatchProvider>, Option<String>) {
     let Some(wrapper) = wrapper else {
         return (Vec::new(), None);
     };
 
-    let Some(region) = wrapper.results.get("US").or_else(|| wrapper.results.values().next()) else {
+    let Some(region) = wrapper
+        .results
+        .get("US")
+        .or_else(|| wrapper.results.values().next())
+    else {
         return (Vec::new(), None);
     };
 
@@ -289,7 +311,10 @@ fn pick_watch_providers(wrapper: Option<RawWatchProvidersWrapper>) -> (Vec<Watch
         .iter()
         .map(|provider| WatchProvider {
             name: provider.provider_name.clone(),
-            logo: provider.logo_path.clone().map(|path| format!("{IMAGE_BASE}{path}")),
+            logo: provider
+                .logo_path
+                .clone()
+                .map(|path| format!("{IMAGE_BASE}{path}")),
         })
         .collect();
 
@@ -324,7 +349,9 @@ impl From<RawMovieDetails> for MovieDetails {
             title: raw.title,
             original_title: raw.original_title,
             poster: raw.poster_path.map(|path| format!("{IMAGE_BASE}{path}")),
-            backdrop: raw.backdrop_path.map(|path| format!("{BACKDROP_BASE}{path}")),
+            backdrop: raw
+                .backdrop_path
+                .map(|path| format!("{BACKDROP_BASE}{path}")),
             release_date: non_empty(raw.release_date),
             runtime_minutes: raw.runtime,
             genres: raw.genres,
@@ -362,7 +389,10 @@ mod tests {
         .expect("deserialize");
 
         let summary = MovieSummary::from(raw);
-        assert_eq!(summary.poster.as_deref(), Some("https://image.tmdb.org/t/p/w500/poster.jpg"));
+        assert_eq!(
+            summary.poster.as_deref(),
+            Some("https://image.tmdb.org/t/p/w500/poster.jpg")
+        );
         assert_eq!(summary.backdrop, None);
         assert_eq!(summary.release_date, None, "an empty string is not a date");
         assert_eq!(summary.genre_ids, vec![28, 878]);

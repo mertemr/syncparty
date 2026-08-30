@@ -6,6 +6,9 @@ import { ipc } from "@/shared/ipc";
 import { Badge, Button, Card, Counter, EmptyState, Rewind, cx } from "@/shared/ui";
 import type { StartupStep } from "@/shared/types/StartupStep";
 
+import { FavoritesCard } from "@/features/movie/FavoritesCard";
+import { HostMoviePanel } from "@/features/movie-voting/HostMoviePanel";
+
 import { InviteCard } from "./InviteCard";
 import { LobbyPanel } from "./LobbyPanel";
 import { RoomPanel } from "./RoomPanel";
@@ -65,7 +68,7 @@ export function HostScreen() {
 
   const statusCard = (
     <Card>
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">
             <span
@@ -104,9 +107,10 @@ export function HostScreen() {
         </div>
 
         {hosting ? (
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex w-full items-center gap-2 sm:w-auto">
             <Button
               variant="primary"
+              className="flex-1 sm:flex-none"
               disabled={joinState === "opening"}
               onClick={() => void join()}
             >
@@ -114,6 +118,7 @@ export function HostScreen() {
             </Button>
             <Button
               variant="danger"
+              className="flex-1 sm:flex-none"
               disabled={busy}
               onClick={() => {
                 setJoinState("idle");
@@ -126,6 +131,7 @@ export function HostScreen() {
         ) : (
           <Button
             variant="primary"
+            className="w-full sm:w-auto"
             disabled={busy || starting}
             onClick={() => void run(ipc.startHosting)}
           >
@@ -173,14 +179,16 @@ export function HostScreen() {
   }
 
   return (
-    // `md` rather than `lg`: the default window is 940px wide, so an `lg`
-    // breakpoint would mean the two-column layout never appeared in the app
-    // it was designed for. The 720px minimum still stacks.
-    <div className="mx-auto grid max-w-5xl gap-5 px-8 py-8 md:grid-cols-[1.15fr_1fr]">
-      {/* `min-w-0`: without it the invite link/code — unbreakable base64,
-          rendered `truncate` — sets this column's grid auto-minimum to its
-          full unwrapped width, so the track ignores its `1.15fr` share and
-          the other column gets squeezed down to whatever is left over. */}
+    // A feed layout: two narrow rails of small status cards flanking one
+    // wide, centred column that's the actual reason anyone opened this
+    // screen. `md` rather than `lg` for the same reason as ever — the
+    // default window is 940px wide, and an `lg` breakpoint would mean this
+    // never renders as three columns in the app it was built for.
+    <div className="mx-auto grid max-w-6xl gap-5 px-8 py-8 md:grid-cols-[260px_minmax(0,1fr)_260px]">
+      {/* `min-w-0` on every track: without it the invite link/code —
+          unbreakable base64, rendered `truncate` — sets a column's grid
+          auto-minimum to its full unwrapped width, which starves its
+          siblings down to whatever is left over. */}
       <div className="min-w-0 space-y-5">
         {statusCard}
 
@@ -190,6 +198,11 @@ export function HostScreen() {
           </p>
         )}
         <InviteCard hosting={session} />
+        <FavoritesCard />
+      </div>
+
+      <div className="min-w-0">
+        <HostMoviePanel />
       </div>
 
       <div className="min-w-0 space-y-5">

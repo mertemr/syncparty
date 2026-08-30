@@ -19,4 +19,5 @@ export { Logo, Wordmark } from "./Logo";
 export { Counter } from "./Counter";
 export { Rewind } from "./Rewind";
 export { EmptyState } from "./EmptyState";
+export { ToastHost } from "./ToastHost";
 export { formatElapsed } from "./elapsed";

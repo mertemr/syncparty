@@ -115,7 +115,81 @@ export function SettingsScreen() {
           void patchSettings({ discordEnabled }).catch(reportFailure)
         }
       />
+
+      <TmdbSettings />
     </div>
+  );
+}
+
+function TmdbSettings() {
+  const t = useTranslate();
+
+  const [configured, setConfigured] = useState(false);
+  const [key, setKey] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  useEffect(() => {
+    void ipc.tmdbStatus().then(setConfigured);
+  }, []);
+
+  async function attempt(action: () => Promise<unknown>, success: string) {
+    setNotice(null);
+    setProblem(null);
+    try {
+      await action();
+      setConfigured(await ipc.tmdbStatus());
+      setNotice(success);
+    } catch (error) {
+      setProblem(errorMessage(error));
+    }
+  }
+
+  return (
+    <Card title={t("settings.tmdb")}>
+      <div className="space-y-4">
+        <Field label={t("settings.tmdb.apiKey")} hint={t("settings.tmdb.hint")}>
+          <Input
+            type="password"
+            value={key}
+            placeholder={t("settings.tmdb.apiKey.placeholder")}
+            onChange={(event) => setKey(event.target.value)}
+          />
+        </Field>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="primary"
+            disabled={!key.trim()}
+            onClick={() =>
+              void attempt(async () => {
+                await ipc.setTmdbApiKey(key);
+                setKey("");
+              }, t("settings.saved"))
+            }
+          >
+            {t("common.save")}
+          </Button>
+
+          <Button
+            variant="ghost"
+            disabled={!configured}
+            onClick={() => void attempt(ipc.clearTmdbApiKey, t("settings.saved"))}
+          >
+            {t("settings.tmdb.clear")}
+          </Button>
+        </div>
+
+        <p className="text-xs text-ink-faint">
+          {configured
+            ? t("settings.tmdb.configured")
+            : t("settings.tmdb.notConfigured")}
+        </p>
+
+        {notice && <p className="text-sm text-good">{notice}</p>}
+        {problem && <p className="text-sm text-bad">{problem}</p>}
+      </div>
+    </Card>
   );
 }
 

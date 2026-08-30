@@ -11,7 +11,10 @@ use std::sync::Arc;
 use crate::core::config::{SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 
-pub use message::{party_ready, party_stopped, webhook_test};
+pub use message::{
+    movie_selected, movie_vote_cancelled, movie_vote_completed, movie_vote_started, party_ready,
+    party_stopped, webhook_test,
+};
 
 pub struct DiscordNotifier {
     secrets: Arc<SecretStore>,

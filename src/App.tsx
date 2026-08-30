@@ -12,7 +12,7 @@ import {
 } from "@/shared/i18n";
 import { useAppUpdate } from "@/shared/hooks/useAppUpdate";
 import { ipc } from "@/shared/ipc";
-import { Badge, Button, Rewind, Wordmark } from "@/shared/ui";
+import { Badge, Button, Rewind, ToastHost, Wordmark } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 
 export default function App() {
@@ -135,6 +135,8 @@ function Shell() {
           <GuestScreen />
         )}
       </main>
+
+      <ToastHost />
     </div>
   );
 }

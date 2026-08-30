@@ -80,10 +80,13 @@ pub struct PartyLogEntry {
     pub participants: Vec<String>,
 }
 
-const CURRENT_VERSION: i32 = 3;
+/// Every schema step in order. The list is the migration: a new one is
+/// appended and nothing else needs touching, which is one fewer thing to get
+/// wrong than a version constant kept in step with it by hand.
+const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
 
 const SCHEMA_V1: &str = "
-    CREATE TABLE movie_cache (
+    CREATE TABLE IF NOT EXISTS movie_cache (
         tmdb_id INTEGER NOT NULL,
         language TEXT NOT NULL,
         payload TEXT NOT NULL,
@@ -92,14 +95,14 @@ const SCHEMA_V1: &str = "
         PRIMARY KEY (tmdb_id, language)
     );
 
-    CREATE TABLE session_history (
+    CREATE TABLE IF NOT EXISTS session_history (
         id TEXT PRIMARY KEY,
         started_at INTEGER NOT NULL,
         ended_at INTEGER,
         payload TEXT NOT NULL
     );
 
-    CREATE TABLE watched_movies (
+    CREATE TABLE IF NOT EXISTS watched_movies (
         tmdb_id INTEGER NOT NULL,
         session_id TEXT NOT NULL,
         title TEXT NOT NULL,
@@ -113,7 +116,7 @@ const SCHEMA_V1: &str = "
 /// webview's `localStorage`, which is neither backed up with the rest of the
 /// app's data nor readable by anything but the window that wrote it.
 const SCHEMA_V2: &str = "
-    CREATE TABLE user_movies (
+    CREATE TABLE IF NOT EXISTS user_movies (
         tmdb_id INTEGER PRIMARY KEY,
         favorite INTEGER NOT NULL,
         watched INTEGER NOT NULL,
@@ -125,7 +128,7 @@ const SCHEMA_V2: &str = "
 /// The party log. `user_movies` (v2) is one person's marks on a movie; this
 /// is the record of an evening, which nothing until now wrote down.
 const SCHEMA_V3: &str = "
-    CREATE TABLE party_sessions (
+    CREATE TABLE IF NOT EXISTS party_sessions (
         id TEXT PRIMARY KEY,
         started_at INTEGER NOT NULL,
         ended_at INTEGER,
@@ -136,22 +139,35 @@ const SCHEMA_V3: &str = "
     );
 ";
 
+/// Brings the database up to the last step in [`MIGRATIONS`], one at a time.
+///
+/// Each step commits its own schema *and* its own version number in a single
+/// transaction. Bumping the version once at the end instead — which is what
+/// this did — is not the same thing: a step that lands its tables and then
+/// fails to record that it ran leaves a database whose schema is ahead of its
+/// version, and the next launch re-runs `CREATE TABLE` against tables that
+/// are already there. That is a permanent crash on startup, not a retry,
+/// which is exactly what shipping v3 did to anyone who had v1 on disk.
+///
+/// `IF NOT EXISTS` on every table is the second half of the same guarantee:
+/// it lets a database already caught out that way heal on the next launch
+/// rather than needing to be deleted.
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-    if version < 1 {
-        conn.execute_batch(SCHEMA_V1)?;
+    for (index, schema) in MIGRATIONS.iter().enumerate() {
+        let target = index as i32 + 1;
+        if version >= target {
+            continue;
+        }
+
+        // `PRAGMA user_version` is part of the database header, so it is
+        // written transactionally along with the tables above it.
+        conn.execute_batch(&format!(
+            "BEGIN;{schema}PRAGMA user_version = {target};COMMIT;"
+        ))?;
     }
 
-    if version < 2 {
-        conn.execute_batch(SCHEMA_V2)?;
-    }
-
-    if version < 3 {
-        conn.execute_batch(SCHEMA_V3)?;
-    }
-
-    conn.pragma_update(None, "user_version", CURRENT_VERSION)?;
     Ok(())
 }
 
@@ -713,5 +729,60 @@ mod tests {
             .expect("write");
 
         assert!(store.list_user_movies().expect("read").is_empty());
+    }
+
+    /// The exact state v0.7.0 left on disk: the v2 and v3 tables created, and
+    /// a version number that never caught up with them. Every launch after
+    /// that re-ran `CREATE TABLE` and panicked before the window opened.
+    #[test]
+    fn a_database_whose_schema_ran_ahead_of_its_version_still_opens() {
+        let path = std::env::temp_dir().join("syncparty-movies-half-migrated.sqlite3");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(SCHEMA_V1).expect("v1");
+            conn.execute_batch(SCHEMA_V2).expect("v2");
+            conn.execute_batch(SCHEMA_V3).expect("v3");
+            conn.pragma_update(None, "user_version", 1)
+                .expect("stale version");
+        }
+
+        let store = MovieStore::open(&path).expect("a half-migrated database still opens");
+        assert!(store.list_user_movies().expect("read").is_empty());
+        assert!(store.list_party_logs().expect("read").is_empty());
+
+        let conn = Connection::open(&path).expect("reopen");
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(
+            version,
+            MIGRATIONS.len() as i32,
+            "the version is caught up afterwards"
+        );
+    }
+
+    #[test]
+    fn migrating_from_v1_keeps_what_was_already_there() {
+        let path = std::env::temp_dir().join("syncparty-movies-from-v1.sqlite3");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(SCHEMA_V1).expect("v1");
+            conn.pragma_update(None, "user_version", 1)
+                .expect("version");
+            conn.execute(
+                "INSERT INTO watched_movies (tmdb_id, session_id, title, watched_at, participants)
+                 VALUES (1, 'old', 'Stalker', 10, '[]')",
+                [],
+            )
+            .expect("seed");
+        }
+
+        let store = MovieStore::open(&path).expect("open");
+        assert_eq!(store.list_watched_movies().expect("read").len(), 1);
+        assert!(store.list_party_logs().expect("read").is_empty());
     }
 }

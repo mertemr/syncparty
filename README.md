@@ -1,7 +1,6 @@
 # syncparty
 
-Synchronised movie nights, peer to peer. One app for the person hosting and the
-people joining.
+**Grab the movie, send one link, watch together in sync.**
 
 syncparty runs a private [Syncplay](https://syncplay.pl) server on your own
 machine and hands your friends a single link. They click it and land in the
@@ -31,9 +30,17 @@ address to copy, nothing exposed to the public internet.
 
 ## Install
 
-Grab the latest build from [Releases](https://github.com/Tahckn/syncparty/releases).
-That's the only manual install — from v0.2.0 on, syncparty checks for updates
-on startup and offers to install new ones in place.
+| Platform | Download |
+| --- | --- |
+| 🪟 Windows | [`.exe` setup](https://github.com/Tahckn/syncparty/releases/latest) · [`.msi`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🍎 macOS (Apple silicon) | [`.dmg`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🍎 macOS (Intel) | [`.dmg`](https://github.com/Tahckn/syncparty/releases/latest) |
+
+All three links land on the same page — the
+[latest release](https://github.com/Tahckn/syncparty/releases/latest), grab
+the file for your machine. That's the only manual install: from v0.2.0 on,
+syncparty checks for updates on startup and offers to install new ones in
+place. There is no Linux build yet.
 
 The installers themselves are unsigned, so Windows SmartScreen and macOS
 Gatekeeper will both warn on first run. Updates are still verified: they are

@@ -153,15 +153,27 @@ jobs:
 
       - name: Install a real Syncplay client
         run: |
-          # From the archive, not pip: Syncplay is not published on PyPI, so
-          # the venv this used to build could never resolve it and the job
-          # failed before reaching the test.
+          sudo apt-get install --no-install-recommends -y mpv python3-venv
+          # From the git tag, because neither of the obvious sources works.
+          # Syncplay is not published on PyPI, so a plain `pip install
+          # syncplay` resolves nothing. Ubuntu's package is 1.7.0, which
+          # cannot start on this runner at all: it imports
+          # `configparser.SafeConfigParser`, removed in Python 3.12. Upstream
+          # fixed that in 1.7.1.
           #
-          # Ubuntu carries 1.7.0. That is older than what a developer runs,
-          # and deliberately so — it is the client an LTS user would point at
-          # us, which is the compatibility actually worth proving.
-          sudo apt-get install --no-install-recommends -y syncplay mpv
-          command -v syncplay
+          # In its own environment rather than the system one: this is the
+          # dependency syncparty removed, and it has no business on PATH for
+          # any other job.
+          python3 -m venv "$RUNNER_TEMP/syncplay"
+          "$RUNNER_TEMP/syncplay/bin/pip" install --quiet \
+            "syncplay @ git+https://github.com/Syncplay/syncplay@v1.7.6"
+          # The import chain the client walks on startup. Without this a
+          # client that cannot start looks exactly like a server that does
+          # not answer: a 30-second timeout with nothing to read.
+          "$RUNNER_TEMP/syncplay/bin/python" -c \
+            "from syncplay.ui.ConfigurationGetter import ConfigurationGetter; \
+             import syncplay; print('syncplay', syncplay.version)"
+          echo "$RUNNER_TEMP/syncplay/bin" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

@@ -55,17 +55,12 @@
       "deb": {
         "depends": [
           "syncplay",
-          "mpv | vlc",
-          "python3",
-          "python3-twisted"
+          "mpv | vlc"
         ],
         "recommends": ["gnome-keyring"],
         "section": "video",
         "desktopTemplate": "packaging/syncparty.desktop",
-        "postInstallScript": "packaging/postinst.sh",
-        "files": {
-          "/usr/lib/syncparty/syncplay-source": "syncplay-source"
-        }
+        "postInstallScript": "packaging/postinst.sh"
       }
     }
   }

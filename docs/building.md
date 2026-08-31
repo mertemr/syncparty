@@ -23,7 +23,7 @@ drives at runtime.
 sudo apt install build-essential curl file git pkg-config \
   libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
   libayatana-appindicator3-dev libssl-dev libxdo-dev patchelf \
-  syncplay mpv python3 python3-twisted
+  syncplay mpv
 ```
 
 **Fedora**
@@ -31,15 +31,14 @@ sudo apt install build-essential curl file git pkg-config \
 ```bash
 sudo dnf install @development-tools webkit2gtk4.1-devel gtk3-devel \
   librsvg2-devel libayatana-appindicator-gtk3-devel openssl-devel \
-  libxdo-devel patchelf syncplay mpv python3 python3-twisted
+  libxdo-devel patchelf syncplay mpv
 ```
 
 **Arch**
 
 ```bash
 sudo pacman -S base-devel webkit2gtk-4.1 gtk3 librsvg \
-  libayatana-appindicator xdotool syncplay pyside6 shiboken6 \
-  mpv python python-twisted
+  libayatana-appindicator xdotool syncplay pyside6 shiboken6 mpv
 ```
 
 `pyside6` and `shiboken6` are separate because Arch ships them as *optional*
@@ -48,6 +47,10 @@ window.
 
 Substitute `vlc` for `mpv` anywhere above if you prefer it; syncparty accepts
 either and prefers mpv when both are present.
+
+`syncplay` is in those lists as the *client* only. The server a party runs on
+is built into the syncparty binary, so hosting needs no Python, no Twisted, and
+no `syncplay` server process.
 
 ### Optional: a keyring
 
@@ -69,23 +72,13 @@ sudo apt install gnome-keyring      # or kwalletmanager, or keepassxc
 git clone https://github.com/Tahckn/syncparty.git
 cd syncparty
 pnpm install
-node scripts/fetch-syncplay.mjs
 pnpm tauri build
 ```
 
-`fetch-syncplay.mjs` vendors the pinned Syncplay server into
-`src-tauri/syncplay-source/`, verifying it against the SHA-256 recorded in
-`src-tauri/src/core/deps/server_runtime.rs`. It is required for a packaged
-build. If you skip it and run `pnpm tauri dev` instead, the app downloads the
-same archive into its data directory on first host — the step exists so the
-package can carry the server rather than fetch it on a user's machine.
-
-Why the server is vendored at all: no distribution packages a new enough one.
-syncparty binds the Syncplay server to loopback with `--ipv4-only` and
-`--interface-ipv4`, which arrived in Syncplay 1.7.1, and the newest package in
-any Ubuntu LTS is 1.7.0. Arch and Fedora do ship 1.7.6, but one code path
-across every distribution beats a version check that behaves differently
-depending on where it runs. Only Twisted comes from your distribution.
+That is the whole build. Earlier versions needed a `fetch-syncplay.mjs` step
+first, which vendored a pinned Syncplay server into the package because no
+distribution shipped a new enough one. The server is now written in Rust and
+compiled into the binary, so there is nothing to vendor and nothing to pin.
 
 Artifacts land in `src-tauri/target/release/bundle/`. `pnpm tauri build
 --bundles deb` restricts it to a `.deb`; the valid Linux targets are `deb`,
@@ -107,6 +100,16 @@ into the join field instead — it accepts the raw code as well as the link.
 ```bash
 pnpm test                    # frontend
 cd src-tauri && cargo test   # backend, including the TypeScript bindings
+```
+
+One backend test is ignored by default because it needs a Syncplay client on
+PATH: it starts the built-in server, points a real `syncplay` at it, and
+asserts the client shows up in the room. It is the only test that checks our
+idea of the protocol against something we did not write, so run it if you have
+the client installed:
+
+```bash
+cd src-tauri && cargo test --test syncplay_compatibility -- --ignored
 ```
 
 The Rust tests regenerate `src/shared/types/*.ts` through ts-rs. If `git

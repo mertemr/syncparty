@@ -21,7 +21,7 @@ use crate::core::net::ControlChannel;
 use crate::core::notify::DiscordNotifier;
 use crate::core::paths::AppPaths;
 use crate::core::session::PartySession;
-use crate::core::syncplay::UvManagedServer;
+use crate::core::syncplay::NativeServer;
 
 /// The single Tauri event name everything travels on.
 ///
@@ -75,7 +75,7 @@ impl AppState {
         let secrets = Arc::new(SecretStore::new(paths.clone()));
         let discord = Arc::new(DiscordNotifier::new(Arc::clone(&secrets)));
 
-        let server = Arc::new(UvManagedServer::new(paths.clone(), Arc::clone(&bus)));
+        let server = Arc::new(NativeServer::new(Arc::clone(&bus)));
 
         // `movie_vote` is built first so it can be handed to `PartySession`
         // as its control channel; `attach_session` afterwards closes the
@@ -100,7 +100,7 @@ impl AppState {
         movie_vote.attach_notify(Arc::clone(&discord), Arc::clone(&settings));
 
         Ok(Self {
-            dependencies: DependencyManager::standard(paths, Arc::clone(&settings)),
+            dependencies: DependencyManager::standard(Arc::clone(&settings)),
             settings,
             secrets,
             session,

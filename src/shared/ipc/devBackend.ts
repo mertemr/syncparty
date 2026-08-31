@@ -103,18 +103,6 @@ function preflight(): PreflightReport {
         supportsManualPath: true,
         overridePath: overrides.mpv ?? null,
       },
-      {
-        id: "serverRuntime",
-        displayName: "Python runtime",
-        status: missing.has("serverRuntime")
-          ? { state: "missing" }
-          : { state: "installed", version: "3.12.4", path: null },
-        canAutoInstall: true,
-        needsElevation: false,
-        manualUrl: "https://python.org/downloads/",
-        supportsManualPath: false,
-        overridePath: null,
-      },
     ],
   };
 }

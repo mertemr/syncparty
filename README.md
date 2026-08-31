@@ -54,11 +54,12 @@ signed and checked against a key built into the app before anything is
 installed, so this warning is a one-time thing rather than something you see on
 every update.
 
-Everything else — the Syncplay client, mpv, and the Python the server runs on —
-is handled for you, though by different means depending on the platform.
-Windows and macOS detect what is missing on first launch and install it through
-winget or Homebrew. The Linux packages declare the same things as dependencies,
-so your package manager has already put them in place before the app opens.
+Everything else — the Syncplay client and mpv — is handled for you, though by
+different means depending on the platform. Windows and macOS detect what is
+missing on first launch and install it through winget or Homebrew. The Linux
+packages declare the same things as dependencies, so your package manager has
+already put them in place before the app opens. The server itself is not on
+that list: it is built into syncparty.
 
 Updates work the same way. On Windows and macOS syncparty downloads them in the
 background and offers to restart. On Linux it tells you a new version exists
@@ -154,13 +155,15 @@ A few decisions worth knowing about:
   button, and it stays hidden for as long as a party is running. On Linux it
   does not download at all: the package manager owns the install there, so the
   app reports the new version and leaves it alone.
-- **The Linux packages carry their own Syncplay server.** No distribution
-  ships one syncparty can use. It binds the server to loopback with
-  `--ipv4-only` and `--interface-ipv4`, both added in Syncplay 1.7.1, and the
-  newest package in any Ubuntu LTS is 1.7.0 — without them the server would
-  listen on every interface. The pinned source is verified against a SHA-256
-  recorded in the code and installed to `/usr/lib/syncparty/`; only Twisted
-  comes from the distribution.
+- **The server is ours, not a Syncplay process.** syncparty speaks the
+  Syncplay protocol from Rust rather than launching the Python server, so
+  hosting depends on nothing that has to be shipped, installed, or kept at a
+  particular version. It used to vendor a pinned Syncplay into the Linux
+  packages because no distribution shipped one new enough to bind to loopback
+  only; now there is nothing to vendor, and the server cannot listen anywhere
+  but `127.0.0.1` because that is the only thing the code does. Guests still
+  join with a normal Syncplay client — a test in the suite starts the real one
+  against it and asserts it appears in the room.
 
 ## Building from source
 
@@ -182,7 +185,8 @@ TypeScript types under `src/shared/types` are generated from the Rust types by
 `ts-rs` when the tests run — do not edit them by hand.
 
 [`docs/building.md`](docs/building.md) covers Linux in full: the per-distribution
-package lists, and the `scripts/fetch-syncplay.mjs` step a packaged build needs.
+package lists, and the compatibility test that points a real Syncplay client at
+the built-in server.
 
 ## Layout
 
@@ -195,12 +199,12 @@ src-tauri/
   src/core/              all logic, no Tauri dependency
     deps/                dependency detection and installation
     net/                 the peer-to-peer endpoint and the loopback tunnel
-    syncplay/            protocol, server process, room monitor, launcher
+    syncplay/            protocol, the native server, room monitor, launcher
     invite/              invite codes and deep links
     session/             the host/guest state machine
     update.rs            whether this build may update itself
   packaging/             the .deb maintainer scripts
-scripts/                 version bump, Syncplay vendoring, AUR rendering
+scripts/                 version bump, AUR rendering
 ```
 
 `core` never imports from `ipc`, which is what lets the whole of it run under

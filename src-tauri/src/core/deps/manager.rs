@@ -6,11 +6,10 @@ use std::sync::Arc;
 use crate::core::config::{AppMode, ConfigStore};
 use crate::core::deps::{
     Dependency, DependencyId, MpvDependency, PlayerChoice, PreflightItem, PreflightReport,
-    ServerRuntimeDependency, SyncplayClientDependency,
+    SyncplayClientDependency,
 };
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{DependencyProgress, EventBus, ProgressSink};
-use crate::core::paths::AppPaths;
 
 pub struct DependencyManager {
     dependencies: Vec<Box<dyn Dependency>>,
@@ -19,13 +18,12 @@ pub struct DependencyManager {
 
 impl DependencyManager {
     /// The set syncparty ships with.
-    pub fn standard(paths: AppPaths, settings: Arc<ConfigStore>) -> Self {
+    pub fn standard(settings: Arc<ConfigStore>) -> Self {
         Self::with(
             vec![
                 Box::new(SyncplayClientDependency::new(Arc::clone(&settings)))
                     as Box<dyn Dependency>,
                 Box::new(MpvDependency::new(Arc::clone(&settings))),
-                Box::new(ServerRuntimeDependency::new(paths)),
             ],
             settings,
         )
@@ -143,6 +141,7 @@ mod tests {
     use crate::core::deps::{DependencyStatus, ModeRequirement};
     use crate::core::events::test_support::RecordingEventBus;
     use crate::core::events::AppEvent;
+    use crate::core::paths::AppPaths;
 
     struct FakeDependency {
         id: DependencyId,
@@ -248,8 +247,11 @@ mod tests {
                     DependencyId::SyncplayClient,
                     ModeRequirement::Both,
                 )) as Box<dyn Dependency>,
+                // Host-only here purely to exercise the filter; what the real
+                // player is required for is `mpv.rs`'s business, not this
+                // module's.
                 Box::new(FakeDependency::missing(
-                    DependencyId::ServerRuntime,
+                    DependencyId::Mpv,
                     ModeRequirement::HostOnly,
                 )),
             ],
@@ -258,7 +260,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_guest_is_not_asked_for_the_server_runtime() {
+    async fn a_guest_is_not_asked_for_a_host_only_dependency() {
         let report = manager().preflight(AppMode::Guest).await;
 
         assert_eq!(report.items.len(), 1);
@@ -267,14 +269,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_host_sees_the_missing_server_runtime() {
+    async fn a_host_sees_what_it_is_missing() {
         let report = manager().preflight(AppMode::Host).await;
 
         assert_eq!(report.items.len(), 2);
         assert!(!report.is_satisfied());
         assert_eq!(
             report.missing().map(|item| item.id).collect::<Vec<_>>(),
-            vec![DependencyId::ServerRuntime]
+            vec![DependencyId::Mpv]
         );
     }
 
@@ -302,9 +304,9 @@ mod tests {
     #[tokio::test]
     async fn a_dependency_that_cannot_be_located_by_hand_refuses_a_path() {
         let error = manager()
-            .set_manual_path(DependencyId::ServerRuntime, Some("/somewhere".to_owned()))
+            .set_manual_path(DependencyId::Mpv, Some("/somewhere".to_owned()))
             .await
-            .expect_err("the managed runtime lives where syncparty puts it");
+            .expect_err("a dependency with no manual path key refuses one");
 
         assert_eq!(error.kind(), "other");
     }
@@ -374,12 +376,37 @@ mod tests {
     #[tokio::test]
     async fn installing_an_unknown_dependency_is_an_error_not_a_panic() {
         let bus = RecordingEventBus::default();
+        // A manager that has never heard of the player, so asking it to
+        // install one is a question it cannot answer.
+        let manager = DependencyManager::with(
+            vec![Box::new(FakeDependency::installed(
+                DependencyId::SyncplayClient,
+                ModeRequirement::Both,
+            )) as Box<dyn Dependency>],
+            settings("default"),
+        );
 
-        let error = manager()
+        let error = manager
             .install(DependencyId::Mpv, None, &bus)
             .await
             .expect_err("unknown dependency");
 
         assert_eq!(error.kind(), "other");
+    }
+
+    /// The set a real host is asked for. Nothing about a party requires Python
+    /// any more, and a preflight that still demanded it would block hosts on a
+    /// runtime the server no longer uses.
+    #[tokio::test]
+    async fn a_host_needs_only_the_client_and_a_player() {
+        let paths = AppPaths::rooted_at(std::env::temp_dir().join("syncparty-deps-test"));
+        let settings = Arc::new(ConfigStore::load(paths).expect("settings"));
+
+        let report = DependencyManager::standard(settings)
+            .preflight(AppMode::Host)
+            .await;
+        let ids: Vec<_> = report.items.iter().map(|item| item.id).collect();
+
+        assert_eq!(ids, vec![DependencyId::SyncplayClient, DependencyId::Mpv]);
     }
 }

@@ -50,10 +50,6 @@ const debUrl = `https://github.com/Tahckn/syncparty/releases/download/v${version
  * launches, and `pyside6`/`shiboken6` come with it because Arch ships them as
  * optdepends — a bare `pacman -S syncplay` installs a client with no GUI.
  *
- * `python-twisted` is what the bundled server runs on. Arch's `syncplay`
- * already pulls it, but syncparty runs its own copy of the server and should
- * say so rather than rely on a transitive dependency staying put.
- *
  * A player has to be named too: Arch lists `mpv` and `vlc` as optdepends of
  * `syncplay`, so neither is guaranteed. `mpv` is the hard one because the app
  * prefers it; `vlc` stays optional.
@@ -73,8 +69,6 @@ const pkg = {
     "syncplay",
     "pyside6",
     "shiboken6",
-    "python",
-    "python-twisted",
     "mpv",
   ],
   optdepends: [

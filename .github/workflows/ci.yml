@@ -128,6 +128,50 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+  # The only job that talks to software we did not write. Everything else
+  # pins our own idea of the Syncplay protocol, which is worth nothing if that
+  # idea is wrong — and hosting no longer installs a Syncplay server, so
+  # nothing else would ever notice it drifting.
+  compatibility:
+    name: Backend (real Syncplay client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'workflow_dispatch' || inputs.backend
+
+    steps:
+      - *checkout
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - name: Install a real Syncplay client
+        run: |
+          sudo apt-get install --no-install-recommends -y mpv python3-venv
+          # In its own environment rather than the system one: this is the
+          # dependency syncparty removed, and it has no business on PATH for
+          # any other job.
+          python3 -m venv "$RUNNER_TEMP/syncplay"
+          "$RUNNER_TEMP/syncplay/bin/pip" install --quiet syncplay
+          echo "$RUNNER_TEMP/syncplay/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+
+      - run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
+
+      - name: Prove a real client still works
+        working-directory: src-tauri
+        run: cargo test --test syncplay_compatibility -- --ignored
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

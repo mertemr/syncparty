@@ -11,6 +11,8 @@ pub mod diagnostics;
 pub mod error;
 pub mod events;
 pub mod invite;
+pub mod movie;
+pub mod movie_vote;
 pub mod net;
 pub mod notify;
 pub mod paths;

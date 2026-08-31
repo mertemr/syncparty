@@ -63,6 +63,11 @@ impl AppPaths {
             result => result,
         }
     }
+
+    /// Movie cache and vote/session history.
+    pub fn movies_database(&self) -> PathBuf {
+        self.data_dir.join("movies.sqlite3")
+    }
 }
 
 fn platform_data_root() -> Result<PathBuf> {

@@ -1,7 +1,6 @@
 # syncparty
 
-Synchronised movie nights, peer to peer. One app for the person hosting and the
-people joining.
+**Grab the movie, send one link, watch together in sync.**
 
 syncparty runs a private [Syncplay](https://syncplay.pl) server on your own
 machine and hands your friends a single link. They click it and land in the
@@ -31,13 +30,23 @@ address to copy, nothing exposed to the public internet.
 
 ## Install
 
-Grab the latest build from [Releases](https://github.com/Tahckn/syncparty/releases).
+| Platform | Download |
+| --- | --- |
+| 🪟 Windows | [`.exe` setup](https://github.com/Tahckn/syncparty/releases/latest) · [`.msi`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🍎 macOS (Apple silicon) | [`.dmg`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🍎 macOS (Intel) | [`.dmg`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🐧 Debian / Ubuntu | [`.deb`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🐧 Arch | [`syncparty-bin`](https://aur.archlinux.org/packages/syncparty-bin) |
 
-**Windows** — the `.exe` setup file (or the `.msi`).
-**macOS** — `aarch64.dmg` for Apple silicon, `x64.dmg` for Intel.
-**Debian / Ubuntu** — `sudo apt install ./syncparty_*.deb`.
-**Arch** — `syncparty-bin` from the AUR.
-**Anything else** — [`docs/building.md`](docs/building.md).
+Every link lands on the same page — the
+[latest release](https://github.com/Tahckn/syncparty/releases/latest), grab the
+file for your machine. That's the only manual install: from v0.2.0 on,
+syncparty checks for updates on startup and offers to install new ones in
+place.
+
+On Debian or Ubuntu that is `sudo apt install ./syncparty_*.deb`; on Arch,
+`syncparty-bin` from the AUR. Any other distribution builds from source —
+[`docs/building.md`](docs/building.md).
 
 The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will
 both warn on first run. Updates are still verified: they are cryptographically

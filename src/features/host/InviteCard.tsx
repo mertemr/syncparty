@@ -66,7 +66,10 @@ function Detail({ label, value }: { label: string; value: string }) {
       <dt className="font-mono text-[10px] tracking-[0.16em] text-ink-faint uppercase">
         {label}
       </dt>
-      <dd className="selectable mt-0.5 truncate font-mono text-sm text-ink">
+      {/* `title` rather than a tooltip component: a truncated address or
+          password has to be readable in full, and the platform already draws
+          that on hover and announces it to a screen reader. */}
+      <dd className="selectable mt-0.5 truncate font-mono text-sm text-ink" title={value}>
         {value}
       </dd>
     </div>

@@ -9,6 +9,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::core::deps::{DependencyId, PreflightReport};
+use crate::core::movie_vote::MovieVoteSnapshot;
 use crate::core::session::SessionState;
 use crate::core::syncplay::RoomSnapshot;
 
@@ -51,6 +52,12 @@ pub enum AppEvent {
     /// return it on. The field is `errorKind` rather than `kind` because
     /// `kind` is already the union's discriminant.
     Failed { error_kind: String, message: String },
+
+    /// The movie vote changed — created, opened, a candidate/participant/vote
+    /// changed, or it closed. Always the whole snapshot, same as
+    /// `RoomUpdated`. `None` once there is no active vote (cancelled, or
+    /// never started).
+    MovieVoteChanged { snapshot: Option<MovieVoteSnapshot> },
 }
 
 /// Publishes events to whoever is listening. Implemented by the Tauri bridge

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::core::config::{AppMode, ConfigStore};
 use crate::core::deps::{
-    Dependency, DependencyId, MpvDependency, PlayerChoice, PreflightItem, PreflightReport,
-    SyncplayClientDependency,
+    Dependency, DependencyId, DependencyStatus, MpvDependency, PlayerChoice, PreflightItem,
+    PreflightReport, SyncplayClientDependency,
 };
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{DependencyProgress, EventBus, ProgressSink};
@@ -94,16 +94,28 @@ impl DependencyManager {
         let previous = self.settings.executable_override(key);
         self.settings.set_executable_override(key, path.clone())?;
 
-        if path.is_none() || dependency.detect().await.is_installed() {
+        if path.is_none() {
             return Ok(());
         }
 
+        let complaint = match dependency.detect().await {
+            DependencyStatus::Installed { .. } => return Ok(()),
+            // The file is where they said it was — it just does not run.
+            // "Not found" would send them back to the picker to choose the
+            // same path again, so the program's own words go here instead.
+            DependencyStatus::Unusable { reason, .. } => format!(
+                "{} is there but will not start: {reason}",
+                dependency.display_name()
+            ),
+            DependencyStatus::Missing => format!(
+                "{} was not found at that location",
+                dependency.display_name()
+            ),
+        };
+
         self.settings.set_executable_override(key, previous)?;
 
-        Err(SyncPartyError::DependencyMissing(format!(
-            "{} was not found at that location",
-            dependency.display_name()
-        )))
+        Err(SyncPartyError::DependencyMissing(complaint))
     }
 
     /// Installs one dependency, streaming progress onto the event bus.
@@ -330,6 +342,41 @@ mod tests {
             .expect_err("detection still fails, so the path is no good");
 
         assert_eq!(error.kind(), "dependency_missing");
+        assert_eq!(
+            settings.executable_override("mpv"),
+            None,
+            "a path that does not work must not be left behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_to_something_that_will_not_start_says_so_rather_than_not_found() {
+        let settings = settings("unusable-path");
+        let manager = DependencyManager::with(
+            vec![Box::new(FakeDependency {
+                id: DependencyId::Mpv,
+                requirement: ModeRequirement::Both,
+                status: DependencyStatus::Unusable {
+                    path: "/usr/bin/mpv".to_owned(),
+                    reason: "ImportError: cannot import name 'SafeConfigParser'".to_owned(),
+                },
+                manual_key: Some("mpv"),
+            }) as Box<dyn Dependency>],
+            Arc::clone(&settings),
+        );
+
+        let error = manager
+            .set_manual_path(DependencyId::Mpv, Some("/usr/bin/mpv".to_owned()))
+            .await
+            .expect_err("something that will not start is not a working path");
+
+        assert!(
+            error
+                .to_string()
+                .contains("ImportError: cannot import name 'SafeConfigParser'"),
+            "the file is where they said it was, so the message has to say what \
+             went wrong instead of sending them back to pick it again: {error}"
+        );
         assert_eq!(
             settings.executable_override("mpv"),
             None,

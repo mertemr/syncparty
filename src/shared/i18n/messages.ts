@@ -39,6 +39,7 @@ export const en = {
 
   "preflight.installed": "Ready",
   "preflight.missing": "Not installed",
+  "preflight.unusable": "Will not start",
   "preflight.install": "Install",
   "preflight.player": "Which player to install",
   "preflight.installing": "Installing…",
@@ -329,6 +330,7 @@ export const tr: Messages = {
 
   "preflight.installed": "Hazır",
   "preflight.missing": "Kurulu değil",
+  "preflight.unusable": "Açılmıyor",
   "preflight.install": "Kur",
   "preflight.player": "Hangi oynatıcı kurulsun",
   "preflight.installing": "Kuruluyor…",

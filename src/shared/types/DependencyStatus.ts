@@ -7,4 +7,9 @@ export type DependencyStatus = { "state": "missing" } | { "state": "installed",
 /**
  * Absent when the tool is present but refuses to report a version.
  */
-version: string | null, path: string | null, };
+version: string | null, path: string | null, } | { "state": "unusable", path: string, 
+/**
+ * The last line the program printed before giving up — the part that
+ * names the problem, without the traceback around it.
+ */
+reason: string, };

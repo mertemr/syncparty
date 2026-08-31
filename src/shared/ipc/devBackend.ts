@@ -15,6 +15,7 @@
  * one URL away:
  *
  *   ?dev=missing    a dependency is not installed
+ *   ?dev=unusable   Syncplay is installed and will not start
  *   ?dev=mismatch   the room is watching different files
  *   ?dev=guest      start as a guest rather than a host
  */
@@ -75,6 +76,14 @@ const overrides: Record<string, string | null> = {};
 /** Dependencies the fake machine is missing. Installing one clears it. */
 const missing = new Set(scenario === "missing" ? ["mpv"] : []);
 
+/**
+ * The Syncplay client is installed and refuses to run — what Ubuntu 24.04
+ * gives you, where the packaged 1.7.0 imports a name Python 3.12 removed.
+ * Installing it again would hand back the same copy, so the row offers the
+ * download instead.
+ */
+const unusableClient = scenario === "unusable";
+
 function preflight(): PreflightReport {
   return {
     mode: settings.mode ?? "host",
@@ -82,9 +91,16 @@ function preflight(): PreflightReport {
       {
         id: "syncplayClient",
         displayName: "Syncplay",
-        status: missing.has("syncplayClient")
-          ? { state: "missing" }
-          : { state: "installed", version: "1.7.2", path: "C:/syncplay" },
+        status: unusableClient
+          ? {
+              state: "unusable",
+              path: "/usr/bin/syncplay",
+              reason:
+                "ImportError: cannot import name 'SafeConfigParser' from 'configparser'",
+            }
+          : missing.has("syncplayClient")
+            ? { state: "missing" }
+            : { state: "installed", version: "1.7.2", path: "C:/syncplay" },
         canAutoInstall: true,
         needsElevation: false,
         manualUrl: "https://syncplay.pl/download/",

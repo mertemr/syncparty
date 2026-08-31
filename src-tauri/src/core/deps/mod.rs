@@ -76,6 +76,15 @@ pub enum DependencyStatus {
         version: Option<String>,
         path: Option<String>,
     },
+    /// Present on disk and unable to run. Distinct from `Missing` because the
+    /// remedy is different: installing it again reinstalls the same broken
+    /// thing, so the UI must not offer that as the way out.
+    Unusable {
+        path: String,
+        /// The last line the program printed before giving up — the part that
+        /// names the problem, without the traceback around it.
+        reason: String,
+    },
 }
 
 impl DependencyStatus {

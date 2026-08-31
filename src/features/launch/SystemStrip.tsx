@@ -136,7 +136,7 @@ export function SystemStrip({
           {state === "blocked" && (
             <ul className="mt-2 divide-y divide-line/60">
               {report?.items
-                .filter((item) => item.status.state === "missing")
+                .filter((item) => item.status.state !== "installed")
                 .map((item) => (
                   <DependencyRow
                     key={item.id}
@@ -185,11 +185,14 @@ function DependencyRow({
 }) {
   const t = useTranslate();
   const installed = item.status.state === "installed";
+  // On disk and refusing to run. Worth its own colour, because it is not a
+  // step the user has yet to take — it is one they took that did not work.
+  const unusable = item.status.state === "unusable";
 
   return (
     <li className="py-2.5">
       <div className="flex items-center gap-3">
-        <Dot tone={installed ? "good" : "warn"} />
+        <Dot tone={installed ? "good" : unusable ? "bad" : "warn"} />
 
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-ink">
@@ -204,6 +207,8 @@ function DependencyRow({
           <Badge tone="good">{t("preflight.installed")}</Badge>
         ) : (
           <div className="flex items-center gap-2">
+            {unusable && <Badge tone="bad">{t("preflight.unusable")}</Badge>}
+
             {playerChoice && item.canAutoInstall && (
               <Choice
                 ariaLabel={t("preflight.player")}
@@ -226,7 +231,11 @@ function DependencyRow({
               </Button>
             )}
 
-            {item.canAutoInstall ? (
+            {/* No install button for something already installed: the
+                package manager would hand back the same broken copy it
+                handed back last time. Locating a working build, or
+                downloading one, is the only way out of this state. */}
+            {item.canAutoInstall && !unusable ? (
               <Button variant="primary" onClick={onInstall} disabled={disabled}>
                 {busy ? t("preflight.installing") : t("preflight.install")}
               </Button>
@@ -271,6 +280,10 @@ function detailFor(
   if (busy) return progress ?? t("preflight.installing");
 
   if (item.status.state === "installed") return item.status.version ?? "";
+
+  // The program's own words. Whatever it printed on the way down says more
+  // about what to do next than anything this app could write about it.
+  if (item.status.state === "unusable") return item.status.reason;
 
   if (!item.canAutoInstall) return t("preflight.noAutoInstall");
 

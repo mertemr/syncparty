@@ -39,6 +39,24 @@ describe("getStripState", () => {
     expect(state).toBe("blocked");
   });
 
+  // "Not missing" is not the same as "usable". A dependency that is on disk
+  // and will not start blocks a party just as completely as an absent one,
+  // and the strip is where the user finds that out.
+  it("is blocked when an item is installed but will not start", () => {
+    const state = getStripState(
+      report([
+        item({
+          status: {
+            state: "unusable",
+            path: "/usr/bin/syncplay",
+            reason: "ImportError: cannot import name 'SafeConfigParser'",
+          },
+        }),
+      ]),
+    );
+    expect(state).toBe("blocked");
+  });
+
   // An empty report means the backend found nothing to check for this mode,
   // which is a green light rather than a stall.
   it("is ready for an empty item list", () => {

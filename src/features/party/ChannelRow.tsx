@@ -38,7 +38,7 @@ export function ChannelRow({
       <Dot tone={TONES[status]} />
 
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-ink">
+        <p className="truncate text-sm font-medium text-ink" title={watcher.name}>
           {watcher.name}
           {watcher.isController && (
             <span aria-hidden className="ml-1.5 text-accent">
@@ -46,7 +46,13 @@ export function ChannelRow({
             </span>
           )}
         </p>
-        <p className="truncate font-mono text-[11px] text-ink-faint">
+        {/* A release name is longer than any rail is wide, and it is the one
+            thing you check when the room says people are out of sync — the
+            platform's own tooltip is what makes the cut-off part reachable. */}
+        <p
+          className="truncate font-mono text-[11px] text-ink-faint"
+          title={watcher.file?.name ?? undefined}
+        >
           {watcher.file?.name ?? "—"}
         </p>
       </div>

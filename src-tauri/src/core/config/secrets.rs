@@ -45,6 +45,9 @@ pub enum SecretKey {
     /// This machine's iroh endpoint key. Its public half is the address an
     /// invite names, so losing it invalidates every code already handed out.
     EndpointKey,
+    /// TMDB API key for movie search/discovery. Entered per-user in Settings,
+    /// same as the Discord webhook — never baked into the build.
+    TmdbApiKey,
 }
 
 impl SecretKey {
@@ -55,6 +58,7 @@ impl SecretKey {
             Self::DiscordWebhook => "discord-webhook",
             Self::LastInvite => "last-invite",
             Self::EndpointKey => "endpoint-key",
+            Self::TmdbApiKey => "tmdb-api-key",
         }
     }
 }

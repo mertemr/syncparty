@@ -5,6 +5,7 @@
 //! `core` instead — that is the line that keeps `core` testable.
 
 pub mod commands;
+pub mod movie_commands;
 
 use std::sync::Arc;
 
@@ -14,6 +15,9 @@ use crate::core::config::{ConfigStore, SecretStore};
 use crate::core::deps::DependencyManager;
 use crate::core::error::Result;
 use crate::core::events::{AppEvent, EventBus};
+use crate::core::movie::{MovieStore, TmdbClient};
+use crate::core::movie_vote::MovieVote;
+use crate::core::net::ControlChannel;
 use crate::core::notify::DiscordNotifier;
 use crate::core::paths::AppPaths;
 use crate::core::session::PartySession;
@@ -52,7 +56,10 @@ pub struct AppState {
     pub settings: Arc<ConfigStore>,
     pub secrets: Arc<SecretStore>,
     pub dependencies: DependencyManager,
-    pub session: PartySession,
+    pub session: Arc<PartySession>,
+    pub movie_vote: Arc<MovieVote>,
+    pub tmdb: Arc<TmdbClient>,
+    pub movie_store: Arc<MovieStore>,
     pub discord: Arc<DiscordNotifier>,
     pub bus: Arc<dyn EventBus>,
 }
@@ -70,19 +77,36 @@ impl AppState {
 
         let server = Arc::new(UvManagedServer::new(paths.clone(), Arc::clone(&bus)));
 
-        let session = PartySession::new(
+        // `movie_vote` is built first so it can be handed to `PartySession`
+        // as its control channel; `attach_session` afterwards closes the
+        // loop so `movie_vote` can in turn reach the tunnel to broadcast.
+        // Neither needs the other at construction, so there is no cycle.
+        let movie_vote = Arc::new(MovieVote::new(Arc::clone(&bus)));
+
+        let session = Arc::new(PartySession::new(
             Arc::clone(&settings),
             Arc::clone(&secrets),
             server,
             Arc::clone(&discord),
             Arc::clone(&bus),
-        );
+            Arc::clone(&movie_vote) as Arc<dyn ControlChannel>,
+        ));
+        movie_vote.attach_session(Arc::clone(&session));
+
+        let tmdb = Arc::new(TmdbClient::new(Arc::clone(&secrets)));
+        let movie_store = Arc::new(MovieStore::open(&paths.movies_database())?);
+        movie_vote.attach_store(Arc::clone(&movie_store));
+        session.attach_store(Arc::clone(&movie_store));
+        movie_vote.attach_notify(Arc::clone(&discord), Arc::clone(&settings));
 
         Ok(Self {
             dependencies: DependencyManager::standard(paths, Arc::clone(&settings)),
             settings,
             secrets,
             session,
+            movie_vote,
+            tmdb,
+            movie_store,
             discord,
             bus,
         })

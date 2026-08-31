@@ -1,6 +1,6 @@
 [package]
 name = "syncparty"
-version = "0.5.0"
+version = "0.7.1"
 description = "Synchronised movie nights, peer to peer"
 authors = ["Taha Çeken", "Mert Emir <48881002+mertemr@users.noreply.github.com>"]
 edition = "2021"
@@ -67,10 +67,15 @@ reqwest = { version = "0.13", default-features = false, features = [
     "charset",
     "http2",
     "json",
+    "query",
     "rustls",
     "webpki-roots",
 ] }
 ts-rs = "12"
+# "bundled" compiles SQLite in rather than requiring one on the system —
+# the only sane choice for a single-writer desktop app with no admin install
+# step. Movie/vote history persistence in `core::movie::store`.
+rusqlite = { version = "0.32", features = ["bundled"] }
 which = "8"
 getrandom = "0.4"
 flate2 = "1"

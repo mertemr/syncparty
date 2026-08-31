@@ -30,7 +30,7 @@ use ts_rs::TS;
 use crate::core::config::{SecretKey as StoredSecret, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 
-pub use tunnel::{GuestTunnel, HostTunnel};
+pub use tunnel::{ControlChannel, GuestTunnel, HostTunnel};
 
 /// Identifies what is spoken over a syncparty connection.
 ///

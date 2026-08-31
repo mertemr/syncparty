@@ -14,13 +14,24 @@ import type { AppMode } from "@/shared/types/AppMode";
 import type { AppSettings } from "@/shared/types/AppSettings";
 import type { DependencyId } from "@/shared/types/DependencyId";
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
+import type { DiscoverFilter } from "@/shared/types/DiscoverFilter";
+import type { Genre } from "@/shared/types/Genre";
 import type { HostingInfo } from "@/shared/types/HostingInfo";
 import type { Invite } from "@/shared/types/Invite";
+import type { MovieCandidate } from "@/shared/types/MovieCandidate";
+import type { MovieDetails } from "@/shared/types/MovieDetails";
+import type { MovieSummary } from "@/shared/types/MovieSummary";
+import type { MovieVoteSnapshot } from "@/shared/types/MovieVoteSnapshot";
+import type { PartyLogEntry } from "@/shared/types/PartyLogEntry";
+import type { ParticipationStatus } from "@/shared/types/ParticipationStatus";
 import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
+import type { SessionHistoryEntry } from "@/shared/types/SessionHistoryEntry";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
 import type { UpdatePolicy } from "@/shared/types/UpdatePolicy";
+import type { UserMovie } from "@/shared/types/UserMovie";
+import type { WatchedMovie } from "@/shared/types/WatchedMovie";
 
 /** Must match `ipc::EVENT_CHANNEL`. */
 const EVENT_CHANNEL = "syncparty://event";
@@ -37,7 +48,37 @@ export const insideTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const useDevBackend = import.meta.env.DEV && !insideTauri;
 
-const invoke = useDevBackend ? devInvoke : tauriInvoke;
+const rawInvoke = useDevBackend ? devInvoke : tauriInvoke;
+
+/**
+ * Replaces every `bigint` in an argument with a plain number.
+ *
+ * Tauri serialises command arguments with `JSON.stringify`, which throws
+ * outright on a `bigint` — "Do not know how to serialize a BigInt" — before
+ * the call ever leaves the webview. The generated bindings use `bigint` for
+ * Rust's `i64`, so a tmdb id or a vote count reaching a command as-is fails
+ * every time, and the failure looks like the backend refusing rather than
+ * the frontend never asking.
+ *
+ * Every one of these is an `i64` on the Rust side and a TMDB id or a count
+ * on this one, all far inside the range a double represents exactly, so
+ * converting loses nothing. Return values are untouched — those arrive as
+ * `bigint` from Tauri's own deserialiser and the UI expects them that way.
+ */
+function withoutBigints(value: unknown): unknown {
+  if (typeof value === "bigint") return Number(value);
+  if (Array.isArray(value)) return value.map(withoutBigints);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, withoutBigints(entry)]),
+    );
+  }
+  return value;
+}
+
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return rawInvoke<T>(command, args && (withoutBigints(args) as Record<string, unknown>));
+}
 
 /**
  * The shape `SyncPartyError` serialises to.
@@ -128,6 +169,55 @@ export const ipc = {
     invoke<void>("set_discord_webhook", { url }),
   clearDiscordWebhook: () => invoke<void>("clear_discord_webhook"),
   testDiscordWebhook: () => invoke<void>("test_discord_webhook"),
+
+  tmdbStatus: () => invoke<boolean>("tmdb_status"),
+  setTmdbApiKey: (key: string) => invoke<void>("set_tmdb_api_key", { key }),
+  clearTmdbApiKey: () => invoke<void>("clear_tmdb_api_key"),
+
+  searchMovies: (query: string, page?: number) =>
+    invoke<MovieSummary[]>("search_movies", { query, page }),
+  getPopularMovies: (page?: number) =>
+    invoke<MovieSummary[]>("get_popular_movies", { page }),
+  getNowPlayingMovies: (page?: number) =>
+    invoke<MovieSummary[]>("get_now_playing_movies", { page }),
+  getUpcomingMovies: (page?: number) =>
+    invoke<MovieSummary[]>("get_upcoming_movies", { page }),
+  getTopRatedMovies: (page?: number) =>
+    invoke<MovieSummary[]>("get_top_rated_movies", { page }),
+  discoverMovies: (filter: DiscoverFilter, page?: number) =>
+    invoke<MovieSummary[]>("discover_movies", { filter, page }),
+  getGenres: () => invoke<Genre[]>("get_genres"),
+  getMovieDetails: (tmdbId: bigint) =>
+    invoke<MovieDetails>("get_movie_details", { tmdbId }),
+
+  startMovieVote: (schedule: string | null) =>
+    invoke<MovieVoteSnapshot>("start_movie_vote", { schedule }),
+  addMovieCandidate: (candidate: MovieCandidate) =>
+    invoke<MovieVoteSnapshot>("add_movie_candidate", { candidate }),
+  removeMovieCandidate: (tmdbId: bigint) =>
+    invoke<MovieVoteSnapshot>("remove_movie_candidate", { tmdbId }),
+  openMovieVote: () => invoke<MovieVoteSnapshot>("open_movie_vote"),
+  closeMovieVote: () => invoke<MovieVoteSnapshot>("close_movie_vote"),
+  resolveMovieVoteTie: (tmdbId: bigint) =>
+    invoke<MovieVoteSnapshot>("resolve_movie_vote_tie", { tmdbId }),
+  cancelMovieVote: () => invoke<void>("cancel_movie_vote"),
+  castMovieVote: (tmdbId: bigint) =>
+    invoke<void>("cast_movie_vote", { tmdbId }),
+  setMovieVoteParticipation: (status: ParticipationStatus | null) =>
+    invoke<void>("set_movie_vote_participation", { status }),
+  getMovieVote: () => invoke<MovieVoteSnapshot | null>("get_movie_vote"),
+
+  getSessionHistory: () =>
+    invoke<SessionHistoryEntry[]>("get_session_history"),
+  getWatchedMovies: () => invoke<WatchedMovie[]>("get_watched_movies"),
+
+  getPartyLog: () => invoke<PartyLogEntry[]>("get_party_log"),
+  setNowWatching: (movie: MovieCandidate | null) =>
+    invoke<void>("set_now_watching", { movie }),
+
+  listUserMovies: () => invoke<UserMovie[]>("list_user_movies"),
+  setUserMovie: (movie: MovieSummary, favorite: boolean, watched: boolean) =>
+    invoke<void>("set_user_movie", { movie, favorite, watched }),
 };
 
 /**

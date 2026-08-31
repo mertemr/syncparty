@@ -38,6 +38,12 @@ pub enum SyncPartyError {
     #[error("the Syncplay server is already running")]
     ServerAlreadyRunning,
 
+    #[error("not currently in a party")]
+    NotInParty,
+
+    #[error("TMDB is not configured — add an API key in Settings")]
+    MovieProviderNotConfigured,
+
     #[error("the Syncplay server failed to start: {0}")]
     ServerStartFailed(String),
 
@@ -92,6 +98,8 @@ impl SyncPartyError {
             Self::EndpointOffline => "endpoint_offline",
             Self::ServerNotRunning => "server_not_running",
             Self::ServerAlreadyRunning => "server_already_running",
+            Self::NotInParty => "not_in_party",
+            Self::MovieProviderNotConfigured => "movie_provider_not_configured",
             Self::ServerStartFailed(_) => "server_start_failed",
             Self::InvalidInvite(_) => "invalid_invite",
             Self::MonitorFailed(_) => "monitor_failed",
@@ -132,7 +140,14 @@ impl From<serde_json::Error> for SyncPartyError {
 
 impl From<reqwest::Error> for SyncPartyError {
     fn from(value: reqwest::Error) -> Self {
-        Self::Network(value.to_string())
+        let mut message = value.to_string();
+        let mut source = std::error::Error::source(&value);
+        while let Some(err) = source {
+            message.push_str(": ");
+            message.push_str(&err.to_string());
+            source = err.source();
+        }
+        Self::Network(message)
     }
 }
 

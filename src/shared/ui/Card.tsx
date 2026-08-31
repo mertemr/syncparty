@@ -24,10 +24,10 @@ export function Card({
     >
       {(title || action) && (
         <header className="flex items-center justify-between gap-3 border-b border-line bg-surface-raised/30 px-5 py-3">
-          <h2 className="font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase">
+          <h2 className="min-w-0 truncate font-mono text-[11px] tracking-[0.18em] text-ink-muted uppercase">
             {title}
           </h2>
-          {action}
+          {action && <div className="shrink-0">{action}</div>}
         </header>
       )}
       <div className="p-5">{children}</div>

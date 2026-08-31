@@ -11,11 +11,16 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use ts_rs::TS;
 
-use crate::core::config::{ConfigStore, SecretKey, SecretStore};
+use std::collections::BTreeSet;
+
+use tokio::sync::OnceCell;
+
+use crate::core::config::{generate_token, ConfigStore, SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
-use crate::core::net::{GuestTunnel, HostTunnel, PartyEndpoint, TransportReport};
+use crate::core::movie::MovieStore;
+use crate::core::net::{ControlChannel, GuestTunnel, HostTunnel, PartyEndpoint, TransportReport};
 use crate::core::notify::{self, DiscordNotifier};
 use crate::core::syncplay::{
     ClientLauncher, MonitorConfig, RoomMonitor, ServerConfig, ServerController, ServerState,
@@ -79,6 +84,13 @@ struct GuestSession {
     endpoint: PartyEndpoint,
 }
 
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// What a host holds open while a party is running.
 struct HostNetwork {
     tunnel: HostTunnel,
@@ -91,10 +103,26 @@ pub struct PartySession {
     server: Arc<dyn ServerController>,
     discord: Arc<DiscordNotifier>,
     bus: Arc<dyn EventBus>,
+    /// Whoever owns the control channel's application data — movie voting,
+    /// today. `session` only knows it needs handing to every tunnel it opens.
+    control: Arc<dyn ControlChannel>,
     state: Mutex<SessionState>,
     monitor: Mutex<Option<RoomMonitor>>,
     network: Mutex<Option<HostNetwork>>,
     guest: Mutex<Option<GuestSession>>,
+    /// Where the party log is written. Attached after construction, like
+    /// `MovieVote`'s — `session` is built before the store exists.
+    store: OnceCell<Arc<MovieStore>>,
+    /// The night currently being recorded: its id, and everyone the monitor
+    /// has reported in the room since it started.
+    log: Arc<Mutex<Option<PartyLog>>>,
+}
+
+struct PartyLog {
+    id: String,
+    /// A set, and never cleared while the party runs: someone who drops out
+    /// of the call for ten minutes still watched the film.
+    roster: BTreeSet<String>,
 }
 
 impl PartySession {
@@ -104,6 +132,7 @@ impl PartySession {
         server: Arc<dyn ServerController>,
         discord: Arc<DiscordNotifier>,
         bus: Arc<dyn EventBus>,
+        control: Arc<dyn ControlChannel>,
     ) -> Self {
         Self {
             settings,
@@ -111,10 +140,61 @@ impl PartySession {
             server,
             discord,
             bus,
+            control,
             state: Mutex::new(SessionState::Idle),
             monitor: Mutex::new(None),
             network: Mutex::new(None),
             guest: Mutex::new(None),
+            store: OnceCell::new(),
+            log: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn attach_store(&self, store: Arc<MovieStore>) {
+        let _ = self.store.set(store);
+    }
+
+    /// What the room is watching tonight, recorded against the running
+    /// party. Passing `None` clears it — the host picked wrong, or the
+    /// evening moved on to something else.
+    pub async fn set_now_watching(
+        &self,
+        tmdb_id: Option<i64>,
+        title: Option<&str>,
+        poster: Option<&str>,
+    ) -> Result<()> {
+        let log = self.log.lock().await;
+        let (Some(log), Some(store)) = (log.as_ref(), self.store.get()) else {
+            return Err(SyncPartyError::Config(
+                "no party is running to set a movie on".to_owned(),
+            ));
+        };
+
+        store.set_party_movie(&log.id, tmdb_id, title, poster)
+    }
+
+    /// Sends `bytes` down every guest's control channel. A no-op with no
+    /// party running or no guests connected.
+    pub async fn broadcast_control(&self, bytes: Vec<u8>) {
+        if let Some(network) = self.network.lock().await.as_ref() {
+            network.tunnel.broadcast_control(&bytes).await;
+        }
+    }
+
+    /// Sends `bytes` to the host down this guest's control channel. An error
+    /// if this machine is not currently in a party as a guest.
+    pub async fn send_control(&self, bytes: Vec<u8>) -> Result<()> {
+        match self.guest.lock().await.as_ref() {
+            Some(guest) => guest.tunnel.send_control(&bytes).await,
+            None => Err(SyncPartyError::NotInParty),
+        }
+    }
+
+    /// Sends `bytes` down one guest's control channel — used to hydrate a
+    /// single guest (on reconnect, say) without broadcasting to everyone.
+    pub async fn send_control_to(&self, peer: iroh::EndpointId, bytes: Vec<u8>) {
+        if let Some(network) = self.network.lock().await.as_ref() {
+            network.tunnel.send_control_to(peer, &bytes).await;
         }
     }
 
@@ -215,7 +295,11 @@ impl PartySession {
 
         // Started only once the server is answering, so a guest that arrives
         // in the same instant is forwarded to something that exists.
-        let tunnel = HostTunnel::start(endpoint.inner().clone(), config.local_address());
+        let tunnel = HostTunnel::start(
+            endpoint.inner().clone(),
+            config.local_address(),
+            Arc::clone(&self.control),
+        );
         *self.network.lock().await = Some(HostNetwork { tunnel, endpoint });
 
         let invite = Invite {
@@ -281,17 +365,66 @@ impl PartySession {
 
         let mut updates = monitor.subscribe();
         let bus = Arc::clone(&self.bus);
+        let log = Arc::clone(&self.log);
 
         tokio::spawn(async move {
             // Ends on its own when the monitor is dropped and the sender goes
             // away, so there is nothing extra to cancel.
             while updates.changed().await.is_ok() {
                 let snapshot = updates.borrow_and_update().clone();
+
+                // The roster is built here rather than read at the end: by
+                // the time a party stops, the room is already empty.
+                if let Some(entry) = log.lock().await.as_mut() {
+                    for room in &snapshot.rooms {
+                        for watcher in &room.watchers {
+                            entry.roster.insert(watcher.name.clone());
+                        }
+                    }
+                }
+
                 bus.publish(AppEvent::RoomUpdated { snapshot });
             }
         });
 
         *self.monitor.lock().await = Some(monitor);
+        self.open_log().await;
+    }
+
+    /// Opens a party's record. Anything that fails here is logged and
+    /// dropped: a night that goes unrecorded is a worse outcome than a night
+    /// that does not start, so this must never fail a party.
+    async fn open_log(&self) {
+        let Some(store) = self.store.get() else {
+            return;
+        };
+        let Ok(id) = generate_token(12) else {
+            return;
+        };
+
+        if let Err(error) = store.open_party_log(&id, now_millis()) {
+            tracing::warn!(%error, "could not open the party log");
+            return;
+        }
+
+        *self.log.lock().await = Some(PartyLog {
+            id,
+            roster: BTreeSet::new(),
+        });
+    }
+
+    async fn close_log(&self) {
+        let Some(log) = self.log.lock().await.take() else {
+            return;
+        };
+        let Some(store) = self.store.get() else {
+            return;
+        };
+
+        let roster: Vec<String> = log.roster.into_iter().collect();
+        if let Err(error) = store.close_party_log(&log.id, now_millis(), &roster) {
+            tracing::warn!(%error, "could not close the party log");
+        }
     }
 
     /// Stops the party.
@@ -309,6 +442,8 @@ impl PartySession {
                 .send(&notify::party_stopped(&settings.language))
                 .await;
         }
+
+        self.close_log().await;
 
         // Dropping the monitor aborts its task and closes the connection.
         self.monitor.lock().await.take();
@@ -337,7 +472,12 @@ impl PartySession {
         let launcher = ClientLauncher::discover(&self.settings)?;
 
         let endpoint = PartyEndpoint::bind_joining().await?;
-        let tunnel = GuestTunnel::open(endpoint.inner().clone(), invite.endpoint_id()?).await?;
+        let tunnel = GuestTunnel::open(
+            endpoint.inner().clone(),
+            invite.endpoint_id()?,
+            Arc::clone(&self.control),
+        )
+        .await?;
         let address = tunnel.local_addr();
 
         launcher.join(invite, address, &nickname).await?;
@@ -422,6 +562,13 @@ mod tests {
     use crate::core::events::test_support::RecordingEventBus;
     use crate::core::paths::AppPaths;
 
+    /// Discards whatever arrives on the control channel — these tests are not
+    /// exercising movie voting.
+    struct NullControl;
+    impl ControlChannel for NullControl {
+        fn on_message(self: Arc<Self>, _peer: iroh::EndpointId, _bytes: Vec<u8>) {}
+    }
+
     /// A server that records what it was asked to do without starting Python.
     #[derive(Default)]
     struct FakeServer {
@@ -475,6 +622,7 @@ mod tests {
             server,
             Arc::new(DiscordNotifier::new(secrets)),
             Arc::clone(&bus) as Arc<dyn EventBus>,
+            Arc::new(NullControl),
         );
 
         (session, bus)

@@ -9,7 +9,9 @@
 //! write. Everything else pins our own idea of the protocol, which is worth
 //! nothing if that idea is wrong.
 
+use std::fs::File;
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,7 +45,12 @@ async fn a_real_syncplay_client_joins_and_appears_in_the_room() {
         .await
         .expect("the server should start");
 
-    let mut client = spawn_client(config.port);
+    // Kept rather than discarded: when this test fails it is usually the
+    // client that has something to say — a missing module, a rejected
+    // argument, a version that wants a handshake we do not send — and a bare
+    // "did not appear" leaves whoever reads the CI log with nowhere to go.
+    let log = std::env::temp_dir().join(format!("syncplay-client-{}.log", config.port));
+    let mut client = spawn_client(config.port, &log);
 
     // The same monitor the room panel uses, so what this asserts is what a
     // host would actually see.
@@ -61,20 +68,44 @@ async fn a_real_syncplay_client_joins_and_appears_in_the_room() {
     })
     .await;
 
+    // Read before the kill, so it distinguishes a client that died on its own
+    // from one that sat there connected but unlisted. Those have nothing to do
+    // with each other and the fix for one is not the fix for the other.
+    let died_on_its_own = client.try_wait().ok().flatten();
+
     // Torn down before the assertion, or a failure leaves a Python process and
     // a listening port behind for the next run to trip over.
     let _ = client.kill();
     let _ = client.wait();
     server.stop().await.expect("the server should stop");
 
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+
     assert!(
         joined,
-        "a real Syncplay client did not appear in the room within {}s",
-        PATIENCE.as_secs()
+        "a real Syncplay client did not appear in the room within {}s\n\
+         exited on its own: {}\n\
+         --- what the client said ---\n\
+         {}\n\
+         --- end ---",
+        PATIENCE.as_secs(),
+        match died_on_its_own {
+            Some(status) => status.to_string(),
+            None => "no, it was still running".to_owned(),
+        },
+        if said.trim().is_empty() {
+            "(nothing)"
+        } else {
+            said.trim()
+        },
     );
 }
 
-fn spawn_client(port: u16) -> Child {
+fn spawn_client(port: u16, log: &Path) -> Child {
+    let out = File::create(log).expect("a log file for the client");
+    let err = out.try_clone().expect("a second handle on the client log");
+
     Command::new("syncplay")
         .args([
             "--no-gui",
@@ -94,8 +125,8 @@ fn spawn_client(port: u16) -> Child {
             "--player-path",
             "mpv",
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         .spawn()
         .expect("syncplay should be on PATH; this test is meant to be skipped without it")
 }

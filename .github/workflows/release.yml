@@ -68,21 +68,28 @@ jobs:
           # linking against 24.04's would lock out Ubuntu 22.04 and Debian 12,
           # and 22.04 is the oldest release still carrying WebKitGTK 4.1.
           #
-          # Only `deb` is bundled. `rpm` and `appimage` build from the same
-          # job, but publishing an artifact nobody has installed and launched
-          # is a support promise this release does not make yet.
-          - label: Linux (.deb)
+          # `rpm` has no hard `depends` in tauri.conf.json: syncplay and mpv
+          # sit outside Fedora's and openSUSE's default repos (COPR / RPM
+          # Fusion respectively), so a hard dependency would make `dnf
+          # install`/`zypper install` refuse the package on a stock system.
+          # `appimage` is self-contained and carries no package-manager
+          # dependency concept at all. Either way the app's own dependency
+          # checker (`core/deps`) still offers to install what is missing on
+          # first launch, same as it does on Windows and macOS.
+          - label: Linux (.deb, .rpm, .AppImage)
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             container: ubuntu:22.04
-            bundles: deb
+            bundles: deb,rpm,appimage
 
     container: ${{ matrix.container }}
 
     steps:
       # The container is bare: no git, no curl, and none of the WebKitGTK
       # stack Tauri links against. `libwebkit2gtk-4.1-dev` lives in universe
-      # on 22.04, which is enabled by default on this image.
+      # on 22.04, which is enabled by default on this image. `rpm` (for
+      # `rpmbuild`) is Debian/Ubuntu's own package, unrelated to the RPMs it
+      # produces.
       - name: Install Linux build dependencies
         if: matrix.container
         run: |
@@ -91,7 +98,7 @@ jobs:
             build-essential ca-certificates curl file git \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev libssl-dev libxdo-dev \
-            patchelf pkg-config wget xz-utils
+            patchelf pkg-config rpm wget xz-utils
 
       - *checkout
 
@@ -135,15 +142,22 @@ jobs:
             **Windows** — the `.exe` setup file below (or the `.msi`)
             **macOS** — `aarch64.dmg` for Apple silicon, `x64.dmg` for Intel
             **Debian / Ubuntu** — the `.deb` below: `sudo apt install ./syncparty_*.deb`
+            **Fedora / openSUSE** — the `.rpm` below
             **Arch** — `syncparty-bin` from the AUR
-            **Anything else** — build from source, see `docs/building.md`
+            **Anything else with a desktop** — the `.AppImage` below
+            **No desktop, or none of the above fit** — build from source, see
+            `docs/building.md`
 
             On Windows and macOS everything syncparty needs — the Syncplay
-            client, mpv, and the Python environment for hosting — is checked on
-            first launch and installed for you if it is missing. The Linux
-            packages declare the same things as dependencies instead, so your
-            package manager has already installed them by the time the app
-            opens.
+            client and mpv — is checked on first launch and installed for you
+            if it is missing. The `.deb` declares the same things as
+            dependencies, so apt has already installed them by the time the
+            app opens. The `.rpm` only recommends them, since Fedora and
+            openSUSE do not carry Syncplay or mpv in their default repositories
+            — dnf/zypper will not refuse the install over it, and syncparty's
+            own checker offers to install what is missing on first launch, the
+            same as it does on Windows and macOS. The AppImage carries no
+            package-manager dependencies at all, for the same reason.
 
             syncparty checks for updates on startup. On Windows and macOS it
             offers to install them in place. On Linux it tells you a new

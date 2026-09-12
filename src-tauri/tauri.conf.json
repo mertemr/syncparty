@@ -61,7 +61,13 @@
         "section": "video",
         "desktopTemplate": "packaging/syncparty.desktop",
         "postInstallScript": "packaging/postinst.sh"
-      }
+      },
+      "rpm": {
+        "recommends": ["syncplay", "mpv"],
+        "desktopTemplate": "packaging/syncparty.desktop",
+        "postInstallScript": "packaging/postinst.sh"
+      },
+      "appimage": {}
     }
   }
 }

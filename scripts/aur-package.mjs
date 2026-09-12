@@ -41,7 +41,7 @@ const outDir = argument("out", join(root, "packaging/aur/out"));
 const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const sha256 = createHash("sha256").update(readFileSync(debPath)).digest("hex");
 const debName = basename(debPath);
-const debUrl = `https://github.com/Tahckn/syncparty/releases/download/v${version}/${debName}`;
+const debUrl = `https://github.com/mertemr/syncparty/releases/download/v${version}/${debName}`;
 
 /**
  * One definition, rendered into both files.
@@ -60,7 +60,7 @@ const pkg = {
   pkgrel: "1",
   pkgdesc: "Synchronised movie nights, peer to peer",
   arch: ["x86_64"],
-  url: "https://github.com/Tahckn/syncparty",
+  url: "https://github.com/mertemr/syncparty",
   license: ["MIT"],
   depends: [
     "webkit2gtk-4.1",

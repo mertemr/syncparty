@@ -8,7 +8,7 @@ You do not need to be added as a collaborator to contribute — fork the repo
 and open a pull request against `main`:
 
 ```bash
-gh repo fork Tahckn/syncparty --clone
+gh repo fork mertemr/syncparty --clone
 cd syncparty
 git checkout -b my-change
 # ... make your change ...

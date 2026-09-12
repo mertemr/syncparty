@@ -69,7 +69,7 @@ sudo apt install gnome-keyring      # or kwalletmanager, or keepassxc
 ## Build
 
 ```bash
-git clone https://github.com/Tahckn/syncparty.git
+git clone https://github.com/mertemr/syncparty.git
 cd syncparty
 pnpm install
 pnpm tauri build

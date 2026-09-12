@@ -32,21 +32,25 @@ address to copy, nothing exposed to the public internet.
 
 | Platform | Download |
 | --- | --- |
-| 🪟 Windows | [`.exe` setup](https://github.com/Tahckn/syncparty/releases/latest) · [`.msi`](https://github.com/Tahckn/syncparty/releases/latest) |
-| 🍎 macOS (Apple silicon) | [`.dmg`](https://github.com/Tahckn/syncparty/releases/latest) |
-| 🍎 macOS (Intel) | [`.dmg`](https://github.com/Tahckn/syncparty/releases/latest) |
-| 🐧 Debian / Ubuntu | [`.deb`](https://github.com/Tahckn/syncparty/releases/latest) |
+| 🪟 Windows | [`.exe` setup](https://github.com/mertemr/syncparty/releases/latest) · [`.msi`](https://github.com/mertemr/syncparty/releases/latest) |
+| 🍎 macOS (Apple silicon) | [`.dmg`](https://github.com/mertemr/syncparty/releases/latest) |
+| 🍎 macOS (Intel) | [`.dmg`](https://github.com/mertemr/syncparty/releases/latest) |
+| 🐧 Debian / Ubuntu | [`.deb`](https://github.com/mertemr/syncparty/releases/latest) |
+| 🐧 Fedora / openSUSE | [`.rpm`](https://github.com/mertemr/syncparty/releases/latest) |
 | 🐧 Arch | [`syncparty-bin`](https://aur.archlinux.org/packages/syncparty-bin) |
+| 🐧 Any other desktop Linux | [`.AppImage`](https://github.com/mertemr/syncparty/releases/latest) |
 
 Every link lands on the same page — the
-[latest release](https://github.com/Tahckn/syncparty/releases/latest), grab the
+[latest release](https://github.com/mertemr/syncparty/releases/latest), grab the
 file for your machine. That's the only manual install: from v0.2.0 on,
 syncparty checks for updates on startup and offers to install new ones in
 place.
 
-On Debian or Ubuntu that is `sudo apt install ./syncparty_*.deb`; on Arch,
-`syncparty-bin` from the AUR. Any other distribution builds from source —
-[`docs/building.md`](docs/building.md).
+On Debian or Ubuntu that is `sudo apt install ./syncparty_*.deb`; on Fedora or
+openSUSE, `sudo dnf install ./syncparty-*.rpm` or `sudo zypper install
+./syncparty-*.rpm`; on Arch, `syncparty-bin` from the AUR. The AppImage needs
+no install step — mark it executable and run it. Any other distribution
+builds from source — [`docs/building.md`](docs/building.md).
 
 The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will
 both warn on first run. Updates are still verified: they are cryptographically
@@ -56,10 +60,14 @@ every update.
 
 Everything else — the Syncplay client and mpv — is handled for you, though by
 different means depending on the platform. Windows and macOS detect what is
-missing on first launch and install it through winget or Homebrew. The Linux
-packages declare the same things as dependencies, so your package manager has
-already put them in place before the app opens. The server itself is not on
-that list: it is built into syncparty.
+missing on first launch and install it through winget or Homebrew. The `.deb`
+declares the same things as hard dependencies, so apt has already put them in
+place before the app opens. The `.rpm` only recommends them — Fedora and
+openSUSE do not carry Syncplay or mpv in their default repositories, so a hard
+dependency would make the package refuse to install — and the AppImage
+carries no package-manager dependencies at all; both fall back to the same
+first-launch check Windows and macOS use. The server itself is not on that
+list: it is built into syncparty.
 
 Updates work the same way. On Windows and macOS syncparty downloads them in the
 background and offers to restart. On Linux it tells you a new version exists

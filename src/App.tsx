@@ -17,7 +17,7 @@ import { Badge, Button, Rewind, ToastHost, Wordmark } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 
 /** Where a package-managed install is pointed for release notes. */
-const RELEASES_URL = "https://github.com/Tahckn/syncparty/releases/latest";
+const RELEASES_URL = "https://github.com/mertemr/syncparty/releases/latest";
 
 export default function App() {
   return (

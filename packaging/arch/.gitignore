@@ -1,0 +1,5 @@
+# What makepkg leaves behind when run in place.
+/src/
+/pkg/
+/syncparty/
+*.pkg.tar.*

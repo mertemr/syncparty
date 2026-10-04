@@ -1,0 +1,65 @@
+# Maintainer: Mert Emir <48881002+mertemr@users.noreply.github.com>
+#
+# Builds syncparty from the tip of main. This is the Arch install until
+# `syncparty-bin` is on the AUR:
+#
+#   git clone https://github.com/mertemr/syncparty.git
+#   cd syncparty/packaging/arch
+#   makepkg -si
+
+pkgname=syncparty-git
+pkgver=0.8.0.r0.g5ac36ae
+pkgrel=1
+pkgdesc='Synchronised movie nights, peer to peer'
+arch=('x86_64')
+url='https://github.com/mertemr/syncparty'
+license=('MIT')
+# Kept in step with scripts/aur-package.mjs, which explains each entry:
+# `pyside6`/`shiboken6` because Arch ships them as optdepends of `syncplay`,
+# `mpv` because a player has to be named.
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'syncplay' 'pyside6' 'shiboken6' 'mpv')
+makedepends=('git' 'cargo' 'nodejs' 'pnpm' 'librsvg' 'xdotool')
+optdepends=('vlc: alternative to mpv'
+            'gnome-keyring: keep secrets in the keyring instead of a file')
+provides=('syncparty')
+conflicts=('syncparty')
+# The Rust build links C objects (bundled SQLite), and makepkg's -flto leaves
+# those as bitcode the Rust linker step cannot read.
+options=('!lto' '!debug')
+source=('syncparty::git+https://github.com/mertemr/syncparty.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd syncparty
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  cd syncparty
+  pnpm install --frozen-lockfile
+  cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+}
+
+build() {
+  cd syncparty
+  # A CARGO_TARGET_DIR from the user's environment would move the bundle out
+  # from under package().
+  export CARGO_TARGET_DIR="${srcdir}/syncparty/src-tauri/target"
+  rm -rf "${CARGO_TARGET_DIR}/release/bundle/deb"
+
+  # Tauri cannot bundle a pacman package, so this builds the .deb and
+  # package() unpacks it — the same layout `syncparty-bin` installs. The
+  # config override turns off updater artifacts, which need a signing key.
+  pnpm tauri build --bundles deb --config scripts/tauri.local.conf.json
+}
+
+package() {
+  cd syncparty
+  # The outer archive is `ar`, and data.tar.* inside it holds the /usr tree:
+  # the binary, the icons, and the .desktop file whose
+  # MimeType=x-scheme-handler/syncparty is what makes invite links work.
+  bsdtar -xOf src-tauri/target/release/bundle/deb/*.deb 'data.tar.*' |
+    bsdtar -xpf - -C "${pkgdir}"
+
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

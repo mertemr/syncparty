@@ -2,9 +2,9 @@
 
 For anyone on a distribution the packages do not cover — NixOS, Gentoo, Void,
 openSUSE, Alpine, or a machine where you would rather compile than install a
-package. On Debian, Ubuntu, or Arch, prefer the `.deb` or `syncparty-bin` from
-the AUR: they declare their dependencies, so the app opens with everything it
-needs already in place.
+package. On Debian or Ubuntu, prefer the `.deb`; on Arch, `makepkg -si` in
+[`packaging/arch`](../packaging/arch/PKGBUILD). Both declare their
+dependencies, so the app opens with everything it needs already in place.
 
 ## What you need
 

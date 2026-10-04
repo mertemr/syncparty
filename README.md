@@ -37,7 +37,7 @@ address to copy, nothing exposed to the public internet.
 | 🍎 macOS (Intel) | [`.dmg`](https://github.com/mertemr/syncparty/releases/latest) |
 | 🐧 Debian / Ubuntu | [`.deb`](https://github.com/mertemr/syncparty/releases/latest) |
 | 🐧 Fedora / openSUSE | [`.rpm`](https://github.com/mertemr/syncparty/releases/latest) |
-| 🐧 Arch | [`syncparty-bin`](https://aur.archlinux.org/packages/syncparty-bin) |
+| 🐧 Arch | [`PKGBUILD`](packaging/arch/PKGBUILD) — `makepkg -si` |
 | 🐧 Any other desktop Linux | [`.AppImage`](https://github.com/mertemr/syncparty/releases/latest) |
 
 Every link lands on the same page — the
@@ -48,9 +48,20 @@ place.
 
 On Debian or Ubuntu that is `sudo apt install ./syncparty_*.deb`; on Fedora or
 openSUSE, `sudo dnf install ./syncparty-*.rpm` or `sudo zypper install
-./syncparty-*.rpm`; on Arch, `syncparty-bin` from the AUR. The AppImage needs
-no install step — mark it executable and run it. Any other distribution
-builds from source — [`docs/building.md`](docs/building.md).
+./syncparty-*.rpm`. The AppImage needs no install step — mark it executable
+and run it. Any other distribution builds from source —
+[`docs/building.md`](docs/building.md).
+
+Arch is not on the AUR yet, so the package is built from this repository:
+
+```bash
+git clone https://github.com/mertemr/syncparty.git
+cd syncparty/packaging/arch
+makepkg -si
+```
+
+That builds `syncparty-git` from the tip of `main` and installs it through
+pacman, dependencies included.
 
 The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will
 both warn on first run. Updates are still verified: they are cryptographically
@@ -213,6 +224,7 @@ src-tauri/
     update.rs            whether this build may update itself
   packaging/             the .deb maintainer scripts
 scripts/                 version bump, AUR rendering
+packaging/arch/          PKGBUILD for building on Arch
 ```
 
 `core` never imports from `ipc`, which is what lets the whole of it run under

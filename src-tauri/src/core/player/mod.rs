@@ -10,6 +10,8 @@
 //! decision-making above it can be tested with a fake that records what it
 //! was told, without a window opening anywhere.
 
+#[cfg(test)]
+pub(crate) mod fake;
 pub mod mpv;
 
 use std::path::{Path, PathBuf};

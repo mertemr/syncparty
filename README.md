@@ -31,6 +31,7 @@ needs Syncplay installed.
 - Paste an invite code, or just click the `syncparty://` link
 - Checks for mpv, and on Windows and macOS installs it if it is missing
 - One button to join — syncparty opens mpv and keeps it in step with the room
+- See who else is in the room, the file each person has open and who is ready
 
 ## Install
 
@@ -65,16 +66,17 @@ every update.
 The one other thing syncparty needs is mpv. The server and the client that
 keeps everyone's mpv in step are both built in, so the player is all that is
 left, and how it gets there depends on the platform. Windows and macOS detect
-a missing mpv on first launch and install it through winget or Homebrew (an
-Intel Mac has no prebuilt Homebrew mpv, so there it is compiled, which takes a
-while). The `.deb` declares it as a hard dependency, so apt has already put it
-in place before the app opens; `syncparty-bin` does the same on Arch. The
-`.rpm` only recommends it — an RPM can land on a system whose repositories
-carry no mpv, and a hard dependency would make the package refuse to install
-there — and the AppImage carries no package-manager dependencies at all. Both
-fall back to the first-launch check, which on Linux reports a missing mpv and
-links to mpv.io rather than installing it, since there is no one package
-manager to ask.
+a missing mpv on first launch and install it through winget or Homebrew.
+Homebrew only has a prebuilt mpv for Apple silicon on recent macOS releases —
+Sequoia and newer at the time of writing — so on an Intel Mac, or on an older
+macOS, it compiles mpv instead, which takes a while. The `.deb` declares it as
+a hard dependency, so apt has already put it in place before the app opens;
+`syncparty-bin` does the same on Arch. The `.rpm` only recommends it — an RPM
+can land on a system whose repositories carry no mpv, and a hard dependency
+would make the package refuse to install there — and the AppImage carries no
+package-manager dependencies at all. Both fall back to the first-launch check,
+which on Linux reports a missing mpv and links to mpv.io rather than
+installing it, since there is no one package manager to ask.
 
 Updates work the same way. On Windows and macOS syncparty downloads them in the
 background and offers to restart. On Linux it tells you a new version exists
@@ -167,20 +169,23 @@ A few decisions worth knowing about:
   exactly what a participant sees: nicknames, the file each person has open,
   who is ready. It never sends playback state, so it cannot pause or seek
   anyone's film. It appears in everyone's user list as `syncparty-panel`, and
-  can be switched off in Settings at the cost of the detail it provides.
-- **Secrets never touch a command line.** The server password and salt are
-  stored in Windows Credential Manager, the macOS Keychain, or the Secret
-  Service on Linux. The server, the client and the room panel all run inside
-  syncparty, so the password is never handed to another program on your
-  machine — not on a command line, not in an environment variable. mpv is
-  started with its IPC endpoint and is told nothing about the party, and that
-  endpoint — a socket in a directory only you can open, or on Windows a pipe
-  only you can connect to — is private to you, because whoever can reach it
-  can drive the player. Linux is the one platform where the secret store may
-  be absent — Secret Service is a daemon, and a minimal window manager may run
-  none — so the packages list a provider as a recommendation and the app
-  falls back to a `0600` file under `~/.local/share/syncparty/` rather than
-  refusing to host. `Settings → Diagnostics` reports which store is in use.
+  can be switched off in Settings. Your own sync client sees the same room, so
+  while you are watching too it fills the panel instead; only with neither of
+  them connected is there no room detail to show. A guest's list of who is in
+  the room comes from their own client the same way.
+- **Secrets are never handed to another program.** The server password and
+  salt are stored in Windows Credential Manager, the macOS Keychain, or the
+  Secret Service on Linux. The server, the client and the room panel all run
+  inside syncparty, so nothing it starts is given either one — not on a
+  command line, not in an environment variable. mpv is started with its IPC
+  endpoint and is told nothing about the party, and that endpoint — a socket
+  in a directory only you can open, or on Windows a pipe only you can connect
+  to — is private to you, because whoever can reach it can drive the player.
+  Linux is the one platform where the secret store may be absent — Secret
+  Service is a daemon, and a minimal window manager may run none — so the
+  packages list a provider as a recommendation and the app falls back to a
+  `0600` file under `~/.local/share/syncparty/` rather than refusing to host.
+  `Settings → Diagnostics` reports which store is in use.
 - **The salt is generated once and kept.** The server derives room operator
   passwords from it, the same way Syncplay's does; a new salt on every start
   would silently invalidate them.
@@ -188,7 +193,12 @@ A few decisions worth knowing about:
   membership to check any more, so anyone holding the code can join. That was
   already most of the story — the code carried the server password — but the
   tailnet used to be a second door. Treat a code like a door key and start a
-  new party if one leaks.
+  new party if one leaks. A `syncparty://` link is the same code, so it
+  carries the password too, and on Windows and Linux the system hands a
+  clicked link to syncparty as a command-line argument — briefly if the app is
+  already open, and for as long as it runs if the link is what started it.
+  That is syncparty's own command line, and on Linux any local user can read
+  it by default. Pasting the code into the app keeps the password off it.
 - **Updates download in the background but never install themselves.**
   syncparty checks on startup and, if there is a new version, downloads it
   silently — there is no reason to make that wait for anyone. Installing

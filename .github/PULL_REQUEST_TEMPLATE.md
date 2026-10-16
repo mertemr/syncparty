@@ -19,7 +19,8 @@
       both ends are ours now, so nothing else will notice a wrong field
 - [ ] If this touches the sync client, the mpv driver or the protocol,
       `cargo test --test native_watch_e2e -- --ignored` and
-      `cargo test --lib player::mpv -- --ignored` pass (need mpv on PATH)
+      `cargo test --lib player::mpv -- --ignored` pass with at least one test
+      each (need mpv on PATH)
 - [ ] If this changes how mpv (or anything else) is started, the party
-      password still never reaches a command line and the mpv IPC endpoint is
-      still private to the user
+      password still never reaches its command line or environment, and the
+      mpv IPC endpoint is still private to the user

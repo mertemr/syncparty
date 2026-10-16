@@ -67,10 +67,14 @@ cargo test --test native_watch_e2e -- --ignored
 cargo test --lib player::mpv -- --ignored
 ```
 
+Check that each one reports at least one test passed. A filter that matches
+nothing, or a test that lost its `#[ignore]`, still ends in `test result: ok.
+0 passed`, and that is not a pass.
+
 CI runs the formatting, lint and test steps on Linux, `cargo test` again on
 Windows and macOS, and the frontend tests and build on Linux. One more Linux
 job, Backend (native client + mpv), installs mpv and runs the two commands
-above.
+above, and fails either one that runs no test.
 
 Run cargo from `src-tauri`, not from the repository root with
 `--manifest-path`. Cargo looks for `.cargo/config.toml` relative to the working
@@ -179,11 +183,14 @@ pull request:
 - The room panel never sends `playstate`. If it did, it could pause, unpause
   or seek everybody's film. The client that drives mpv does send it, so this is
   a property of the panel, not of the message types.
-- The party password and the server salt never appear in `argv` — not
-  syncparty's own, and not that of anything syncparty spawns. The server and
-  the client run inside syncparty; mpv is started with its IPC endpoint and
-  playback options, gets each file over that endpoint, and is told nothing
-  about the party.
+- Nothing syncparty spawns is given the party password or the server salt,
+  in its `argv` or in its environment. The server and the client run inside
+  syncparty; mpv is started with its IPC endpoint and playback options, gets
+  each file over that endpoint, and is told nothing about the party.
+  syncparty's own `argv` is the one place this cannot be promised: an invite
+  carries the password, and on Windows and Linux a clicked `syncparty://`
+  link arrives as a command-line argument. So never log `argv` or an incoming
+  link, and do not add another way for a secret to reach a command line.
 - The mpv IPC endpoint is private to the user: a Unix socket inside a `0700`
   directory, or on Windows a named pipe that mpv opens to the current user
   only. mpv's IPC can run commands, not just pause the film, so the endpoint is

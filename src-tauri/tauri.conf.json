@@ -43,7 +43,7 @@
     "createUpdaterArtifacts": true,
     "category": "Video",
     "shortDescription": "Synchronised movie nights, peer to peer",
-    "longDescription": "syncparty runs a private Syncplay server on your machine and connects your friends to it directly, with no account to create and no port to open. Nothing is streamed and nothing is exposed to the public internet.",
+    "longDescription": "syncparty runs a private watch-party server on your machine, connects your friends to it directly and keeps everyone's mpv in step, with no account to create and no port to open. Nothing is streamed and nothing is exposed to the public internet.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,17 +53,14 @@
     ],
     "linux": {
       "deb": {
-        "depends": [
-          "syncplay",
-          "mpv | vlc"
-        ],
+        "depends": ["mpv"],
         "recommends": ["gnome-keyring"],
         "section": "video",
         "desktopTemplate": "packaging/syncparty.desktop",
         "postInstallScript": "packaging/postinst.sh"
       },
       "rpm": {
-        "recommends": ["syncplay", "mpv"],
+        "recommends": ["mpv"],
         "desktopTemplate": "packaging/syncparty.desktop",
         "postInstallScript": "packaging/postinst.sh"
       },

@@ -37,6 +37,27 @@ pub fn spawnable(program: impl AsRef<OsStr>) -> Command {
     command(program)
 }
 
+/// Builds a [`Command`] for a long-lived program syncparty talks to some
+/// other way than through its output — mpv, which is driven over a socket.
+///
+/// All three streams are null rather than piped: nobody reads a pipe here,
+/// and a child that writes enough into an unread one blocks once the pipe is
+/// full. The process is killed if its handle is dropped, so a syncparty that
+/// goes away mid-film does not leave behind a player nothing controls.
+pub fn quiet(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
+}
+
 pub struct CapturedOutput {
     pub stdout: String,
     pub stderr: String,

@@ -41,12 +41,46 @@ pub struct ServerConfig {
     pub password: String,
     /// Stable across restarts, or every room operator password breaks.
     pub salt: String,
+    pub timing: ServerTiming,
 }
 
 impl ServerConfig {
     /// Where the tunnel and the host's own Syncplay client should connect.
     pub fn local_address(&self) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(BIND_ADDRESS), self.port)
+    }
+}
+
+/// The clock every connection runs on.
+///
+/// A field of the configuration rather than constants so the suite can run a
+/// whole party's worth of heartbeats and timeouts in a fraction of a second.
+/// Production always uses [`ServerTiming::default`], which is upstream's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ServerTiming {
+    /// From a greeting to that connection's first `State`. Upstream's watcher
+    /// schedules its timer this long after it is created.
+    pub first_state_delay: Duration,
+    /// Between heartbeats on one connection. Upstream's
+    /// `SERVER_STATE_INTERVAL`.
+    pub state_interval: Duration,
+    /// How long a connection may go without a `State` the room accepted
+    /// before it is dropped. Upstream's `PROTOCOL_TIMEOUT`, and also how long
+    /// one write may take before the peer counts as gone.
+    pub protocol_timeout: Duration,
+    /// How long a connection may sit there without greeting. Not upstream's:
+    /// there, a connection that never says hello is held open forever.
+    pub hello_deadline: Duration,
+}
+
+impl Default for ServerTiming {
+    fn default() -> Self {
+        Self {
+            first_state_delay: Duration::from_millis(100),
+            state_interval: Duration::from_secs(1),
+            protocol_timeout: Duration::from_millis(12_500),
+            hello_deadline: Duration::from_secs(10),
+        }
     }
 }
 
@@ -222,6 +256,7 @@ mod tests {
             port: 8999,
             password: "swordfish".to_owned(),
             salt: "PEPPER".to_owned(),
+            timing: ServerTiming::default(),
         }
     }
 
@@ -245,6 +280,7 @@ mod tests {
             port,
             password: "swordfish".to_owned(),
             salt: "PEPPER".to_owned(),
+            timing: ServerTiming::default(),
         }
     }
 
@@ -331,6 +367,16 @@ mod tests {
                 .is_err(),
             "a stopped server must not still be holding the port"
         );
+    }
+
+    #[test]
+    fn the_default_timing_is_upstreams() {
+        let timing = ServerTiming::default();
+
+        assert_eq!(timing.first_state_delay, Duration::from_millis(100));
+        assert_eq!(timing.state_interval, Duration::from_secs(1));
+        assert_eq!(timing.protocol_timeout, Duration::from_millis(12_500));
+        assert_eq!(timing.hello_deadline, Duration::from_secs(10));
     }
 
     /// Loopback, and not configurable. Guests arrive through the host's

@@ -12,4 +12,4 @@ pub use monitor::{
     MonitorConfig, RoomMonitor, RoomSnapshot, RoomView, WatchedFile, WatcherView, MONITOR_NICKNAME,
 };
 pub use protocol::hash_password;
-pub use server::{NativeServer, ServerConfig, ServerController, ServerState};
+pub use server::{NativeServer, ServerConfig, ServerController, ServerState, ServerTiming};

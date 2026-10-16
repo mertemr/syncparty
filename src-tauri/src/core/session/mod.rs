@@ -285,6 +285,7 @@ impl PartySession {
             port: settings.port,
             password: password.clone(),
             salt,
+            timing: Default::default(),
         };
         self.server.start(&config).await?;
 

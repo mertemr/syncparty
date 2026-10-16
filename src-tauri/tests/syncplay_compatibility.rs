@@ -37,6 +37,7 @@ async fn a_real_syncplay_client_joins_and_appears_in_the_room() {
         port: free_port(),
         password: PASSWORD.to_owned(),
         salt: "PEPPER".to_owned(),
+        timing: Default::default(),
     };
 
     let server = NativeServer::new(Arc::new(NullEventBus));

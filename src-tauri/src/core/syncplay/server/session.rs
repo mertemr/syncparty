@@ -720,6 +720,7 @@ mod tests {
             port: 0,
             password: "swordfish".to_owned(),
             salt: "PEPPER".to_owned(),
+            timing: crate::core::syncplay::server::ServerTiming::default(),
         })
     }
 

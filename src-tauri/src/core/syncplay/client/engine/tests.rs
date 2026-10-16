@@ -1046,6 +1046,20 @@ fn a_jump_to_where_the_room_already_is_is_not_a_seek() {
 }
 
 #[test]
+fn a_pause_change_back_to_what_the_room_is_doing_is_not_a_change() {
+    let mut session = Session::watching(10.0, false);
+    let paused = session.poll(11.25, true);
+    assert_eq!(states(&paused).len(), 1, "{paused:?}");
+
+    // Unpausing again before the server has heard of the pause differs from
+    // the player's last report but not from the room, so it is not news.
+    session.after(50);
+    let step = session.poll(11.25, false);
+
+    assert!(states(&step).is_empty(), "{step:?}");
+}
+
+#[test]
 fn the_players_own_echo_of_a_server_pause_is_not_the_user_pausing() {
     let mut session = Session::watching(10.0, false);
     session.state(11.0, true, Some("bob"));

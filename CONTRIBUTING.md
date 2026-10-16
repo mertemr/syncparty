@@ -26,15 +26,17 @@ A few things that trip people up the first time:
   "Approve and run" on the Actions tab. This is a GitHub security default, not
   something specific to this repo, and it is expected — ping the PR if it has
   been a while.
-- **A PR cannot merge until CI is green.** `main` requires the Versions agree,
-  Backend (Windows), Backend (macOS) and Frontend checks to pass before the
-  merge button unlocks.
+- **A PR cannot merge until CI is green.** `main` requires the Backend (lint &
+  types), Backend (Windows), Backend (macOS) and Frontend checks to pass before
+  the merge button unlocks. Versions agree and Backend (native client + mpv)
+  run on every pull request too; a red one is still a reason not to merge, but
+  neither locks the button.
 - Keep the branch scoped to one change. Unrelated formatting or refactors in
   the same PR make it harder to review.
 
 ## Getting set up
 
-You need [Rust](https://rustup.rs), Node 20+, pnpm, and the
+You need [Rust](https://rustup.rs), Node 22+, pnpm, and the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your
 platform (MSVC Build Tools on Windows, Xcode command line tools on macOS).
 
@@ -56,7 +58,19 @@ cargo test
 pnpm build   # runs tsc, so this is the frontend type check too
 ```
 
-CI runs all of the above on Windows and macOS.
+If the change touches the sync client, the mpv driver or the protocol, also
+run the tests that need a real player. They want mpv on PATH and no display:
+
+```bash
+cd src-tauri
+cargo test --test native_watch_e2e -- --ignored
+cargo test --lib player::mpv -- --ignored
+```
+
+CI runs the formatting, lint and test steps on Linux, `cargo test` again on
+Windows and macOS, and the frontend tests and build on Linux. One more Linux
+job, Backend (native client + mpv), installs mpv and runs the two commands
+above.
 
 Run cargo from `src-tauri`, not from the repository root with
 `--manifest-path`. Cargo looks for `.cargo/config.toml` relative to the working
@@ -107,7 +121,7 @@ git tag v0.5.0
 git push origin v0.5.0
 ```
 
-The protected branch has already passed the required Windows, macOS, and
+The protected branch has already passed the required lint, Windows, macOS and
 frontend checks, so merging does not run the same CI suite again. The tag starts
 one release workflow: it first verifies all version declarations, builds the
 three native packages in parallel, and publishes the draft only after every
@@ -141,21 +155,39 @@ Concretely:
 
 `src/shared/types/*.ts` is generated from the Rust types by `ts-rs` whenever
 `cargo test` runs. Do not edit those files; change the Rust type and re-run
-the tests. CI fails if they drift.
+the tests. CI fails if they drift, including when a newly exported type was
+never committed. `ts-rs` only ever writes files, though, so when you remove an
+exported type, delete its `.ts` file by hand.
 
 ## Working on the protocol
 
-`core/syncplay/protocol.rs` mirrors Syncplay's wire format. A mismatch there
-fails quietly — the monitor connects and simply shows nothing — so please
-check any change against the
-[Syncplay source](https://github.com/Syncplay/syncplay) rather than inferring
-the shape, and add a test with a real captured message.
+`core/syncplay/protocol.rs` mirrors Syncplay's wire format, and both ends of
+every connection now go through it: the server, the client that drives mpv,
+and the room panel. Nothing installs Syncplay any more, but its source is still
+the reference: the protocol is Syncplay's, and a guest still on an older
+syncparty joins through the real Syncplay client, so our server has to keep
+speaking it exactly. Two ends that are both ours will happily agree with each
+other about a wrong field, the end-to-end test will pass, and the only thing
+that disagrees is upstream. So please check any change against the
+[Syncplay source](https://github.com/Syncplay/syncplay)
+(`syncplay/protocols.py` and `syncplay/client.py`, 1.7.x) rather than
+inferring the shape, and add a test with a real captured message.
 
-Two properties the tests guard, both worth keeping:
+Three properties worth keeping. If a change has to touch one, say so in the
+pull request:
 
-- The monitor never sends `playstate`. If it did, it could pause, unpause or
-  seek everybody's film.
-- The server password and salt never appear in `argv`.
+- The room panel never sends `playstate`. If it did, it could pause, unpause
+  or seek everybody's film. The client that drives mpv does send it, so this is
+  a property of the panel, not of the message types.
+- The party password and the server salt never appear in `argv` — not
+  syncparty's own, and not that of anything syncparty spawns. The server and
+  the client run inside syncparty; mpv is started with its IPC endpoint and
+  playback options, gets each file over that endpoint, and is told nothing
+  about the party.
+- The mpv IPC endpoint is private to the user: a Unix socket inside a `0700`
+  directory, or on Windows a named pipe that mpv opens to the current user
+  only. mpv's IPC can run commands, not just pause the film, so the endpoint is
+  never a shared or predictable path.
 
 ## Adding strings
 

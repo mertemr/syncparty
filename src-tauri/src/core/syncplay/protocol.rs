@@ -1,9 +1,10 @@
 //! The Syncplay wire protocol: newline-delimited JSON objects.
 //!
-//! Only the slice syncparty needs to observe a room is modelled here. Every
-//! shape below was read off the Syncplay 1.7.x source rather than guessed,
-//! because a near-miss here fails silently — the monitor connects, sees
-//! nothing, and the panel just looks empty.
+//! Only the slice syncparty needs is modelled here: enough for the monitor to
+//! observe a room, for the sync client to take part in one, and for the server
+//! to host one. Every shape below was read off the Syncplay 1.7.x source
+//! rather than guessed, because a near-miss here fails silently — the client
+//! connects, sees nothing, and the film just never moves.
 
 use std::collections::HashMap;
 
@@ -47,12 +48,12 @@ pub fn hash_password(plain: &str) -> String {
 
 // ---------------------------------------------------------------- outgoing
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RoomRef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFeatures {
     pub shared_playlists: bool,
@@ -60,6 +61,12 @@ pub struct ClientFeatures {
     pub feature_list: bool,
     pub readiness: bool,
     pub managed_rooms: bool,
+    pub persistent_rooms: bool,
+    /// Which of upstream's two interfaces the client is. Purely informative —
+    /// the server only echoes it to the room — so the observer leaves it out
+    /// rather than pretend to be either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_mode: Option<String>,
 }
 
 impl ClientFeatures {
@@ -73,11 +80,32 @@ impl ClientFeatures {
             feature_list: true,
             readiness: true,
             managed_rooms: false,
+            persistent_rooms: false,
+            ui_mode: None,
+        }
+    }
+
+    /// What the sync client supports.
+    ///
+    /// Playlists and managed rooms stay off because syncparty has no UI for
+    /// either, and a client that claims a feature is sent its messages.
+    /// Readiness is on because unpausing depends on it. Chat is claimed so the
+    /// room treats this client like any other GUI client; incoming chat is
+    /// simply not shown yet.
+    pub fn participant() -> Self {
+        Self {
+            shared_playlists: false,
+            chat: true,
+            feature_list: true,
+            readiness: true,
+            managed_rooms: false,
+            persistent_rooms: false,
+            ui_mode: Some("GUI".to_owned()),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Hello {
     pub username: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,8 +117,22 @@ pub struct Hello {
 }
 
 impl Hello {
-    /// Builds the greeting, hashing `password` on the way in.
+    /// Builds the monitor's greeting, hashing `password` on the way in.
     pub fn new(username: &str, room: &str, password: Option<&str>) -> Self {
+        Self::with_features(username, room, password, ClientFeatures::observer())
+    }
+
+    /// Builds the sync client's greeting.
+    pub fn participant(username: &str, room: &str, password: Option<&str>) -> Self {
+        Self::with_features(username, room, password, ClientFeatures::participant())
+    }
+
+    fn with_features(
+        username: &str,
+        room: &str,
+        password: Option<&str>,
+        features: ClientFeatures,
+    ) -> Self {
         Self {
             username: username.to_owned(),
             password: password.filter(|p| !p.is_empty()).map(hash_password),
@@ -99,13 +141,49 @@ impl Hello {
             },
             version: PROTOCOL_VERSION.to_owned(),
             realversion: REAL_VERSION.to_owned(),
-            features: ClientFeatures::observer(),
+            features,
         }
     }
 }
 
+/// Where the client's player is, as it goes out in a `State`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClientPlaystate {
+    pub position: f64,
+    pub paused: bool,
+    /// Sent only when true. Upstream leaves the key out otherwise, and the
+    /// server reads a missing key as "no seek".
+    pub do_seek: bool,
+}
+
+/// One `State` from the sync client: a reply to the server's, or the report
+/// of something the user did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientState {
+    /// Absent while the client has nothing trustworthy to report — before it
+    /// has applied the room's state, or while its own change is in flight.
+    pub playstate: Option<ClientPlaystate>,
+    /// The server's stamp, echoed verbatim so it can measure the round trip.
+    pub latency_calculation: Option<f64>,
+    /// This side's own stamp, which the server echoes back the same way.
+    pub client_latency_calculation: f64,
+    /// The last round trip this side measured, never negative on the wire.
+    pub client_rtt: f64,
+    pub ignoring_on_the_fly: IgnoringOnTheFly,
+}
+
+/// The file the client has open, as the room is told about it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileReport {
+    pub name: String,
+    /// Zero when the player does not know, as upstream sends it.
+    pub duration: f64,
+    /// Zero when unknown; upstream treats a zero size as matching anything.
+    pub size: u64,
+}
+
 /// A message syncparty sends to the server.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClientMessage {
     Hello(Hello),
     /// `{"List": null}` — asks for every room and watcher.
@@ -122,6 +200,15 @@ pub enum ClientMessage {
         /// any playback data back into the room.
         server_ignoring_on_the_fly: Option<u64>,
     },
+    State(ClientState),
+    /// `{"Set": {"ready": …}}`. `manually_initiated` is false when readiness
+    /// follows from pausing or unpausing, which is how other clients tell a
+    /// deliberate toggle from a side effect.
+    SetReady {
+        is_ready: bool,
+        manually_initiated: bool,
+    },
+    SetFile(FileReport),
 }
 
 impl ClientMessage {
@@ -134,32 +221,82 @@ impl ClientMessage {
                 latency_calculation,
                 client_latency_calculation,
                 server_ignoring_on_the_fly,
-            } => {
-                let mut ping = serde_json::Map::new();
-                if let Some(value) = latency_calculation {
-                    ping.insert("latencyCalculation".to_owned(), (*value).into());
-                }
-                ping.insert(
-                    "clientLatencyCalculation".to_owned(),
-                    (*client_latency_calculation).into(),
-                );
-                ping.insert("clientRtt".to_owned(), 0.into());
-
-                let mut state = serde_json::Map::new();
-                state.insert("ping".to_owned(), ping.into());
-                if let Some(sequence) = server_ignoring_on_the_fly {
-                    state.insert(
-                        "ignoringOnTheFly".to_owned(),
-                        serde_json::json!({ "server": sequence }),
-                    );
-                }
-
-                serde_json::json!({ "State": state })
-            }
+            } => state_json(
+                None,
+                *latency_calculation,
+                *client_latency_calculation,
+                0.0,
+                (*server_ignoring_on_the_fly, None),
+            ),
+            Self::State(state) => state_json(
+                state.playstate,
+                state.latency_calculation,
+                state.client_latency_calculation,
+                state.client_rtt,
+                state.ignoring_on_the_fly,
+            ),
+            Self::SetReady {
+                is_ready,
+                manually_initiated,
+            } => serde_json::json!({
+                "Set": { "ready": { "isReady": is_ready, "manuallyInitiated": manually_initiated } }
+            }),
+            Self::SetFile(file) => serde_json::json!({
+                "Set": { "file": { "name": file.name, "duration": file.duration, "size": file.size } }
+            }),
         };
 
         Ok(format!("{}\r\n", serde_json::to_string(&value)?))
     }
+}
+
+/// Renders a client `State`, the way upstream's `sendState` builds it.
+///
+/// `ping` is always there, because the server measures the round trip from
+/// it. Each counter half appears only while it is non-zero, and the envelope
+/// only while either is.
+fn state_json(
+    playstate: Option<ClientPlaystate>,
+    latency_calculation: Option<f64>,
+    client_latency_calculation: f64,
+    client_rtt: f64,
+    (server, client): IgnoringOnTheFly,
+) -> serde_json::Value {
+    let mut state = serde_json::Map::new();
+
+    if let Some(playstate) = playstate {
+        let mut fields = serde_json::Map::new();
+        fields.insert("position".to_owned(), playstate.position.into());
+        fields.insert("paused".to_owned(), playstate.paused.into());
+        if playstate.do_seek {
+            fields.insert("doSeek".to_owned(), true.into());
+        }
+        state.insert("playstate".to_owned(), fields.into());
+    }
+
+    let mut ping = serde_json::Map::new();
+    if let Some(value) = latency_calculation {
+        ping.insert("latencyCalculation".to_owned(), value.into());
+    }
+    ping.insert(
+        "clientLatencyCalculation".to_owned(),
+        client_latency_calculation.into(),
+    );
+    ping.insert("clientRtt".to_owned(), client_rtt.max(0.0).into());
+    state.insert("ping".to_owned(), ping.into());
+
+    let mut envelope = serde_json::Map::new();
+    if let Some(server) = server.filter(|value| *value != 0) {
+        envelope.insert("server".to_owned(), server.into());
+    }
+    if let Some(client) = client.filter(|value| *value != 0) {
+        envelope.insert("client".to_owned(), client.into());
+    }
+    if !envelope.is_empty() {
+        state.insert("ignoringOnTheFly".to_owned(), envelope.into());
+    }
+
+    serde_json::json!({ "State": state })
 }
 
 // ---------------------------------------------------------------- outgoing
@@ -457,7 +594,7 @@ impl FileInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct UserEntry {
     #[serde(default)]
     pub file: FileInfo,
@@ -477,6 +614,10 @@ pub type RoomList = HashMap<String, HashMap<String, UserEntry>>;
 pub struct UserUpdate {
     #[serde(default)]
     pub room: Option<RoomName>,
+    /// Present when the user opened, changed or closed a file. An empty
+    /// object means they have nothing open any more.
+    #[serde(default)]
+    pub file: Option<FileInfo>,
     #[serde(default)]
     pub event: Option<UserEvent>,
 }
@@ -495,43 +636,177 @@ pub struct UserEvent {
     pub left: Option<serde_json::Value>,
 }
 
+/// A `Set: ready` payload: somebody's readiness changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadyUpdate {
+    pub username: String,
+    /// `None` is "never said", which upstream sends for everyone who joins.
+    pub is_ready: Option<bool>,
+    /// Upstream reads a missing flag as true.
+    pub manually_initiated: bool,
+    pub set_by: Option<String>,
+}
+
+/// The server's greeting, which confirms the password was accepted.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerHello {
+    /// The name the server knows this connection by. Not always the one asked
+    /// for: a name already taken gets something appended.
+    pub username: Option<String>,
+    pub room: Option<String>,
+    /// Whether the server tracks readiness. Absent from very old servers,
+    /// which is read as yes because every server this talks to has it.
+    pub readiness: Option<bool>,
+}
+
+/// The playback half of a server `State`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncomingPlaystate {
+    /// A missing position is read as zero, as upstream reads it; only an
+    /// explicit `null` leaves it unknown.
+    pub position: Option<f64>,
+    pub paused: Option<bool>,
+    pub do_seek: Option<bool>,
+    /// Who the room's state comes from: the last person to pause or seek, or
+    /// on a heartbeat the watcher the room is following.
+    pub set_by: Option<String>,
+}
+
+/// The timing half of a server `State`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct IncomingPing {
+    /// The server's stamp, to be echoed back untouched.
+    pub latency_calculation: Option<f64>,
+    pub server_rtt: Option<f64>,
+    /// This client's own stamp coming back, which is what its round trip is
+    /// measured from. Present once per client report at most.
+    pub client_latency_calculation: Option<f64>,
+}
+
+/// The `ignoringOnTheFly` half of a server `State`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IgnoringEcho {
+    /// The server's own counter, present after it forced a state.
+    pub server: Option<u64>,
+    /// The client's counter, echoed once to acknowledge a change it sent.
+    pub client: Option<u64>,
+}
+
+/// A server `State`, every part optional because upstream treats every part
+/// as optional.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IncomingState {
+    pub playstate: Option<IncomingPlaystate>,
+    pub ping: Option<IncomingPing>,
+    pub ignoring_on_the_fly: Option<IgnoringEcho>,
+}
+
+impl IncomingState {
+    fn from_value(payload: &serde_json::Value) -> Self {
+        let playstate = payload.get("playstate").map(|playstate| IncomingPlaystate {
+            position: match playstate.get("position") {
+                None => Some(0.0),
+                Some(position) => position.as_f64(),
+            },
+            paused: playstate.get("paused").and_then(serde_json::Value::as_bool),
+            do_seek: playstate.get("doSeek").and_then(serde_json::Value::as_bool),
+            set_by: playstate
+                .get("setBy")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        });
+
+        let ping = payload.get("ping").map(|ping| IncomingPing {
+            latency_calculation: ping
+                .get("latencyCalculation")
+                .and_then(serde_json::Value::as_f64),
+            server_rtt: ping.get("serverRtt").and_then(serde_json::Value::as_f64),
+            client_latency_calculation: ping
+                .get("clientLatencyCalculation")
+                .and_then(serde_json::Value::as_f64),
+        });
+
+        let ignoring_on_the_fly = payload.get("ignoringOnTheFly").map(|ignore| IgnoringEcho {
+            server: ignore.get("server").and_then(serde_json::Value::as_u64),
+            client: ignore.get("client").and_then(serde_json::Value::as_u64),
+        });
+
+        Self {
+            playstate,
+            ping,
+            ignoring_on_the_fly,
+        }
+    }
+
+    pub fn latency_calculation(&self) -> Option<f64> {
+        self.ping.and_then(|ping| ping.latency_calculation)
+    }
+
+    pub fn server_ignoring_on_the_fly(&self) -> Option<u64> {
+        self.ignoring_on_the_fly.and_then(|ignore| ignore.server)
+    }
+}
+
 /// A message received from the server.
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
-    /// The greeting that confirms the password was accepted.
-    Hello,
+    Hello(ServerHello),
     List(RoomList),
     /// Any `Set`. The specific payloads that matter are pulled out below.
     Set(serde_json::Map<String, serde_json::Value>),
-    State {
-        latency_calculation: Option<f64>,
-        server_ignoring_on_the_fly: Option<u64>,
-    },
+    State(IncomingState),
     Error {
         message: String,
     },
     /// Something syncparty does not model. Ignored rather than fatal, so a
-    /// newer server cannot break the monitor.
+    /// newer server cannot break the monitor or the client.
     Ignored,
 }
 
 impl ServerMessage {
+    /// The first message on a line. Syncplay sends one per line, which is all
+    /// the monitor needs.
     pub fn from_line(line: &str) -> Result<Self> {
-        let value: serde_json::Value = serde_json::from_str(line.trim()).map_err(|error| {
-            SyncPartyError::MonitorFailed(format!("malformed message: {error}"))
-        })?;
+        Self::all_from_line(line)
+            .map(|messages| messages.into_iter().next().unwrap_or(Self::Ignored))
+            .map_err(|error| SyncPartyError::MonitorFailed(format!("malformed message: {error}")))
+    }
+
+    /// Every message on a line, for a reader that must not miss one.
+    ///
+    /// Upstream handles every key of an object, so a line carrying two is
+    /// read as two messages. Keys come back in alphabetical order, because
+    /// that is the order `serde_json` keeps them in.
+    pub fn all_from_line(line: &str) -> std::result::Result<Vec<Self>, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(line.trim())?;
 
         let Some(object) = value.as_object() else {
-            return Ok(Self::Ignored);
+            return Ok(vec![Self::Ignored]);
         };
 
-        // Syncplay sends one key per message.
-        let Some((key, payload)) = object.iter().next() else {
-            return Ok(Self::Ignored);
-        };
+        Ok(object
+            .iter()
+            .map(|(key, payload)| Self::from_value(key, payload))
+            .collect())
+    }
 
-        Ok(match key.as_str() {
-            "Hello" => Self::Hello,
+    fn from_value(key: &str, payload: &serde_json::Value) -> Self {
+        match key {
+            "Hello" => Self::Hello(ServerHello {
+                username: payload
+                    .get("username")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                room: payload
+                    .get("room")
+                    .and_then(|room| room.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                readiness: payload
+                    .get("features")
+                    .and_then(|features| features.get("readiness"))
+                    .and_then(serde_json::Value::as_bool),
+            }),
             "List" => serde_json::from_value(payload.clone())
                 .map(Self::List)
                 .unwrap_or(Self::Ignored),
@@ -540,16 +815,7 @@ impl ServerMessage {
                 .cloned()
                 .map(Self::Set)
                 .unwrap_or(Self::Ignored),
-            "State" => Self::State {
-                latency_calculation: payload
-                    .get("ping")
-                    .and_then(|ping| ping.get("latencyCalculation"))
-                    .and_then(serde_json::Value::as_f64),
-                server_ignoring_on_the_fly: payload
-                    .get("ignoringOnTheFly")
-                    .and_then(|ignore| ignore.get("server"))
-                    .and_then(serde_json::Value::as_u64),
-            },
+            "State" => Self::State(IncomingState::from_value(payload)),
             "Error" => Self::Error {
                 message: payload
                     .get("message")
@@ -558,7 +824,7 @@ impl ServerMessage {
                     .to_owned(),
             },
             _ => Self::Ignored,
-        })
+        }
     }
 }
 
@@ -567,6 +833,29 @@ pub fn user_updates(
     set: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<HashMap<String, UserUpdate>> {
     serde_json::from_value(set.get("user")?.clone()).ok()
+}
+
+/// Extracts the `ready` half of a `Set`, if present and well formed.
+pub fn ready_update(set: &serde_json::Map<String, serde_json::Value>) -> Option<ReadyUpdate> {
+    let ready = set.get("ready")?;
+
+    Some(ReadyUpdate {
+        username: ready.get("username")?.as_str()?.to_owned(),
+        is_ready: ready.get("isReady").and_then(serde_json::Value::as_bool),
+        manually_initiated: ready
+            .get("manuallyInitiated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        set_by: ready
+            .get("setBy")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+/// Extracts the room a `Set: room` moves this client to, if present.
+pub fn room_change(set: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    set.get("room")?.get("name")?.as_str().map(str::to_owned)
 }
 
 /// True when this `Set` changes something the room panel displays.
@@ -687,13 +976,292 @@ mod tests {
         )
         .expect("parse");
 
-        assert!(matches!(
-            message,
-            ServerMessage::State {
-                latency_calculation: Some(value),
-                server_ignoring_on_the_fly: Some(4),
-            } if (value - 1234.5).abs() < f64::EPSILON
-        ));
+        let ServerMessage::State(state) = message else {
+            panic!("expected a state");
+        };
+        assert_eq!(state.latency_calculation(), Some(1234.5));
+        assert_eq!(state.server_ignoring_on_the_fly(), Some(4));
+    }
+
+    #[test]
+    fn reads_the_whole_of_a_server_state() {
+        let message = ServerMessage::from_line(
+            r#"{"State":{"ping":{"latencyCalculation":1792190198.36,"serverRtt":0.2524,"clientLatencyCalculation":1792190198.259},"playstate":{"position":0.63,"paused":false,"doSeek":null,"setBy":"alice"},"ignoringOnTheFly":{"server":1,"client":1}}}"#,
+        )
+        .expect("parse");
+
+        let ServerMessage::State(state) = message else {
+            panic!("expected a state");
+        };
+        assert_eq!(
+            state.playstate,
+            Some(IncomingPlaystate {
+                position: Some(0.63),
+                paused: Some(false),
+                do_seek: None,
+                set_by: Some("alice".to_owned()),
+            })
+        );
+        assert_eq!(
+            state.ping,
+            Some(IncomingPing {
+                latency_calculation: Some(1792190198.36),
+                server_rtt: Some(0.2524),
+                client_latency_calculation: Some(1792190198.259),
+            })
+        );
+        assert_eq!(
+            state.ignoring_on_the_fly,
+            Some(IgnoringEcho {
+                server: Some(1),
+                client: Some(1),
+            })
+        );
+    }
+
+    /// Upstream defaults a missing position to zero but keeps an explicit
+    /// `null` as unknown, and only the second stops the state being applied.
+    #[test]
+    fn a_missing_position_is_zero_and_a_null_one_is_unknown() {
+        let ServerMessage::State(missing) =
+            ServerMessage::from_line(r#"{"State":{"playstate":{"paused":true}}}"#).expect("parse")
+        else {
+            panic!("expected a state");
+        };
+        assert_eq!(missing.playstate.expect("playstate").position, Some(0.0));
+        assert!(missing.ping.is_none());
+
+        let ServerMessage::State(null) =
+            ServerMessage::from_line(r#"{"State":{"playstate":{"position":null,"paused":true}}}"#)
+                .expect("parse")
+        else {
+            panic!("expected a state");
+        };
+        assert_eq!(null.playstate.expect("playstate").position, None);
+    }
+
+    #[test]
+    fn the_greeting_carries_the_name_the_server_settled_on() {
+        let message = ServerMessage::from_line(
+            r#"{"Hello":{"username":"ahmet_","room":{"name":"MovieNight"},"version":"1.2.255","realversion":"1.7.6","features":{"readiness":true},"motd":""}}"#,
+        )
+        .expect("parse");
+
+        let ServerMessage::Hello(hello) = message else {
+            panic!("expected a greeting");
+        };
+        assert_eq!(hello.username.as_deref(), Some("ahmet_"));
+        assert_eq!(hello.room.as_deref(), Some("MovieNight"));
+        assert_eq!(hello.readiness, Some(true));
+    }
+
+    #[test]
+    fn a_line_with_two_messages_yields_both() {
+        let messages = ServerMessage::all_from_line(
+            r#"{"List":{},"State":{"ping":{"latencyCalculation":1}}}"#,
+        )
+        .expect("parse");
+
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(messages[0], ServerMessage::List(_)));
+        assert!(matches!(messages[1], ServerMessage::State(_)));
+    }
+
+    #[test]
+    fn malformed_json_is_an_error_rather_than_a_message() {
+        assert!(ServerMessage::all_from_line("{not json").is_err());
+        assert!(ServerMessage::from_line("{not json").is_err());
+    }
+
+    #[test]
+    fn reads_readiness_with_upstreams_defaults() {
+        let ServerMessage::Set(set) =
+            ServerMessage::from_line(r#"{"Set":{"ready":{"username":"ahmet","isReady":null}}}"#)
+                .expect("parse")
+        else {
+            panic!("expected a set");
+        };
+
+        assert_eq!(
+            ready_update(&set),
+            Some(ReadyUpdate {
+                username: "ahmet".to_owned(),
+                is_ready: None,
+                manually_initiated: true,
+                set_by: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_user_update_carries_the_file_they_opened() {
+        let ServerMessage::Set(set) = ServerMessage::from_line(
+            r#"{"Set":{"user":{"ahmet":{"room":{"name":"MovieNight"},"file":{"name":"Film.mkv","duration":7200.0,"size":12}}}}}"#,
+        )
+        .expect("parse") else {
+            panic!("expected a set");
+        };
+
+        let updates = user_updates(&set).expect("user updates");
+        let file = updates["ahmet"].file.as_ref().expect("file");
+        assert_eq!(file.name.as_deref(), Some("Film.mkv"));
+        assert_eq!(file.duration, Some(7200.0));
+        assert!(updates["ahmet"].event.is_none());
+    }
+
+    #[test]
+    fn a_room_change_names_the_new_room() {
+        let ServerMessage::Set(set) =
+            ServerMessage::from_line(r#"{"Set":{"room":{"name":"Elsewhere"}}}"#).expect("parse")
+        else {
+            panic!("expected a set");
+        };
+
+        assert_eq!(room_change(&set).as_deref(), Some("Elsewhere"));
+    }
+
+    // ------------------------------------------------------- client shapes
+
+    fn client_json(message: ClientMessage) -> serde_json::Value {
+        let line = message.to_line().expect("line");
+        assert!(line.ends_with("\r\n"), "every message is CRLF terminated");
+        serde_json::from_str(line.trim()).expect("json")
+    }
+
+    #[test]
+    fn the_clients_greeting_claims_what_a_gui_client_would() {
+        let value = client_json(ClientMessage::Hello(Hello::participant(
+            "ahmet",
+            "MovieNight",
+            Some("swordfish"),
+        )));
+        let hello = &value["Hello"];
+
+        assert_eq!(hello["username"], "ahmet");
+        assert_eq!(hello["password"], hash_password("swordfish"));
+        assert_eq!(hello["room"]["name"], "MovieNight");
+        assert_eq!(hello["version"], "1.2.255");
+        assert_eq!(
+            hello["features"],
+            serde_json::json!({
+                "sharedPlaylists": false,
+                "chat": true,
+                "featureList": true,
+                "readiness": true,
+                "managedRooms": false,
+                "persistentRooms": false,
+                "uiMode": "GUI",
+            })
+        );
+    }
+
+    #[test]
+    fn the_monitors_greeting_claims_no_interface() {
+        let value = client_json(ClientMessage::Hello(Hello::new(
+            "panel",
+            "MovieNight",
+            None,
+        )));
+
+        assert!(value["Hello"]["features"].get("uiMode").is_none());
+        assert_eq!(value["Hello"]["features"]["chat"], false);
+    }
+
+    #[test]
+    fn a_local_seek_carries_do_seek_and_the_clients_counter() {
+        let value = client_json(ClientMessage::State(ClientState {
+            playstate: Some(ClientPlaystate {
+                position: 80.04,
+                paused: false,
+                do_seek: true,
+            }),
+            latency_calculation: None,
+            client_latency_calculation: 1000.5,
+            client_rtt: 0.0016,
+            ignoring_on_the_fly: (None, Some(1)),
+        }));
+        let state = &value["State"];
+
+        assert_eq!(
+            state["playstate"],
+            serde_json::json!({ "position": 80.04, "paused": false, "doSeek": true })
+        );
+        assert!(
+            state["ping"].get("latencyCalculation").is_none(),
+            "a change the user made answers nothing, so there is nothing to echo"
+        );
+        assert_eq!(state["ping"]["clientLatencyCalculation"], 1000.5);
+        assert_eq!(state["ping"]["clientRtt"], 0.0016);
+        assert_eq!(
+            state["ignoringOnTheFly"],
+            serde_json::json!({ "client": 1 })
+        );
+    }
+
+    #[test]
+    fn a_reply_without_a_seek_leaves_do_seek_out() {
+        let value = client_json(ClientMessage::State(ClientState {
+            playstate: Some(ClientPlaystate {
+                position: 85.0,
+                paused: true,
+                do_seek: false,
+            }),
+            latency_calculation: Some(1234.5),
+            client_latency_calculation: 1000.0,
+            client_rtt: -0.5,
+            ignoring_on_the_fly: (Some(1), None),
+        }));
+        let state = &value["State"];
+
+        assert!(state["playstate"].get("doSeek").is_none());
+        assert_eq!(state["ping"]["latencyCalculation"], 1234.5);
+        assert_eq!(
+            state["ping"]["clientRtt"], 0.0,
+            "a clock step must not put a negative round trip on the wire"
+        );
+        assert_eq!(
+            state["ignoringOnTheFly"],
+            serde_json::json!({ "server": 1 })
+        );
+    }
+
+    #[test]
+    fn a_state_with_nothing_to_report_is_only_a_ping() {
+        let value = client_json(ClientMessage::State(ClientState {
+            playstate: None,
+            latency_calculation: Some(1.0),
+            client_latency_calculation: 2.0,
+            client_rtt: 0.0,
+            ignoring_on_the_fly: (None, None),
+        }));
+
+        assert!(value["State"].get("playstate").is_none());
+        assert!(value["State"].get("ignoringOnTheFly").is_none());
+        assert_eq!(value["State"]["ping"]["latencyCalculation"], 1.0);
+    }
+
+    #[test]
+    fn readiness_and_file_go_out_as_settings() {
+        let ready = client_json(ClientMessage::SetReady {
+            is_ready: false,
+            manually_initiated: false,
+        });
+        assert_eq!(
+            ready,
+            serde_json::json!({ "Set": { "ready": { "isReady": false, "manuallyInitiated": false } } })
+        );
+
+        let file = client_json(ClientMessage::SetFile(FileReport {
+            name: "clip.mkv".to_owned(),
+            duration: 120.007,
+            size: 7362024,
+        }));
+        assert_eq!(
+            file,
+            serde_json::json!({
+                "Set": { "file": { "name": "clip.mkv", "duration": 120.007, "size": 7362024 } }
+            })
+        );
     }
 
     #[test]

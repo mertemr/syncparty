@@ -32,10 +32,10 @@ pub enum SyncPartyError {
     )]
     EndpointOffline,
 
-    #[error("the Syncplay server is not running")]
+    #[error("the sync server is not running")]
     ServerNotRunning,
 
-    #[error("the Syncplay server is already running")]
+    #[error("the sync server is already running")]
     ServerAlreadyRunning,
 
     #[error("not currently in a party")]
@@ -44,7 +44,7 @@ pub enum SyncPartyError {
     #[error("TMDB is not configured — add an API key in Settings")]
     MovieProviderNotConfigured,
 
-    #[error("the Syncplay server failed to start: {0}")]
+    #[error("the sync server failed to start: {0}")]
     ServerStartFailed(String),
 
     #[error("the invite code is not valid: {0}")]
@@ -62,6 +62,22 @@ pub enum SyncPartyError {
          ask them to check syncparty is still running, then try again."
     )]
     PartyUnreachable { host: String, reason: String },
+
+    /// mpv could not be started, stopped answering, or refused a command.
+    #[error("the player failed: {0}")]
+    PlayerFailed(String),
+
+    /// The sync server turned this client away — almost always a password
+    /// that does not match, which means an invite from an older party.
+    #[error("the party did not let this machine in: {0}")]
+    SyncRejected(String),
+
+    /// The sync server could not be reached or stopped answering.
+    #[error("could not connect to the party: {0}")]
+    SyncFailed(String),
+
+    #[error("nothing is being watched on this machine")]
+    NotWatching,
 
     #[error("{command} exited with status {status}: {stderr}")]
     CommandFailed {
@@ -104,6 +120,10 @@ impl SyncPartyError {
             Self::InvalidInvite(_) => "invalid_invite",
             Self::MonitorFailed(_) => "monitor_failed",
             Self::PartyUnreachable { .. } => "party_unreachable",
+            Self::PlayerFailed(_) => "player_failed",
+            Self::SyncRejected(_) => "sync_rejected",
+            Self::SyncFailed(_) => "sync_failed",
+            Self::NotWatching => "not_watching",
             Self::CommandFailed { .. } => "command_failed",
             Self::Config(_) => "config",
             Self::Secret(_) => "secret",

@@ -3,6 +3,7 @@
 
 mod launcher;
 mod monitor;
+pub mod ping;
 pub mod protocol;
 mod server;
 

@@ -5,6 +5,7 @@ import type { MovieVoteSnapshot } from "./MovieVoteSnapshot";
 import type { PreflightReport } from "./PreflightReport";
 import type { RoomSnapshot } from "./RoomSnapshot";
 import type { SessionState } from "./SessionState";
+import type { WatchState } from "./WatchState";
 
 /**
  * Everything the frontend can be told about. Tagged so TypeScript gets a
@@ -14,4 +15,4 @@ export type AppEvent = { "kind": "preflightCompleted", report: PreflightReport, 
 /**
  * Absent when the underlying installer reports no percentage.
  */
-percent: number | null, detail: string | null, } | { "kind": "sessionChanged", state: SessionState, } | { "kind": "roomUpdated", snapshot: RoomSnapshot, } | { "kind": "serverLog", line: string, isError: boolean, } | { "kind": "inviteReceived", invite: Invite, } | { "kind": "failed", errorKind: string, message: string, } | { "kind": "movieVoteChanged", snapshot: MovieVoteSnapshot | null, };
+percent: number | null, detail: string | null, } | { "kind": "sessionChanged", state: SessionState, } | { "kind": "roomUpdated", snapshot: RoomSnapshot, } | { "kind": "serverLog", line: string, isError: boolean, } | { "kind": "inviteReceived", invite: Invite, } | { "kind": "failed", errorKind: string, message: string, } | { "kind": "movieVoteChanged", snapshot: MovieVoteSnapshot | null, } | { "kind": "watchChanged", state: WatchState | null, };

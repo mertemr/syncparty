@@ -1,20 +1,59 @@
 //! mpv, driven over its JSON IPC.
 //!
-//! Contract only: the implementation lands with the mpv work package. Every
-//! method here returns an error until then, so nothing can mistake the stub
-//! for a player that works.
+//! syncparty starts mpv with a private socket (a named pipe on Windows),
+//! observes the properties it cares about, and from then on mpv tells it
+//! what happens. Nothing is polled: the mirror behind [`Player::snapshot`] is
+//! kept up to date by the events mpv pushes, and every command syncparty
+//! sends is matched against the change it causes, which is how a pause from
+//! the room is told apart from one at the keyboard.
+//!
+//! The file is never named on mpv's command line. It is loaded over the
+//! socket once mpv is listening, so argv carries options and nothing else.
 
+mod args;
+mod connection;
+mod endpoint;
+mod tracker;
+mod transport;
+
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 use crate::core::config::ConfigStore;
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::player::{
     find_mpv, LaunchMode, Player, PlayerEvents, PlayerLauncher, PlayerSnapshot, MPV_KEY,
 };
+use crate::core::process;
+
+use self::connection::{CommandError, Shared};
+use self::endpoint::Endpoint;
+use self::tracker::{Effect, OBSERVED};
+use self::transport::{LineReader, MpvProcess, Process};
+
+/// How long mpv gets to start listening. Upstream Syncplay waits as long.
+const CONNECT_PATIENCE: Duration = Duration::from_secs(10);
+
+/// How long a command waits for mpv's answer. mpv answers at once — it
+/// replies before it acts — so a command still unanswered after this means
+/// mpv has hung.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a file gets from `loadfile` to playing. Local files open in
+/// milliseconds; the margin is for a network share waking up.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long mpv gets to quit when asked, and then to die once killed.
+const QUIT_GRACE: Duration = Duration::from_secs(3);
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Starts mpv processes, each with its own private IPC endpoint.
 #[derive(Debug, Clone)]
@@ -49,7 +88,36 @@ impl MpvLauncher {
     /// Starts mpv and returns the concrete player, for callers — the
     /// end-to-end test — that need to reach its IPC endpoint themselves.
     pub async fn spawn(&self) -> Result<(Arc<MpvPlayer>, PlayerEvents)> {
-        Err(not_yet())
+        let endpoint = Endpoint::create()?;
+
+        let mut command = process::quiet(&self.executable);
+        command.args(args::arguments(
+            &self.executable,
+            self.mode,
+            endpoint.name(),
+        ));
+        #[cfg(target_os = "macos")]
+        if let Some(path) = args::child_path(std::env::var_os("PATH")) {
+            command.env("PATH", path);
+        }
+
+        let mut child = command.spawn().map_err(|error| {
+            SyncPartyError::PlayerFailed(format!(
+                "could not start {}: {error}",
+                self.executable.display()
+            ))
+        })?;
+
+        let stream = match transport::connect(endpoint.name(), &mut child, CONNECT_PATIENCE).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(KILL_GRACE, child.wait()).await;
+                return Err(error);
+            }
+        };
+
+        start(stream, MpvProcess(child), endpoint).await
     }
 }
 
@@ -62,9 +130,69 @@ impl PlayerLauncher for MpvLauncher {
 }
 
 /// One running mpv.
-#[derive(Debug)]
+///
+/// Dropping the last handle kills the process, so a player can never
+/// outlive everything that could control it.
 pub struct MpvPlayer {
     endpoint: String,
+    shared: Arc<Shared>,
+    writer: mpsc::UnboundedSender<Vec<u8>>,
+    kill: Arc<Notify>,
+    exited: watch::Receiver<bool>,
+}
+
+impl fmt::Debug for MpvPlayer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MpvPlayer")
+            .field("endpoint", &self.endpoint)
+            .field("exited", &self.has_exited())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Takes over a connected mpv: starts the reader and the writer, then
+/// observes everything the mirror needs.
+///
+/// Generic over the stream and the process so the tests can stand in for
+/// both — a socket they speak mpv's part on, and an exit they decide.
+async fn start<S, P>(
+    stream: S,
+    process: P,
+    endpoint: Endpoint,
+) -> Result<(Arc<MpvPlayer>, PlayerEvents)>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+    P: Process,
+{
+    let (reader, writer) = tokio::io::split(stream);
+    let (line_sender, line_receiver) = mpsc::unbounded_channel();
+    let (event_sender, events) = mpsc::unbounded_channel();
+    let (exited_sender, exited) = watch::channel(false);
+    let kill = Arc::new(Notify::new());
+    let shared = Arc::new(Shared::new(event_sender));
+
+    let player = MpvPlayer {
+        endpoint: endpoint.name().to_owned(),
+        shared: Arc::clone(&shared),
+        writer: line_sender,
+        kill: Arc::clone(&kill),
+        exited,
+    };
+
+    tokio::spawn(transport::write_lines(writer, line_receiver));
+    tokio::spawn(connection::run(
+        LineReader::new(reader),
+        process,
+        shared,
+        endpoint,
+        kill,
+        exited_sender,
+    ));
+
+    // Should any of this fail, dropping `player` takes mpv down with it.
+    player.observe().await?;
+    Ok((Arc::new(player), events))
 }
 
 impl MpvPlayer {
@@ -75,39 +203,302 @@ impl MpvPlayer {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    /// Asks mpv to report every property the mirror is built from. Each one
+    /// arrives at once with its current value, which seeds the mirror.
+    async fn observe(&self) -> Result<()> {
+        for (index, name) in OBSERVED.iter().enumerate() {
+            self.request(json!(["observe_property", index + 1, name]), Effect::None)
+                .await
+                .map_err(|error| error.into_player_error("report its state"))?;
+        }
+
+        // Only errors: warnings come in their hundreds for some files.
+        if let Err(error) = self
+            .request(json!(["request_log_messages", "error"]), Effect::None)
+            .await
+        {
+            tracing::debug!(?error, "mpv will not forward its error messages");
+        }
+
+        match self
+            .request(json!(["get_property", "mpv-version"]), Effect::None)
+            .await
+        {
+            Ok(version) => tracing::info!(%version, "mpv is listening"),
+            Err(error) => tracing::debug!(?error, "mpv did not say which version it is"),
+        }
+        Ok(())
+    }
+
+    /// Sends one command and waits for mpv's answer to it.
+    async fn request(
+        &self,
+        command: Value,
+        effect: Effect,
+    ) -> std::result::Result<Value, CommandError> {
+        let (id, reply) = self
+            .shared
+            .register(effect)
+            .ok_or(CommandError::Disconnected)?;
+
+        // serde_json never writes a raw newline, which is what mpv frames on.
+        let mut line = serde_json::to_vec(&json!({ "command": command, "request_id": id }))
+            .map_err(|error| CommandError::Refused(error.to_string()))?;
+        line.push(b'\n');
+
+        if self.writer.send(line).is_err() {
+            self.shared.abandon(id);
+            return Err(CommandError::Disconnected);
+        }
+
+        match tokio::time::timeout(REPLY_TIMEOUT, reply).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(CommandError::Disconnected),
+            Err(_) => {
+                self.shared.abandon(id);
+                Err(CommandError::Timeout)
+            }
+        }
+    }
+
+    fn has_exited(&self) -> bool {
+        *self.exited.borrow()
+    }
+
+    async fn wait_exited(&self) {
+        let mut exited = self.exited.clone();
+        // An error means the connection task is gone, and mpv with it.
+        let _ = exited.wait_for(|exited| *exited).await;
+    }
+}
+
+impl Drop for MpvPlayer {
+    fn drop(&mut self) {
+        if !self.has_exited() {
+            self.shared.quitting.store(true, Ordering::SeqCst);
+            self.kill.notify_one();
+        }
+    }
 }
 
 #[async_trait]
 impl Player for MpvPlayer {
     fn snapshot(&self) -> PlayerSnapshot {
-        PlayerSnapshot::default()
+        self.shared.snapshot()
     }
 
-    async fn set_paused(&self, _paused: bool) -> Result<()> {
-        Err(not_yet())
+    async fn set_paused(&self, paused: bool) -> Result<()> {
+        let needed = self
+            .shared
+            .with_tracker(|tracker| tracker.expect_pause(paused, Instant::now()));
+        if !needed {
+            return Ok(());
+        }
+
+        self.request(
+            json!(["set_property", "pause", paused]),
+            Effect::Pause(paused),
+        )
+        .await
+        .map(drop)
+        .map_err(|error| error.into_player_error(if paused { "pause" } else { "resume" }))
     }
 
-    async fn seek(&self, _position: f64) -> Result<()> {
-        Err(not_yet())
+    async fn seek(&self, position: f64) -> Result<()> {
+        if !position.is_finite() {
+            return Err(SyncPartyError::PlayerFailed(format!(
+                "cannot seek to {position}"
+            )));
+        }
+        // A negative absolute seek would count back from the end.
+        let target = position.max(0.0);
+
+        let id = self
+            .shared
+            .with_tracker(|tracker| tracker.expect_seek(target, Instant::now()))
+            .ok_or_else(|| SyncPartyError::PlayerFailed("nothing is open to seek in".to_owned()))?;
+
+        // `exact` so a user's `hr-seek=no` cannot make the room's seeks
+        // land on a keyframe seconds away.
+        self.request(json!(["seek", target, "absolute+exact"]), Effect::Seek(id))
+            .await
+            .map(drop)
+            .map_err(|error| error.into_player_error("seek"))
     }
 
-    async fn set_speed(&self, _speed: f64) -> Result<()> {
-        Err(not_yet())
+    async fn set_speed(&self, speed: f64) -> Result<()> {
+        if !(0.01..=100.0).contains(&speed) {
+            return Err(SyncPartyError::PlayerFailed(format!(
+                "mpv cannot play at speed {speed}"
+            )));
+        }
+
+        let needed = self
+            .shared
+            .with_tracker(|tracker| tracker.expect_speed(speed, Instant::now()));
+        if !needed {
+            return Ok(());
+        }
+
+        self.request(
+            json!(["set_property", "speed", speed]),
+            Effect::Speed(speed),
+        )
+        .await
+        .map(drop)
+        .map_err(|error| error.into_player_error("change speed"))
     }
 
-    async fn load(&self, _path: &Path) -> Result<()> {
-        Err(not_yet())
+    /// Opens a file and waits until it is playing — paused or not — so that
+    /// by the time this returns the snapshot names the file, with its
+    /// duration and size.
+    ///
+    /// Only the three-argument `loadfile` is used: since 0.38 the fourth
+    /// argument is an index, before that it was the options, and three mean
+    /// the same on every version. Pause is never passed as a per-file option
+    /// either; it stays whatever it was.
+    async fn load(&self, path: &Path) -> Result<()> {
+        let path = playable(path).await?;
+
+        let (waiter, outcome) = oneshot::channel();
+        let generation = self
+            .shared
+            .with_tracker(|tracker| tracker.expect_load(waiter));
+
+        if let Err(error) = self
+            .request(
+                json!(["loadfile", path, "replace"]),
+                Effect::Load(generation),
+            )
+            .await
+        {
+            self.shared
+                .with_tracker(|tracker| tracker.forget_load(generation));
+            return Err(error.into_player_error("open the file"));
+        }
+
+        match tokio::time::timeout(LOAD_TIMEOUT, outcome).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(reason))) => Err(SyncPartyError::PlayerFailed(format!(
+                "could not open the file: {reason}"
+            ))),
+            Ok(Err(_)) => Err(SyncPartyError::PlayerFailed(
+                "mpv closed before the file started playing".to_owned(),
+            )),
+            Err(_) => {
+                self.shared
+                    .with_tracker(|tracker| tracker.forget_load(generation));
+                Err(SyncPartyError::PlayerFailed(format!(
+                    "mpv did not start playing the file within {} s",
+                    LOAD_TIMEOUT.as_secs()
+                )))
+            }
+        }
     }
 
-    async fn show_text(&self, _text: &str, _duration: Duration) -> Result<()> {
-        Err(not_yet())
+    /// `show-text` with the text as an array argument, which mpv draws
+    /// exactly as given: no `${…}` expansion, no styling, no escapes. So
+    /// nothing is escaped here either — escaping would show on screen — and
+    /// `expand-properties` is never added, because this text comes from
+    /// other people in the room.
+    async fn show_text(&self, text: &str, duration: Duration) -> Result<()> {
+        // mpv reads the duration as a 32-bit int.
+        let milliseconds = u64::try_from(duration.as_millis())
+            .unwrap_or(u64::MAX)
+            .min(i32::MAX as u64);
+
+        self.request(
+            json!(["show-text", on_screen(text), milliseconds]),
+            Effect::None,
+        )
+        .await
+        .map(drop)
+        .map_err(|error| error.into_player_error("show text"))
     }
 
+    /// Asks mpv to quit, and kills it if it has not gone within a few
+    /// seconds. Returns once the process is gone and its socket removed.
     async fn quit(&self) -> Result<()> {
-        Err(not_yet())
+        if self.has_exited() {
+            return Ok(());
+        }
+        self.shared.quitting.store(true, Ordering::SeqCst);
+
+        let asked = tokio::time::timeout(QUIT_GRACE, async {
+            // mpv may close the socket before it answers; either is fine.
+            let _ = self.request(json!(["quit"]), Effect::None).await;
+            self.wait_exited().await;
+        })
+        .await;
+
+        if asked.is_err() {
+            tracing::warn!("mpv did not quit when asked; killing it");
+            self.kill.notify_one();
+            if tokio::time::timeout(KILL_GRACE, self.wait_exited())
+                .await
+                .is_err()
+            {
+                return Err(SyncPartyError::PlayerFailed(
+                    "mpv would not exit".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
-fn not_yet() -> SyncPartyError {
-    SyncPartyError::PlayerFailed("the mpv driver is not implemented yet".to_owned())
+impl CommandError {
+    fn into_player_error(self, action: &str) -> SyncPartyError {
+        SyncPartyError::PlayerFailed(match self {
+            Self::Refused(reason) => format!("mpv would not {action}: {reason}"),
+            Self::Timeout => format!(
+                "mpv did not answer within {} s when asked to {action}",
+                REPLY_TIMEOUT.as_secs()
+            ),
+            Self::Disconnected => "mpv is not running any more".to_owned(),
+        })
+    }
+}
+
+/// Turns a path the caller wants opened into what `loadfile` is given.
+///
+/// Only an existing regular file gets through. `loadfile` also takes URLs,
+/// stream specifiers, `-` for stdin and devices, and none of those belong in
+/// a party: everybody opens the same film from their own disk. The path is
+/// made absolute, which also stops a name that looks like a protocol prefix
+/// from being read as one.
+async fn playable(path: &Path) -> Result<String> {
+    let absolute = std::path::absolute(path).map_err(|error| {
+        SyncPartyError::PlayerFailed(format!("cannot open {}: {error}", path.display()))
+    })?;
+
+    let metadata = tokio::fs::metadata(&absolute).await.map_err(|error| {
+        SyncPartyError::PlayerFailed(match error.kind() {
+            std::io::ErrorKind::NotFound => format!("there is no file at {}", absolute.display()),
+            _ => format!("cannot open {}: {error}", absolute.display()),
+        })
+    })?;
+    if !metadata.is_file() {
+        return Err(SyncPartyError::PlayerFailed(format!(
+            "{} is not a file",
+            absolute.display()
+        )));
+    }
+
+    absolute.into_os_string().into_string().map_err(|path| {
+        SyncPartyError::PlayerFailed(format!(
+            "cannot open {}: its name is not valid Unicode, which mpv's control socket cannot \
+             carry",
+            Path::new(&path).display()
+        ))
+    })
+}
+
+/// Text as it may go on screen: every control character is removed except
+/// the line feed, which mpv turns into a line break.
+fn on_screen(text: &str) -> String {
+    text.chars()
+        .filter(|character| *character == '\n' || !character.is_control())
+        .collect()
 }

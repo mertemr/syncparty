@@ -176,13 +176,30 @@ jobs:
 
       - run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
 
+      # `--ignored` with a filter that matches nothing still exits 0 with
+      # "0 passed", so a renamed module or a test that lost its `#[ignore]`
+      # would leave these steps green with nothing exercised. Each step keeps
+      # the test output and fails unless at least one test passed. The shell
+      # runs with `pipefail`, so a failing test still fails the step through
+      # `tee`; `--color never` keeps the summary line plain for `grep`.
       - name: Our server and client keep a real mpv in step
+        id: e2e
         working-directory: src-tauri
-        run: cargo test --test native_watch_e2e -- --ignored
+        run: |
+          cargo test --test native_watch_e2e -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/e2e.log" ||
+            { echo "::error::cargo test --test native_watch_e2e -- --ignored ran no tests"; exit 1; }
 
+      # Runs even when the end-to-end step failed, so a broken driver is
+      # reported as itself instead of hiding behind that failure. Skipped only
+      # when the setup above failed and the end-to-end step never ran.
       - name: The mpv driver works against a real mpv
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
         working-directory: src-tauri
-        run: cargo test --lib player::mpv -- --ignored
+        run: |
+          cargo test --lib player::mpv -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/driver.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/driver.log" ||
+            { echo "::error::cargo test --lib player::mpv -- --ignored ran no tests"; exit 1; }
 
   frontend:
     name: Frontend

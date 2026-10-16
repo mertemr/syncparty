@@ -49,7 +49,7 @@ impl MpvDependency {
 
     /// The same dependency, giving `mpv --version` only `timeout` to answer,
     /// so a test of a player that never does can finish quickly.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_probe_timeout(mut self, timeout: Duration) -> Self {
         self.probe_timeout = timeout;
         self
@@ -111,7 +111,8 @@ impl Dependency for MpvDependency {
     }
 }
 
-/// Runs `path --version` and decides whether what answered is mpv.
+/// Runs `path --no-config --version` and decides whether what answered is
+/// mpv.
 ///
 /// mpv opens its version banner with `mpv ` — `mpv v0.41.0 Copyright © …`
 /// today, `mpv 0.34.1 Copyright © …` a few releases ago — and nothing else
@@ -130,7 +131,26 @@ async fn identify(path: &Path, timeout: Duration) -> DependencyStatus {
         };
     }
 
+    // VLC is the one stranger that is told apart by name rather than run. On
+    // Windows its `--version` opens a console window of its own, writes the
+    // answer to a file instead of the pipe and waits for somebody to press
+    // Enter, so asking would cost the user a stray window and the checklist
+    // the whole timeout, on every launch, only to learn nothing.
+    if is_vlc(path) {
+        return DependencyStatus::Unusable {
+            path: shown,
+            reason: "not mpv: this is VLC".to_owned(),
+        };
+    }
+
     let run = process::command(path)
+        // mpv reads the user's mpv.conf before it prints the banner, and
+        // prints whatever it has to say about it first: an option a newer
+        // release renamed, one it does not know at all. A player that
+        // complains about its config still plays, and the real launch keeps
+        // that config, so the probe leaves it out rather than mistake the
+        // complaint for the answer.
+        .arg("--no-config")
         .arg("--version")
         // Without this a probe that times out leaves the program running with
         // nobody left to wait for it.
@@ -161,16 +181,14 @@ async fn identify(path: &Path, timeout: Duration) -> DependencyStatus {
         };
     }
 
-    let banner = first_line(&output.stdout).or_else(|| first_line(&output.stderr));
-
-    match banner.as_deref().and_then(|line| line.strip_prefix("mpv ")) {
+    match banner_in(&output.stdout).or_else(|| banner_in(&output.stderr)) {
         Some(rest) => DependencyStatus::Installed {
-            version: version_in(rest),
+            version: version_in(&rest),
             path: Some(shown),
         },
         None => DependencyStatus::Unusable {
             path: shown,
-            reason: match banner {
+            reason: match first_line(&output.stdout).or_else(|| first_line(&output.stderr)) {
                 Some(line) => format!("not mpv: --version printed \"{line}\""),
                 None => "not mpv: --version printed nothing".to_owned(),
             },
@@ -179,8 +197,32 @@ async fn identify(path: &Path, timeout: Duration) -> DependencyStatus {
 }
 
 fn is_mpv_net(path: &Path) -> bool {
+    has_stem(path, "mpvnet")
+}
+
+/// `vlc` on Linux, `vlc.exe` on Windows, `VLC` inside VLC.app on macOS.
+fn is_vlc(path: &Path) -> bool {
+    has_stem(path, "vlc")
+}
+
+fn has_stem(path: &Path, name: &str) -> bool {
     path.file_stem()
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("mpvnet"))
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(name))
+}
+
+/// What follows `mpv ` on the first line that opens with it.
+///
+/// The first such line rather than simply the first line, so that nothing
+/// printed ahead of the banner is taken for it. And `MPV_VERBOSE` in the
+/// environment tags every line with the part of mpv that printed it, the
+/// banner included: `[cplayer] mpv v0.41.0 Copyright © …`.
+fn banner_in(raw: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(raw)
+        .lines()
+        .map(str::trim)
+        .map(|line| line.strip_prefix("[cplayer] ").unwrap_or(line))
+        .find_map(|line| line.strip_prefix("mpv "))
+        .map(ToOwned::to_owned)
 }
 
 /// The version number out of what follows `mpv ` in the banner.
@@ -271,6 +313,63 @@ mod tests {
         assert!(!is_mpv_net(Path::new("mpv.exe")));
     }
 
+    #[test]
+    fn vlc_is_recognised_by_its_name_on_every_platform() {
+        assert!(is_vlc(Path::new("/usr/bin/vlc")));
+        assert!(is_vlc(Path::new("vlc.exe")));
+        assert!(is_vlc(Path::new("VLC.EXE")));
+        assert!(is_vlc(Path::new(
+            "/Applications/VLC.app/Contents/MacOS/VLC"
+        )));
+        assert!(!is_vlc(Path::new("/usr/bin/mpv")));
+        assert!(
+            !is_vlc(Path::new("/opt/vlc/mpv.exe")),
+            "only the file's own name counts"
+        );
+    }
+
+    #[test]
+    fn the_banner_is_found_behind_whatever_mpv_says_first() {
+        let printed = "Driver 'opengl' has been replaced with 'gpu'!\n\
+                       mpv v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects\n \
+                       built on Aug 29 2026 22:13:49\n";
+
+        assert_eq!(
+            banner_in(printed.as_bytes()).as_deref(),
+            Some("v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects")
+        );
+    }
+
+    #[test]
+    fn the_banner_is_found_when_mpv_verbose_tags_every_line() {
+        // What `MPV_VERBOSE=1 mpv --no-config --version` prints on mpv 0.41.
+        let printed = "[cplayer] Command line options: '--no-config' '--version'\n\
+                       [cplayer] mpv v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects\n";
+
+        assert_eq!(
+            banner_in(printed.as_bytes())
+                .as_deref()
+                .and_then(version_in)
+                .as_deref(),
+            Some("0.41.0")
+        );
+    }
+
+    #[test]
+    fn nothing_vlc_prints_passes_for_a_banner() {
+        // The shape of everything VLC 3.0 prints for `--version`.
+        let printed = "VLC media player 3.0.21 Vetinari (revision 3.0.21-0-gdd8bfdbabe8)\n\
+                       VLC version 3.0.21 Vetinari (3.0.21-0-gdd8bfdbabe8)\n\
+                       Compiled by builduser on archlinux (Sep  2 2026 10:11:12)\n\
+                       Compiler: gcc version 15.1.1 20250729 (GCC)\n\
+                       This program comes with NO WARRANTY, to the extent permitted by law.\n\
+                       You may redistribute it under the terms of the GNU General Public License;\n\
+                       see the file named COPYING for details.\n\
+                       Written by the VideoLAN team; see the AUTHORS file.\n";
+
+        assert_eq!(banner_in(printed.as_bytes()), None);
+    }
+
     /// These drive shell scripts standing in for mpv, pointed at through the
     /// manual override exactly as a user would, so they depend on nothing
     /// being installed on the machine.
@@ -285,25 +384,53 @@ mod tests {
 
         static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
 
-        /// A dependency whose override points at `script`, saved as `name`.
-        fn script_named(name: &str, script: &str) -> (PathBuf, MpvDependency) {
+        fn fresh_dir() -> PathBuf {
             let id = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
             let dir =
                 std::env::temp_dir().join(format!("syncparty-mpv-{}-{id}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("temp dir");
+            dir
+        }
 
-            let player = dir.join(name);
-            std::fs::write(&player, script).expect("fake player");
-            std::fs::set_permissions(&player, std::fs::Permissions::from_mode(0o755))
-                .expect("the fake player must be executable");
+        /// Saves `script` at `path` as an executable, by way of a shell rather
+        /// than from this process.
+        ///
+        /// Other tests start programs on other threads all the while, and a
+        /// child forked while this process had the file open for writing
+        /// keeps that descriptor until it execs. Running the script inside
+        /// that window fails with "Text file busy". A file this process never
+        /// opens for writing cannot be held open by anything it forks.
+        fn write_executable(path: &Path, script: &str) {
+            let status = std::process::Command::new("sh")
+                .args(["-c", r#"printf '%s' "$1" > "$2" && chmod 755 "$2""#, "sh"])
+                .arg(script)
+                .arg(path)
+                .status()
+                .expect("sh");
 
+            assert!(status.success(), "could not write {}", path.display());
+        }
+
+        /// A dependency whose override points at `path`, as if the user had
+        /// chosen it.
+        fn overridden_to(dir: &Path, path: &Path) -> MpvDependency {
             let settings = Arc::new(ConfigStore::load(AppPaths::rooted_at(dir)).expect("settings"));
             settings
-                .set_executable_override(MPV_KEY, Some(player.to_string_lossy().into_owned()))
+                .set_executable_override(MPV_KEY, Some(path.to_string_lossy().into_owned()))
                 .expect("override");
 
-            (player, MpvDependency::new(settings))
+            MpvDependency::new(settings)
+        }
+
+        /// A dependency whose override points at `script`, saved as `name`.
+        fn script_named(name: &str, script: &str) -> (PathBuf, MpvDependency) {
+            let dir = fresh_dir();
+            let player = dir.join(name);
+            write_executable(&player, script);
+
+            let dependency = overridden_to(&dir, &player);
+            (player, dependency)
         }
 
         fn pointed_at(script: &str) -> (PathBuf, MpvDependency) {
@@ -328,6 +455,62 @@ mod tests {
                 DependencyStatus::Installed {
                     version: Some("0.41.0".to_owned()),
                     path: Some(shown(&player)),
+                }
+            );
+        }
+
+        /// mpv prints what it thinks of the user's mpv.conf ahead of the
+        /// banner, and still plays with it. These lines are what mpv 0.41
+        /// says about `vo=opengl` and about an option it does not know.
+        #[tokio::test]
+        async fn an_mpv_that_complains_about_its_config_first_is_still_mpv() {
+            let (player, dependency) = pointed_at(
+                "#!/bin/sh\n\
+                 echo \"Driver 'opengl' has been replaced with 'gpu'!\"\n\
+                 echo 'Error parsing option this-option-does-not-exist (option not found)'\n\
+                 echo 'mpv v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects'\n",
+            );
+
+            assert_eq!(
+                dependency.detect().await,
+                DependencyStatus::Installed {
+                    version: Some("0.41.0".to_owned()),
+                    path: Some(shown(&player)),
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn the_probe_leaves_the_users_mpv_conf_out() {
+            let (player, dependency) = pointed_at(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$@\" > \"$0.args\"\n\
+                 echo 'mpv v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects'\n",
+            );
+
+            dependency.detect().await;
+
+            assert_eq!(
+                std::fs::read_to_string(format!("{}.args", player.display())).expect("arguments"),
+                "--no-config\n--version\n"
+            );
+        }
+
+        /// A name is enough for VLC: run, its Windows build would open a
+        /// console and wait for Enter. This one would pass for mpv if it ran.
+        #[tokio::test]
+        async fn vlc_is_turned_away_by_name_without_being_run() {
+            let (player, dependency) = script_named(
+                "vlc",
+                "#!/bin/sh\n\
+                 echo 'mpv v0.41.0 Copyright © 2000-2025 mpv/MPlayer/mplayer2 projects'\n",
+            );
+
+            assert_eq!(
+                dependency.detect().await,
+                DependencyStatus::Unusable {
+                    path: shown(&player),
+                    reason: "not mpv: this is VLC".to_owned(),
                 }
             );
         }
@@ -432,6 +615,67 @@ mod tests {
                 dependency.detect().await,
                 DependencyStatus::Unusable { .. }
             ));
+        }
+
+        fn real_mpv() -> PathBuf {
+            find_mpv(None).expect("these tests need mpv installed")
+        }
+
+        #[tokio::test]
+        #[ignore = "needs mpv installed; run with --ignored"]
+        async fn the_real_mpv_is_installed_with_its_version() {
+            let mpv = real_mpv();
+            let dir = fresh_dir();
+
+            match overridden_to(&dir, &mpv).detect().await {
+                DependencyStatus::Installed { version, path } => {
+                    assert_eq!(path, Some(shown(&mpv)));
+                    assert!(
+                        version
+                            .as_deref()
+                            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit())),
+                        "a version number, not {version:?}"
+                    );
+                }
+                other => panic!("expected Installed, got {other:?}"),
+            }
+        }
+
+        /// The real mpv, given an mpv.conf it complains about on stdout before
+        /// its banner when it is allowed to read it.
+        #[tokio::test]
+        #[ignore = "needs mpv installed; run with --ignored"]
+        async fn the_real_mpv_with_a_config_it_complains_about_is_still_mpv() {
+            let mpv = real_mpv();
+            let dir = fresh_dir();
+            let home = dir.join("mpv-home");
+            std::fs::create_dir_all(&home).expect("mpv home");
+            std::fs::write(
+                home.join("mpv.conf"),
+                "vo=opengl\nthis-option-does-not-exist=yes\n",
+            )
+            .expect("mpv.conf");
+
+            let wrapper = dir.join("mpv");
+            write_executable(
+                &wrapper,
+                &format!(
+                    "#!/bin/sh\nMPV_HOME='{}' exec '{}' \"$@\"\n",
+                    home.display(),
+                    mpv.display()
+                ),
+            );
+
+            assert!(
+                matches!(
+                    overridden_to(&dir, &wrapper).detect().await,
+                    DependencyStatus::Installed {
+                        version: Some(_),
+                        ..
+                    }
+                ),
+                "an mpv.conf mpv complains about must not make mpv unusable"
+            );
         }
     }
 }

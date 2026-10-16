@@ -7,8 +7,8 @@ mod room;
 mod session;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -19,6 +19,7 @@ use ts_rs::TS;
 
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
+use crate::core::syncplay::ping::epoch_seconds;
 use crate::core::syncplay::server::registry::Registry;
 
 /// How long the accept loop waits after a failed accept. A transient failure
@@ -82,6 +83,21 @@ impl Default for ServerTiming {
             hello_deadline: Duration::from_secs(10),
         }
     }
+}
+
+/// The server's reading of the time, in epoch seconds, for ping stamps.
+///
+/// Anchored to the epoch once and advanced by the monotonic clock after that.
+/// A stamp only ever comes back to the side that made it, so its absolute
+/// value hardly matters; what matters is that a round trip measured against it
+/// cannot come out negative because the wall clock was stepped in between.
+/// Taking `now` rather than reading a clock keeps everything that renders a
+/// `State` deterministic under test.
+fn stamp(now: Instant) -> f64 {
+    static ORIGIN: OnceLock<(Instant, f64)> = OnceLock::new();
+    let (origin, epoch) = *ORIGIN.get_or_init(|| (now, epoch_seconds()));
+
+    epoch + now.saturating_duration_since(origin).as_secs_f64()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -369,6 +385,57 @@ mod tests {
         );
     }
 
+    /// Through a real listener, so the timing a caller configures is the
+    /// timing every connection actually runs on.
+    #[tokio::test]
+    async fn a_started_server_sends_heartbeats_on_the_timing_it_was_given() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let server = server();
+        let config = ServerConfig {
+            timing: ServerTiming {
+                first_state_delay: Duration::from_millis(10),
+                state_interval: Duration::from_millis(20),
+                ..ServerTiming::default()
+            },
+            ..config_on(free_port())
+        };
+        server.start(&config).await.expect("start");
+
+        let stream = tokio::net::TcpStream::connect(config.local_address())
+            .await
+            .expect("connect");
+        let (read, mut write) = stream.into_split();
+        let hello = serde_json::json!({
+            "Hello": {
+                "username": "ahmet",
+                "password": crate::core::syncplay::protocol::hash_password("swordfish"),
+                "room": { "name": "MovieNight" },
+                "version": "1.2.255",
+            }
+        });
+        write
+            .write_all(format!("{hello}\r\n").as_bytes())
+            .await
+            .expect("greet");
+
+        let mut lines = BufReader::new(read).lines();
+        let heartbeats = async {
+            let mut seen = 0;
+            while seen < 3 {
+                let line = lines.next_line().await.expect("read").expect("line");
+                if line.starts_with(r#"{"State""#) {
+                    seen += 1;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), heartbeats)
+            .await
+            .expect("three heartbeats at twenty milliseconds apart take well under a second");
+
+        server.stop().await.expect("stop");
+    }
+
     #[test]
     fn the_default_timing_is_upstreams() {
         let timing = ServerTiming::default();
@@ -377,6 +444,23 @@ mod tests {
         assert_eq!(timing.state_interval, Duration::from_secs(1));
         assert_eq!(timing.protocol_timeout, Duration::from_millis(12_500));
         assert_eq!(timing.hello_deadline, Duration::from_secs(10));
+    }
+
+    /// A round trip is measured as the difference of two stamps, so the stamps
+    /// have to move with the monotonic clock, not the wall clock.
+    #[test]
+    fn a_ping_stamp_moves_with_the_monotonic_clock() {
+        // Anchored first, so `now` cannot fall before the anchor whichever
+        // test happens to stamp first.
+        let _ = stamp(Instant::now());
+        let now = Instant::now();
+        let later = now + Duration::from_millis(250);
+
+        assert!((stamp(later) - stamp(now) - 0.25).abs() < 1e-6);
+        assert!(
+            stamp(now) > 1.0e9,
+            "seconds since the epoch, the unit upstream stamps in"
+        );
     }
 
     /// Loopback, and not configurable. Guests arrive through the host's

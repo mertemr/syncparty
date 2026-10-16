@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{mpsc, RwLock};
 
@@ -75,12 +76,26 @@ impl Registry {
     /// Deliberately not remove-then-join: that would lose the file they already
     /// have open, and they would appear in the new room's list with nothing
     /// loaded until their client happened to mention it again.
-    pub fn move_to(&mut self, user: &str, room: &str) {
-        let Some(carried) = self.detach(user) else {
+    ///
+    /// Two things are *not* carried. Controller status belongs to the room it
+    /// was earned in: carried, it would let somebody who knows one room's
+    /// operator password walk into any other controlled room and run it. And
+    /// their position belongs to the film the old room was watching, so they
+    /// start from wherever this room is — sampled before they arrive, so
+    /// their old position cannot become this room's — or, in a room nobody is
+    /// in yet, from no position at all.
+    pub fn move_to(&mut self, user: &str, room: &str, now: Instant) {
+        let Some(mut carried) = self.detach(user) else {
             return;
         };
 
-        self.room_or_create(room).insert(carried);
+        let destination = self.room_or_create(room);
+        carried.is_controller = false;
+        carried.position = (!destination.is_empty()).then(|| destination.sample(now));
+        carried.reported_at = now;
+        carried.last_seen = now;
+
+        destination.insert(carried);
         self.where_is.insert(user.to_owned(), room.to_owned());
     }
 
@@ -108,6 +123,9 @@ impl Registry {
         carried
     }
 
+    /// Production reaches rooms through the people in them; only a test asks
+    /// for one by name.
+    #[cfg(test)]
     pub fn room(&self, name: &str) -> Option<&Room> {
         self.rooms.get(name)
     }
@@ -139,6 +157,8 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::core::syncplay::server::room::test_support::{open_file, sender};
 
@@ -197,7 +217,7 @@ mod tests {
         let mut registry = Registry::default();
         registry.join("ahmet", "MovieNight", sender());
 
-        registry.move_to("ahmet", "OtherRoom");
+        registry.move_to("ahmet", "OtherRoom", Instant::now());
 
         assert!(registry.room("MovieNight").is_none());
         assert_eq!(registry.room("OtherRoom").expect("room").users().len(), 1);
@@ -216,9 +236,9 @@ mod tests {
             .user_mut("ahmet")
             .expect("user");
         user.file = Some(open_file("Film.mkv"));
-        user.is_ready = true;
+        user.is_ready = Some(true);
 
-        registry.move_to("ahmet", "OtherRoom");
+        registry.move_to("ahmet", "OtherRoom", Instant::now());
 
         let moved = registry
             .room("OtherRoom")
@@ -227,7 +247,68 @@ mod tests {
             .get("ahmet")
             .expect("user");
         assert_eq!(moved.file.as_ref().expect("file").name, "Film.mkv");
-        assert!(moved.is_ready);
+        assert_eq!(moved.is_ready, Some(true));
+    }
+
+    /// The privilege escalation this closes: an operator of one controlled
+    /// room switching into another and finding themselves in charge of it.
+    #[test]
+    fn moving_rooms_leaves_controller_status_behind() {
+        let mut registry = Registry::default();
+        registry.join("ahmet", "+MovieNight:ABCDEF012345", sender());
+        registry
+            .room_mut("+MovieNight:ABCDEF012345")
+            .expect("room")
+            .set_controller("ahmet", true);
+
+        registry.move_to("ahmet", "+OtherRoom:ABCDEF012345", Instant::now());
+
+        let room = registry.room("+OtherRoom:ABCDEF012345").expect("room");
+        assert!(!room.users()["ahmet"].is_controller);
+        assert!(!room.can_control("ahmet"));
+    }
+
+    #[test]
+    fn a_mover_starts_where_the_room_they_join_is() {
+        let mut registry = Registry::default();
+        let start = Instant::now();
+        registry.join("ahmet", "MovieNight", sender());
+        registry.join("mehmet", "OtherRoom", sender());
+        for (room, name, position) in [
+            ("MovieNight", "ahmet", 3000.0),
+            ("OtherRoom", "mehmet", 40.0),
+        ] {
+            let room = registry.room_mut(room).expect("room");
+            room.set_file(name, Some(open_file("Film.mkv")));
+            room.set_position(name, position, start);
+        }
+
+        registry.move_to("ahmet", "OtherRoom", start + Duration::from_secs(2));
+
+        let moved = &registry.room("OtherRoom").expect("room").users()["ahmet"];
+        assert_eq!(
+            moved.position,
+            Some(40.0),
+            "the old film's position must not become a sample in the new room"
+        );
+    }
+
+    #[test]
+    fn a_mover_into_an_empty_room_has_no_position_yet() {
+        let mut registry = Registry::default();
+        registry.join("ahmet", "MovieNight", sender());
+        registry.room_mut("MovieNight").expect("room").set_position(
+            "ahmet",
+            3000.0,
+            Instant::now(),
+        );
+
+        registry.move_to("ahmet", "OtherRoom", Instant::now());
+
+        assert_eq!(
+            registry.room("OtherRoom").expect("room").users()["ahmet"].position,
+            None
+        );
     }
 
     #[test]
@@ -249,7 +330,7 @@ mod tests {
         let mut registry = Registry::default();
 
         registry.leave("nobody");
-        registry.move_to("nobody", "OtherRoom");
+        registry.move_to("nobody", "OtherRoom", Instant::now());
 
         assert!(registry.room("OtherRoom").is_none());
     }

@@ -16,6 +16,11 @@ mod endpoint;
 mod tracker;
 mod transport;
 
+#[cfg(all(test, unix))]
+mod real_tests;
+#[cfg(all(test, unix))]
+mod tests;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;

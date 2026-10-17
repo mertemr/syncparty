@@ -968,7 +968,17 @@ mod tests {
     }
 
     fn connect_with(registry: Arc<RwLock<Registry>>, timing: ServerTiming) -> DuplexStream {
-        let (client, server) = tokio::io::duplex(8192);
+        connect_through(registry, timing, 8192)
+    }
+
+    /// Over a pipe that holds at most `buffer` bytes each way, for the tests
+    /// about a peer that stops reading.
+    fn connect_through(
+        registry: Arc<RwLock<Registry>>,
+        timing: ServerTiming,
+        buffer: usize,
+    ) -> DuplexStream {
+        let (client, server) = tokio::io::duplex(buffer);
         tokio::spawn(serve(
             server,
             registry,
@@ -1718,6 +1728,42 @@ mod tests {
         assert_eq!(playstate["paused"], true, "got {forced}");
     }
 
+    /// A switch cuts the name as a greeting does, or the mover and the room
+    /// he meant would be two different rooms. And the room he joins hears how
+    /// ready he is, since he brings that with him.
+    #[tokio::test]
+    async fn a_switch_cuts_the_room_name_and_tells_the_new_room_how_ready_the_mover_is() {
+        let registry = Registry::shared();
+        let cut = "r".repeat(35);
+        let mut ayse = arrive(&registry, "ayse", &cut).await;
+
+        let mut ahmet = arrive(&registry, "ahmet", "MovieNight").await;
+        write_line(
+            &mut ahmet,
+            r#"{"Set":{"ready":{"isReady":true,"manuallyInitiated":true}}}"#,
+        )
+        .await;
+        let _ = read_until(&mut ahmet, r#""isReady":true"#).await;
+
+        let switch = json!({ "Set": { "room": { "name": "r".repeat(50) } } });
+        write_line(&mut ahmet, &switch.to_string()).await;
+
+        let joined = parse(&read_until(&mut ayse, "joined").await);
+        assert_eq!(
+            joined["Set"]["user"]["ahmet"]["room"]["name"],
+            cut.as_str(),
+            "got {joined}"
+        );
+        let ready = parse(&read_until(&mut ayse, r#""ready""#).await);
+        assert_eq!(ready["Set"]["ready"]["username"], "ahmet", "got {ready}");
+        assert_eq!(ready["Set"]["ready"]["isReady"], true, "got {ready}");
+
+        let list = parse(&read_until(&mut ahmet, r#""List""#).await);
+        let room = &list["List"][cut.as_str()];
+        assert!(room["ayse"].is_object(), "the room ayse is in: {list}");
+        assert_eq!(room["ahmet"]["isReady"], true, "got {list}");
+    }
+
     /// The privilege escalation: an operator of one controlled room switching
     /// into another and finding themselves in charge of it.
     #[tokio::test]
@@ -1986,6 +2032,106 @@ mod tests {
             hung_up(&mut mehmet).await,
             "the server hangs up rather than waiting for him to read"
         );
+    }
+
+    /// Upstream's timer keeps its own time: a force in between does not push
+    /// the next heartbeat back, whether the force came from this connection's
+    /// own report or from somebody else's.
+    #[tokio::test]
+    async fn a_forced_state_does_not_put_the_next_heartbeat_back() {
+        let timing = ServerTiming {
+            first_state_delay: Duration::from_millis(100),
+            state_interval: Duration::from_millis(400),
+            ..brisk()
+        };
+
+        for own in [true, false] {
+            let registry = Registry::shared();
+            let (mut ahmet, mut mehmet) = pair(&registry, "MovieNight", timing).await;
+            let _ = read_until(&mut ahmet, r#"{"State""#).await;
+            let beat = Instant::now();
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let forcer = if own { &mut ahmet } else { &mut mehmet };
+            write_line(forcer, &state_line(0.0, false)).await;
+            let _ = read_until(&mut ahmet, r#""server":1"#).await;
+            write_line(&mut ahmet, r#"{"State":{"ignoringOnTheFly":{"server":1}}}"#).await;
+
+            let next = state_of(&read_until(&mut ahmet, r#"{"State""#).await);
+            let gap = beat.elapsed();
+            assert!(next.get("ignoringOnTheFly").is_none(), "got {next}");
+            assert!(
+                (Duration::from_millis(250)..=Duration::from_millis(520)).contains(&gap),
+                "one interval after the last heartbeat, not after the force \
+                 (own report: {own}): {gap:?}"
+            );
+        }
+    }
+
+    /// A report has been on its way for the forward delay by the time it
+    /// arrives, and a playing film has moved on by that much since. Measuring
+    /// the delay is for nothing unless the room hears about it.
+    #[tokio::test]
+    async fn a_playing_report_is_carried_forward_by_how_long_it_took_to_arrive() {
+        let registry = Registry::shared();
+        let mut ahmet = arrive_with(&registry, "ahmet", "MovieNight", brisk()).await;
+
+        let heartbeat = state_of(&read_until(&mut ahmet, r#"{"State""#).await);
+        // Held back, so the round trip is a fifth of a second at least, and
+        // the client claims none of it for its own leg.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let report = json!({
+            "State": {
+                "ping": {
+                    "latencyCalculation": heartbeat["ping"]["latencyCalculation"],
+                    "clientRtt": 0.0,
+                },
+                "playstate": { "position": 100.0, "paused": false },
+            }
+        });
+        write_line(&mut ahmet, &report.to_string()).await;
+
+        let forced = state_of(&read_until(&mut ahmet, r#""server":1"#).await);
+        let carried = forced["playstate"]["position"].as_f64().expect("position") - 100.0;
+        assert!(
+            (0.25..2.0).contains(&carried),
+            "half the average round trip plus the part the client did not \
+             account for, about three tenths of a second: {forced}"
+        );
+    }
+
+    /// A peer that stops reading fills the pipe long before it fills its
+    /// queue. The write that cannot finish is what gives up on it then; the
+    /// queue alone would take more than sixty heartbeats to notice.
+    #[tokio::test]
+    async fn a_write_that_cannot_finish_gives_up_on_the_peer() {
+        let timing = ServerTiming {
+            protocol_timeout: Duration::from_millis(300),
+            ..brisk()
+        };
+        let registry = Registry::shared();
+        let mut ahmet = arrive(&registry, "ahmet", "MovieNight").await;
+
+        // Room for barely one line, and none of it is ever read.
+        let mut mehmet = connect_through(Arc::clone(&registry), timing, 64);
+        write_line(
+            &mut mehmet,
+            &hello_line("mehmet", "MovieNight", "swordfish"),
+        )
+        .await;
+        // He goes on answering, so it is not silence that ends him.
+        let answering = tokio::spawn(async move {
+            while mehmet.write_all(b"{\"State\":{}}\r\n").await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let left =
+            tokio::time::timeout(Duration::from_millis(1500), read_until(&mut ahmet, "left"))
+                .await
+                .expect("the write timeout, not a full queue, should have ended him by now");
+        assert!(left.contains("mehmet"), "got {left}");
+        answering.abort();
     }
 
     /// Everybody else corrects towards the watcher furthest behind, which only

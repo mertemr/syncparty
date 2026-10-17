@@ -9,7 +9,10 @@
 //! Player commands are carried out before the task listens again. The engine
 //! has already moved its model of the player when it asks for a command, and
 //! the next poll must find the player where the model says it is, or the
-//! engine's own correction would look like the user seeking.
+//! engine's own correction would look like the user seeking. For the same
+//! reason a poll first handles every event the player has already queued: a
+//! snapshot showing a change the engine has not been told about yet — a new
+//! file, above all — would be judged against the wrong file.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -43,12 +46,12 @@ pub(super) enum Command {
 /// upstream's 16 KiB, so a big room list is never mistaken for an attack.
 const MAX_LINE_LENGTH: usize = 1 << 20;
 
-/// A player that takes longer than this to accept a command has stopped
-/// answering. Its own close event will follow; the connection must not wait.
-const PLAYER_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Backoff stops doubling after this many attempts.
 const MAX_BACKOFF_EXPONENT: u32 = 5;
+
+/// A poll gives up after handling this many batches of queued player events
+/// without the queue running dry, and leaves the look to the next tick.
+const MAX_EVENT_ROUNDS: usize = 4;
 
 enum Inbound {
     Line(String),
@@ -324,11 +327,16 @@ impl Driver {
     async fn timer_fired(&mut self) {
         let now = Instant::now();
 
-        let silent_since = self.link.as_ref().map(|link| link.last_state);
-        if let Some(since) = silent_since {
-            if now.saturating_duration_since(since) >= self.config.timing.protocol_timeout {
-                self.lost("the server stopped sending its state").await;
-            }
+        // Lines still waiting to be read mean the server has kept talking
+        // while this task was busy — with a slow player, say. They are read
+        // first, and the deadline is looked at again once they have been.
+        let silent = self.link.as_ref().is_some_and(|link| {
+            link.inbound.is_empty()
+                && now.saturating_duration_since(link.last_state)
+                    >= self.config.timing.protocol_timeout
+        });
+        if silent {
+            self.lost("the server stopped sending its state").await;
         }
 
         if self.link.is_none()
@@ -366,44 +374,97 @@ impl Driver {
     }
 
     async fn player_event(&mut self, event: Option<PlayerEvent>) {
+        if self.absorb(event).await {
+            self.poll().await;
+        }
+    }
+
+    /// Hands one player event to the engine. Returns whether the player is
+    /// worth looking at straight away.
+    async fn absorb(&mut self, event: Option<PlayerEvent>) -> bool {
         match event {
             // A stream that ends without saying why ended with the player.
             None | Some(PlayerEvent::Closed(_)) => {
                 tracing::info!(?event, "the player has gone; the connection stays up");
                 self.detach();
+                false
             }
             Some(PlayerEvent::FileLoaded { file, .. }) => {
                 let step = self
                     .engine
                     .file_loaded(&file, Instant::now(), epoch_seconds());
                 self.execute(step).await;
+                false
             }
-            Some(PlayerEvent::Unloaded) => self.engine.file_unloaded(),
+            Some(PlayerEvent::Unloaded) => {
+                self.engine.file_unloaded();
+                false
+            }
+            // `loadfile … replace` closes the old file before it tries the
+            // new one, so a failure leaves the player idle, and says so only
+            // by failing.
+            Some(PlayerEvent::FileFailed { error }) => {
+                tracing::info!(%error, "the player could not open a file");
+                self.engine.file_unloaded();
+                false
+            }
             // The poll would find these within a tenth of a second anyway;
             // looking now just tells the room sooner. Thresholds, not the
             // event's origin, decide what the user did.
             Some(PlayerEvent::PauseChanged { .. })
             | Some(PlayerEvent::Seeked { .. })
-            | Some(PlayerEvent::EndOfFile) => self.poll().await,
-            Some(PlayerEvent::FileFailed { error }) => {
-                tracing::info!(%error, "the player could not open a file");
-            }
-            Some(PlayerEvent::SpeedChanged { .. }) => {}
+            | Some(PlayerEvent::EndOfFile) => true,
+            Some(PlayerEvent::SpeedChanged { .. }) => false,
         }
     }
 
+    /// Looks at the player, once the engine has heard everything the player
+    /// queued before the look.
+    ///
+    /// The snapshot is taken first and the queue read after. A player queues
+    /// an event before the change it reports can be seen, so an empty queue
+    /// after the snapshot means the engine already knows everything the
+    /// snapshot shows.
     async fn poll(&mut self) {
-        let Some(attached) = self.attached.as_ref() else {
-            return;
-        };
+        for _ in 0..MAX_EVENT_ROUNDS {
+            let Some(attached) = self.attached.as_mut() else {
+                return;
+            };
 
-        let snapshot = attached.player.snapshot();
-        let step = self.engine.poll(&snapshot, Instant::now(), epoch_seconds());
-        self.execute(step).await;
+            let snapshot = attached.player.snapshot();
+            let mut queued = Vec::new();
+            while let Ok(event) = attached.events.try_recv() {
+                queued.push(event);
+            }
+
+            if queued.is_empty() {
+                let step = self.engine.poll(&snapshot, Instant::now(), epoch_seconds());
+                self.execute(step).await;
+                return;
+            }
+            for event in queued {
+                self.absorb(Some(event)).await;
+            }
+        }
+    }
+
+    /// How long one step may spend on the player, commands and notices
+    /// together.
+    ///
+    /// A player that takes longer has stopped answering, and its own close
+    /// event will follow; the connection must not wait for it. Two fifths of
+    /// the protocol timeout — five seconds by default — so that a stalled
+    /// player alone never keeps this client from answering the server for
+    /// long enough that the server, which allows the same timeout, gives up.
+    fn player_budget(&self) -> Duration {
+        self.config.timing.protocol_timeout * 2 / 5
     }
 
     /// Carries out a step: messages first, so a reply is never held up by
     /// the player, then player commands in order, then notices.
+    ///
+    /// Once the budget is spent, whatever is left is still offered to the
+    /// player but not waited for.
     async fn execute(&mut self, step: Step) {
         for message in step.send {
             self.send(&message);
@@ -416,17 +477,18 @@ impl Driver {
         else {
             return;
         };
+        let deadline = tokio::time::Instant::now() + self.player_budget();
 
         for command in step.player {
             let outcome = match command {
                 PlayerCommand::SetPaused(paused) => {
-                    tokio::time::timeout(PLAYER_COMMAND_TIMEOUT, player.set_paused(paused)).await
+                    tokio::time::timeout_at(deadline, player.set_paused(paused)).await
                 }
                 PlayerCommand::Seek(position) => {
-                    tokio::time::timeout(PLAYER_COMMAND_TIMEOUT, player.seek(position)).await
+                    tokio::time::timeout_at(deadline, player.seek(position)).await
                 }
                 PlayerCommand::SetSpeed(speed) => {
-                    tokio::time::timeout(PLAYER_COMMAND_TIMEOUT, player.set_speed(speed)).await
+                    tokio::time::timeout_at(deadline, player.set_speed(speed)).await
                 }
             };
             log_player_failure(&format!("{command:?}"), outcome);
@@ -434,11 +496,8 @@ impl Driver {
 
         for notice in step.notices {
             let text = notice.render(&self.config.language);
-            let outcome = tokio::time::timeout(
-                PLAYER_COMMAND_TIMEOUT,
-                player.show_text(&text, NOTICE_DURATION),
-            )
-            .await;
+            let outcome =
+                tokio::time::timeout_at(deadline, player.show_text(&text, NOTICE_DURATION)).await;
             log_player_failure("show_text", outcome);
         }
     }

@@ -532,6 +532,242 @@ async fn the_player_follows_the_room_and_the_room_hears_the_user() {
     assert_eq!(state["ignoringOnTheFly"]["client"], 1);
 }
 
+/// Watching at 1500 s, the user opens `path` over the film. Returns what the
+/// client sent the room in the next moments.
+///
+/// The player switches to the new file before the client hears that it has,
+/// and an event queued ahead of the switch makes the client look at the
+/// player in between. What it sees there is the new file at its start.
+async fn messages_after_opening_over_the_film(path: &str) -> Vec<Value> {
+    let server = Server::bind().await;
+    let client = SyncClient::start(config(server.address()));
+    let mut peer = server.accept().await;
+    peer.greet().await;
+    let player = attach(&client);
+    player.user_opens("/films/Film.mkv", Some(7200.0));
+    peer.next_setting("file").await;
+    peer.heartbeat(1500.0, false, "bob").await;
+    peer.next_of("State").await;
+    until_played(&player, |commands| {
+        commands.contains(&Played::SetPaused(false))
+    })
+    .await;
+    tokio::time::sleep(timing().load_settle + Duration::from_millis(50)).await;
+
+    let here = player
+        .snapshot()
+        .position(Instant::now())
+        .expect("a position");
+    player.user_seeks(here);
+    player.user_opens(path, Some(7200.0));
+
+    peer.collect_for(Duration::from_millis(300)).await
+}
+
+fn seeks_sent(messages: &[Value]) -> Vec<&Value> {
+    messages
+        .iter()
+        .filter(|message| message["State"]["playstate"]["doSeek"] == true)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_file_opened_over_another_is_not_mistaken_for_a_seek_to_its_start() {
+    let sent = messages_after_opening_over_the_film("/films/Other.mkv").await;
+
+    assert!(
+        seeks_sent(&sent).is_empty(),
+        "the room was sent a seek: {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|message| message["Set"]["file"]["name"] == "Other.mkv"),
+        "{sent:?}"
+    );
+}
+
+/// The same path, so only the order of events can tell the reopened file
+/// at its start from the user seeking there.
+#[tokio::test]
+async fn the_same_file_opened_again_is_not_mistaken_for_a_seek_to_its_start() {
+    let sent = messages_after_opening_over_the_film("/films/Film.mkv").await;
+
+    assert!(
+        seeks_sent(&sent).is_empty(),
+        "the room was sent a seek: {sent:?}"
+    );
+}
+
+/// The room is an hour and a half in; the joiner's file is twenty minutes
+/// long. Sent to the room's position, the player parks on its last frame.
+#[tokio::test]
+async fn a_joiner_with_a_shorter_file_leaves_the_room_where_it_is() {
+    let server = Server::bind().await;
+    let client = SyncClient::start(config(server.address()));
+    let mut peer = server.accept().await;
+    peer.greet().await;
+    let player = attach(&client);
+    until_status(&client, |status| status.player_attached).await;
+    peer.heartbeat(6000.0, false, "bob").await;
+    peer.next_of("State").await;
+
+    player.user_opens("/films/Short.mkv", Some(1200.0));
+    let started = Instant::now();
+    let mut sent = Vec::new();
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let room = 6000.0 + started.elapsed().as_secs_f64();
+        peer.heartbeat(room, false, "bob").await;
+        sent.extend(peer.collect_for(Duration::from_millis(20)).await);
+    }
+
+    let snapshot = player.snapshot();
+    assert!(
+        snapshot.eof_reached && snapshot.paused,
+        "parked on the last frame: {snapshot:?}"
+    );
+    let playstates: Vec<&Value> = sent
+        .iter()
+        .filter_map(|message| message["State"].get("playstate"))
+        .collect();
+    assert!(!playstates.is_empty(), "{sent:?}");
+    for playstate in playstates {
+        assert_eq!(playstate["paused"], false, "{sent:?}");
+        assert_ne!(playstate["doSeek"], true, "{sent:?}");
+        assert!(
+            playstate["position"].as_f64().expect("a position") > 6000.0,
+            "{sent:?}"
+        );
+    }
+}
+
+/// A failed `loadfile … replace` has already closed the old file, and says
+/// so only by failing.
+#[tokio::test]
+async fn a_file_that_failed_to_open_is_not_open_any_more() {
+    let server = Server::bind().await;
+    let client = SyncClient::start(config(server.address()));
+    let mut peer = server.accept().await;
+    peer.greet().await;
+    let player = attach(&client);
+    player.user_opens("/films/Film.mkv", Some(7200.0));
+    peer.next_setting("file").await;
+    peer.heartbeat(10.0, true, "bob").await;
+    peer.next_of("State").await;
+
+    player.update(|snapshot| {
+        snapshot.file = None;
+        snapshot.time_pos = None;
+        snapshot.duration = None;
+    });
+    player.push(PlayerEvent::FileFailed {
+        error: "loading failed".to_owned(),
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    peer.send(json!({
+        "State": { "playstate": { "position": 50.0, "paused": true, "doSeek": true, "setBy": "bob" } }
+    }))
+    .await;
+    peer.next_of("State").await;
+    // One more round trip, so whatever the seek asked of the player is done.
+    peer.heartbeat(50.0, true, "bob").await;
+    peer.next_of("State").await;
+    assert!(
+        !player.commands().contains(&Played::Seek(50.0)),
+        "an idle player was told to seek: {:?}",
+        player.commands()
+    );
+
+    drop(peer);
+    let mut again = server.accept().await;
+    again.greet_as("alice").await;
+    let mut greeting = Vec::new();
+    loop {
+        let message = again.next().await;
+        let done = message.get("List").is_some();
+        greeting.push(message);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        !greeting
+            .iter()
+            .any(|message| message["Set"].get("file").is_some()),
+        "a file that is not open was announced: {greeting:?}"
+    );
+}
+
+/// A player that has stopped answering holds up every step that needs it.
+/// The server meanwhile keeps talking, and must neither give up on this
+/// client nor be given up on by it.
+#[tokio::test]
+async fn a_player_that_stops_answering_does_not_cost_the_connection() {
+    let server = Server::bind().await;
+    let client = SyncClient::start(ClientConfig {
+        timing: ClientTiming {
+            protocol_timeout: Duration::from_millis(250),
+            ..timing()
+        },
+        ..config(server.address())
+    });
+    let mut peer = server.accept().await;
+    peer.greet().await;
+    let player = attach(&client);
+    player.user_opens("/films/Film.mkv", Some(7200.0));
+    peer.next_setting("file").await;
+    peer.heartbeat(10.0, true, "bob").await;
+    peer.next_of("State").await;
+    let replies = |lines: &[Value]| {
+        lines
+            .iter()
+            .filter(|line| line.get("State").is_some())
+            .count()
+    };
+
+    player.hang(true);
+    // Every arrival is a notice for the player to show, and each one waits
+    // on it in turn while the heartbeats queue up behind.
+    for name in [
+        "carol", "dave", "erin", "frank", "gus", "hal", "ivy", "jo", "kim", "lea", "max", "ned",
+    ] {
+        peer.send(json!({
+            "Set": { "user": { name: { "room": { "name": "MovieNight" }, "event": { "joined": true } } } }
+        }))
+        .await;
+    }
+    let mut heartbeats = 0;
+    let mut answered_while_hung = 0;
+    for _ in 0..40 {
+        peer.heartbeat(10.0, true, "bob").await;
+        heartbeats += 1;
+        answered_while_hung += replies(&peer.collect_for(Duration::from_millis(50)).await);
+    }
+    player.hang(false);
+
+    let mut answered = answered_while_hung;
+    for _ in 0..5 {
+        peer.heartbeat(10.0, true, "bob").await;
+        heartbeats += 1;
+        answered += replies(&peer.collect_for(Duration::from_millis(50)).await);
+    }
+
+    assert!(
+        answered_while_hung > 0,
+        "the server heard nothing for as long as the player was hung"
+    );
+    assert_eq!(
+        answered, heartbeats,
+        "every heartbeat, on the one connection"
+    );
+    assert_eq!(client.status().connection, ConnectionState::Connected);
+    assert!(
+        !server.connects_within(Duration::from_millis(50)).await,
+        "the client reconnected, so it had dropped the connection"
+    );
+}
+
 #[tokio::test]
 async fn notices_are_shown_on_the_player_in_the_chosen_language() {
     let server = Server::bind().await;

@@ -96,7 +96,8 @@ impl MpvLauncher {
         }
     }
 
-    #[cfg(test)]
+    // Only the Unix tests can stand a scripted mpv in, so only they use it.
+    #[cfg(all(test, unix))]
     fn with_timing(self, timing: Timing) -> Self {
         Self { timing, ..self }
     }

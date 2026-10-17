@@ -32,6 +32,7 @@ import { hydrateUserMovies } from "@/features/movie/userMovies";
 import { watchToastMessage } from "@/features/watch/watchState";
 
 import { movieVoteToastMessage } from "./movieVoteToast";
+import { roomAfterWatchChange } from "./roomPublisher";
 
 /** How many server log lines to keep. Enough to diagnose a failed start. */
 const LOG_LIMIT = 300;
@@ -127,13 +128,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         const toast = watchToastMessage(watch, event.state, translate);
         if (toast) pushToast(toast);
         setWatch(event.state);
-
-        // A guest's room comes from its own client, and so does a host's
-        // while the monitor is off. Once that client is gone nothing will
-        // update the room again, so a stale one is worse than none.
-        const monitorPublishes =
-          session.phase === "hosting" && session.monitorAttached;
-        if (event.state === null && !monitorPublishes) setRoom(null);
+        // The rule for when a room outlives the client that published it
+        // lives in `roomPublisher.ts`, where it is tested.
+        setRoom((current) => roomAfterWatchChange(current, event.state, session));
         break;
       }
 

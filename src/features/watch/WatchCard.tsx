@@ -1,13 +1,13 @@
 import { useState } from "react";
 
 import { useAppState } from "@/app/AppState";
-import { VIDEO_EXTENSIONS } from "@/features/movie/fileTitle";
 import { useTranslate } from "@/shared/i18n";
 import { ipc, pickFile } from "@/shared/ipc";
 import { Badge, Button, Card, Dot, Rewind, Toggle, cx } from "@/shared/ui";
 import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 import type { WatchState } from "@/shared/types/WatchState";
 
+import { videoFileFilters } from "./fileFilters";
 import { describeWatch, type WatchTone } from "./watchState";
 
 const NOTE_TONES: Record<WatchTone, string> = {
@@ -54,7 +54,10 @@ export function WatchCard({
   async function chooseFile() {
     const path = await pickFile({
       title: t("watch.file.dialogTitle"),
-      filters: [{ name: t("watch.file.filter"), extensions: VIDEO_EXTENSIONS }],
+      filters: videoFileFilters({
+        videos: t("watch.file.filter"),
+        allFiles: t("watch.file.allFiles"),
+      }),
     });
     if (path) await ipc.openWatchFile(path);
   }

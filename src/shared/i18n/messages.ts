@@ -318,6 +318,7 @@ export const en = {
   "watch.file.change": "Change file",
   "watch.file.dialogTitle": "Choose your copy of the movie",
   "watch.file.filter": "Video files",
+  "watch.file.allFiles": "All files",
   "watch.file.hint":
     "Everyone plays their own copy. You can also drop the file onto the player window.",
   "watch.file.alone": "Nobody else is in the room yet.",
@@ -657,6 +658,7 @@ export const tr: Messages = {
   "watch.file.change": "Dosyayı değiştir",
   "watch.file.dialogTitle": "Filmin sendeki kopyasını seç",
   "watch.file.filter": "Video dosyaları",
+  "watch.file.allFiles": "Tüm dosyalar",
   "watch.file.hint":
     "Herkes kendi kopyasını oynatır. Dosyayı oynatıcı penceresine sürükleyip bırakabilirsin de.",
   "watch.file.alone": "Odada henüz senden başka kimse yok.",

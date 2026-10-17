@@ -7,6 +7,10 @@
 //! the snapshot directly, so the code under test sees both kinds of change the
 //! way it sees them from mpv.
 //!
+//! Every event is queued before the change it reports can be seen in the
+//! snapshot. Code that looks at the snapshot and then at the queue therefore
+//! never finds a change whose event has not arrived yet.
+//!
 //! The sync client's tests and the session's tests both drive it, which is why
 //! it lives here rather than beside either of them.
 
@@ -15,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::player::{
@@ -42,6 +46,8 @@ pub(crate) enum Command {
 pub(crate) struct FakePlayer {
     inner: Mutex<Inner>,
     events: mpsc::UnboundedSender<PlayerEvent>,
+    /// While true, every command waits.
+    hung: watch::Sender<bool>,
 }
 
 struct Inner {
@@ -67,6 +73,7 @@ impl FakePlayer {
                 failure: None,
             }),
             events,
+            hung: watch::Sender::new(false),
         });
 
         (player, receiver)
@@ -125,6 +132,15 @@ impl FakePlayer {
         self.lock().failure = message.map(str::to_owned);
     }
 
+    /// While `true`, every command but `quit` is recorded and then left
+    /// unanswered, the way a player that has stopped reading its socket
+    /// leaves it. Commands still waiting when it is released carry on as
+    /// usual. `quit` still works, as it does on a real player, whose process
+    /// can be ended whether it answers or not.
+    pub(crate) fn hang(&self, hung: bool) {
+        self.hung.send_replace(hung);
+    }
+
     pub(crate) fn is_closed(&self) -> bool {
         self.lock().closed
     }
@@ -148,46 +164,33 @@ impl FakePlayer {
 
     /// The user presses space.
     pub(crate) fn user_pauses(&self, paused: bool) {
-        let changed = {
-            let mut inner = self.lock();
-            let changed = inner.snapshot.paused != paused;
-            settle(&mut inner.snapshot, Instant::now());
-            inner.snapshot.paused = paused;
-            changed
-        };
-
-        if changed {
-            self.push(PlayerEvent::PauseChanged {
-                paused,
-                origin: Origin::External,
-            });
+        let mut inner = self.lock();
+        if inner.snapshot.paused == paused {
+            return;
         }
-    }
 
-    /// The user drags the seek bar.
-    pub(crate) fn user_seeks(&self, position: f64) {
-        let position = {
-            let mut inner = self.lock();
-            seek_to(&mut inner.snapshot, position, Instant::now())
-        };
-
-        self.push(PlayerEvent::Seeked {
-            position,
+        settle(&mut inner.snapshot, Instant::now());
+        inner.snapshot.paused = paused;
+        self.push(PlayerEvent::PauseChanged {
+            paused,
             origin: Origin::External,
         });
     }
 
+    /// The user drags the seek bar.
+    pub(crate) fn user_seeks(&self, position: f64) {
+        let mut inner = self.lock();
+        self.seek_to(&mut inner.snapshot, position, Origin::External);
+    }
+
     /// The film reaches its last frame, where mpv pauses on its own.
     pub(crate) fn plays_to_the_end(&self) {
-        {
-            let mut inner = self.lock();
-            let end = inner.snapshot.duration.unwrap_or_default();
-            inner.snapshot.time_pos = Some(end);
-            inner.snapshot.time_pos_at = Some(Instant::now());
-            inner.snapshot.eof_reached = true;
-            inner.snapshot.paused = true;
-        }
-
+        let mut inner = self.lock();
+        let end = inner.snapshot.duration.unwrap_or_default();
+        inner.snapshot.time_pos = Some(end);
+        inner.snapshot.time_pos_at = Some(Instant::now());
+        inner.snapshot.eof_reached = true;
+        inner.snapshot.paused = true;
         self.push(PlayerEvent::EndOfFile);
     }
 
@@ -202,35 +205,57 @@ impl FakePlayer {
     }
 
     fn close(&self, reason: CloseReason) {
-        let first = {
-            let mut inner = self.lock();
-            !std::mem::replace(&mut inner.closed, true)
-        };
-
-        if first {
+        let mut inner = self.lock();
+        if !std::mem::replace(&mut inner.closed, true) {
             self.push(PlayerEvent::Closed(reason));
         }
     }
 
     fn open(&self, file: LoadedFile, origin: Origin) {
-        {
-            let mut inner = self.lock();
-            inner.snapshot.duration = file.duration;
-            inner.snapshot.file = Some(file.clone());
-            inner.snapshot.time_pos = Some(0.0);
-            inner.snapshot.time_pos_at = Some(Instant::now());
-            inner.snapshot.eof_reached = false;
-            inner.snapshot.seeking = false;
-        }
-
+        let mut inner = self.lock();
+        inner.snapshot.duration = file.duration;
+        inner.snapshot.file = Some(file.clone());
+        inner.snapshot.time_pos = Some(0.0);
+        inner.snapshot.time_pos_at = Some(Instant::now());
+        inner.snapshot.eof_reached = false;
+        inner.snapshot.seeking = false;
         self.push(PlayerEvent::FileLoaded { file, origin });
     }
 
-    /// Records `command` and hands back the state if the player can take it.
-    fn accept(&self, command: Command) -> Result<MutexGuard<'_, Inner>> {
-        let mut inner = self.lock();
-        inner.commands.push(command);
+    /// Moves to `position`, clamped into the file the way mpv clamps it.
+    ///
+    /// Seeking back from the end clears the end. Seeking to it or past it
+    /// lands on the last frame, where mpv pauses as it does when a film plays
+    /// out — and reports it the same way.
+    fn seek_to(&self, snapshot: &mut PlayerSnapshot, position: f64, origin: Origin) {
+        let mut position = position.max(0.0);
+        let mut at_the_end = false;
+        if let Some(duration) = snapshot.duration.filter(|duration| *duration > 0.0) {
+            at_the_end = position >= duration;
+            position = position.min(duration);
+        }
 
+        snapshot.time_pos = Some(position);
+        snapshot.time_pos_at = Some(Instant::now());
+        snapshot.eof_reached = at_the_end;
+        snapshot.paused |= at_the_end;
+
+        self.push(PlayerEvent::Seeked { position, origin });
+        if at_the_end {
+            self.push(PlayerEvent::EndOfFile);
+        }
+    }
+
+    /// Records `command`, waits while the player is hung, and hands back the
+    /// state if the player can take it.
+    async fn accept(&self, command: Command) -> Result<MutexGuard<'_, Inner>> {
+        self.lock().commands.push(command);
+
+        // The sender lives in `self`, so this only ends by being released.
+        let mut hung = self.hung.subscribe();
+        let _ = hung.wait_for(|hung| !*hung).await;
+
+        let inner = self.lock();
         if inner.closed {
             return Err(SyncPartyError::PlayerFailed(
                 "the player has closed".to_owned(),
@@ -253,20 +278,6 @@ fn settle(snapshot: &mut PlayerSnapshot, now: Instant) {
     }
 }
 
-/// Moves to `position`, clamped into the file the way mpv clamps it, and
-/// returns where it landed. Seeking back from the end clears the end.
-fn seek_to(snapshot: &mut PlayerSnapshot, position: f64, now: Instant) -> f64 {
-    let mut position = position.max(0.0);
-    if let Some(duration) = snapshot.duration.filter(|duration| *duration > 0.0) {
-        position = position.min(duration);
-    }
-
-    snapshot.time_pos = Some(position);
-    snapshot.time_pos_at = Some(now);
-    snapshot.eof_reached = false;
-    position
-}
-
 #[async_trait]
 impl Player for FakePlayer {
     fn snapshot(&self) -> PlayerSnapshot {
@@ -274,20 +285,17 @@ impl Player for FakePlayer {
     }
 
     async fn set_paused(&self, paused: bool) -> Result<()> {
-        {
-            let mut inner = self.accept(Command::SetPaused(paused))?;
-            if inner.snapshot.paused == paused {
-                return Ok(());
-            }
-            // mpv accepts an unpause on the last frame and then ignores it.
-            if !paused && inner.snapshot.eof_reached {
-                return Ok(());
-            }
-
-            settle(&mut inner.snapshot, Instant::now());
-            inner.snapshot.paused = paused;
+        let mut inner = self.accept(Command::SetPaused(paused)).await?;
+        if inner.snapshot.paused == paused {
+            return Ok(());
+        }
+        // mpv accepts an unpause on the last frame and then ignores it.
+        if !paused && inner.snapshot.eof_reached {
+            return Ok(());
         }
 
+        settle(&mut inner.snapshot, Instant::now());
+        inner.snapshot.paused = paused;
         self.push(PlayerEvent::PauseChanged {
             paused,
             origin: Origin::Ours,
@@ -296,35 +304,25 @@ impl Player for FakePlayer {
     }
 
     async fn seek(&self, position: f64) -> Result<()> {
-        let position = {
-            let mut inner = self.accept(Command::Seek(position))?;
-            if inner.snapshot.file.is_none() {
-                return Err(SyncPartyError::PlayerFailed(
-                    "nothing is loaded to seek in".to_owned(),
-                ));
-            }
+        let mut inner = self.accept(Command::Seek(position)).await?;
+        if inner.snapshot.file.is_none() {
+            return Err(SyncPartyError::PlayerFailed(
+                "nothing is loaded to seek in".to_owned(),
+            ));
+        }
 
-            seek_to(&mut inner.snapshot, position, Instant::now())
-        };
-
-        self.push(PlayerEvent::Seeked {
-            position,
-            origin: Origin::Ours,
-        });
+        self.seek_to(&mut inner.snapshot, position, Origin::Ours);
         Ok(())
     }
 
     async fn set_speed(&self, speed: f64) -> Result<()> {
-        {
-            let mut inner = self.accept(Command::SetSpeed(speed))?;
-            if (inner.snapshot.speed - speed).abs() < 1e-3 {
-                return Ok(());
-            }
-
-            settle(&mut inner.snapshot, Instant::now());
-            inner.snapshot.speed = speed;
+        let mut inner = self.accept(Command::SetSpeed(speed)).await?;
+        if (inner.snapshot.speed - speed).abs() < 1e-3 {
+            return Ok(());
         }
 
+        settle(&mut inner.snapshot, Instant::now());
+        inner.snapshot.speed = speed;
         self.push(PlayerEvent::SpeedChanged {
             speed,
             origin: Origin::Ours,
@@ -333,7 +331,10 @@ impl Player for FakePlayer {
     }
 
     async fn load(&self, path: &Path) -> Result<()> {
-        let duration = self.accept(Command::Load(path.to_owned()))?.media_duration;
+        let duration = self
+            .accept(Command::Load(path.to_owned()))
+            .await?
+            .media_duration;
 
         let Some(metadata) = std::fs::metadata(path).ok().filter(|meta| meta.is_file()) else {
             return Err(SyncPartyError::PlayerFailed(format!(
@@ -362,16 +363,15 @@ impl Player for FakePlayer {
             text: text.to_owned(),
             duration,
         })
+        .await
         .map(drop)
     }
 
     async fn quit(&self) -> Result<()> {
-        {
-            let mut inner = self.lock();
-            inner.commands.push(Command::Quit);
-            if std::mem::replace(&mut inner.closed, true) {
-                return Ok(());
-            }
+        let mut inner = self.lock();
+        inner.commands.push(Command::Quit);
+        if std::mem::replace(&mut inner.closed, true) {
+            return Ok(());
         }
 
         self.push(PlayerEvent::Closed(CloseReason::QuitRequested));
@@ -560,6 +560,47 @@ mod tests {
 
         player.seek(10.0).await.expect("seek back");
         player.set_paused(false).await.expect("unpause");
+        assert!(!player.snapshot().paused);
+    }
+
+    #[tokio::test]
+    async fn seeking_past_the_end_lands_on_the_last_frame_paused_the_way_mpv_does() {
+        let (player, mut events) = FakePlayer::new();
+        player.user_opens("/films/Film.mkv", Some(1200.0));
+        player.user_pauses(false);
+        drain(&mut events);
+
+        player.seek(6000.0).await.expect("seek");
+
+        let snapshot = player.snapshot();
+        assert_eq!(snapshot.time_pos, Some(1200.0));
+        assert!(snapshot.eof_reached && snapshot.paused);
+        assert_eq!(
+            drain(&mut events),
+            vec![
+                PlayerEvent::Seeked {
+                    position: 1200.0,
+                    origin: Origin::Ours
+                },
+                PlayerEvent::EndOfFile,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_player_answers_nothing_until_it_is_released() {
+        let (player, _events) = FakePlayer::new();
+        player.hang(true);
+
+        let waited =
+            tokio::time::timeout(Duration::from_millis(50), player.set_paused(false)).await;
+        assert!(waited.is_err(), "a hung player answered");
+        assert_eq!(player.commands(), vec![Command::SetPaused(false)]);
+        assert!(player.snapshot().paused);
+
+        let pending = player.set_paused(false);
+        player.hang(false);
+        pending.await.expect("answered once released");
         assert!(!player.snapshot().paused);
     }
 

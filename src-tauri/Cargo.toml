@@ -39,6 +39,9 @@ tokio = { version = "1", features = [
     "process",
     "fs",
 ] }
+# For `CancellationToken` alone: how an app that is exiting calls off a watch
+# that is still connecting, or still starting mpv.
+tokio-util = "0.7"
 async-trait = "0.1"
 futures = "0.3"
 thiserror = "2"

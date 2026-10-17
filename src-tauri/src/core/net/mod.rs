@@ -12,8 +12,9 @@
 //! not, they fall back to a relay that forwards ciphertext it cannot read.
 //!
 //! What crosses this transport is not video. Everyone still plays their own
-//! local copy of the file; only Syncplay's control messages travel, which is a
-//! few hundred bytes a second even in a busy room.
+//! local copy of the file; only the sync protocol's messages travel — still
+//! Syncplay's protocol, spoken by syncparty's own client and server — which is
+//! a few hundred bytes a second even in a busy room.
 
 mod tunnel;
 
@@ -129,7 +130,7 @@ impl PartyEndpoint {
     /// The key is generated once and kept, which is what makes an invite
     /// outlive a restart: the code names the endpoint, so a new key on every
     /// launch would silently invalidate every code already sent out. It is the
-    /// same reasoning that keeps the Syncplay salt stable.
+    /// same reasoning that keeps the server's salt stable.
     pub async fn bind_hosting(secrets: &SecretStore) -> Result<Self> {
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(stored_key(secrets)?)

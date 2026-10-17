@@ -7,6 +7,7 @@ use crate::core::config::{AppMode, SecretStore};
 use crate::core::deps::{DependencyManager, PreflightReport};
 use crate::core::net::{self, TransportReport};
 use crate::core::session::{PartySession, SessionState};
+use crate::core::watch::WatchState;
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -36,6 +37,11 @@ pub struct DiagnosticsReport {
     /// bury it.
     pub transport: Option<TransportReport>,
     pub transport_error: Option<String>,
+    /// What this machine is watching: whether the sync connection is up and
+    /// what the player is doing. `None` when nothing is being watched. The
+    /// file name is in here; the UI leaves it out of anything copied for
+    /// sharing.
+    pub watch: Option<WatchState>,
 }
 
 /// Collects independent checks without changing machine or session state.
@@ -65,5 +71,6 @@ pub async fn collect(
         session: state,
         transport,
         transport_error,
+        watch: session.watch_state(),
     }
 }

@@ -2,6 +2,7 @@
 import type { PreflightReport } from "./PreflightReport";
 import type { SessionState } from "./SessionState";
 import type { TransportReport } from "./TransportReport";
+import type { WatchState } from "./WatchState";
 
 export type DiagnosticsReport = { appVersion: string, operatingSystem: string, 
 /**
@@ -28,4 +29,11 @@ endpoint: string | null, session: SessionState,
  * single most useful thing this screen can say, and a blank section would
  * bury it.
  */
-transport: TransportReport | null, transportError: string | null, };
+transport: TransportReport | null, transportError: string | null, 
+/**
+ * What this machine is watching: whether the sync connection is up and
+ * what the player is doing. `None` when nothing is being watched. The
+ * file name is in here; the UI leaves it out of anything copied for
+ * sharing.
+ */
+watch: WatchState | null, };

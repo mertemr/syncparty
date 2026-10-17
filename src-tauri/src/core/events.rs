@@ -39,11 +39,13 @@ pub enum AppEvent {
     /// The session state machine advanced.
     SessionChanged { state: SessionState },
 
-    /// Live room contents, pushed rather than polled — by the room monitor on
-    /// a host, and by the sync client on a guest.
+    /// Live room contents, pushed rather than polled. One source at a time:
+    /// the room monitor on a host that has it on, otherwise this machine's
+    /// own sync client — a guest's always, a host's while it is watching.
     RoomUpdated { snapshot: RoomSnapshot },
 
-    /// A line of server-side diagnostics: who joined, who left, what failed.
+    /// A line of the sync server's diagnostics: who joined, who left, what
+    /// failed.
     ServerLog { line: String, is_error: bool },
 
     /// The app was opened through a `syncparty://` link. The UI switches to

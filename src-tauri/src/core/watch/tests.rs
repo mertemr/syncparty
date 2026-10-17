@@ -68,6 +68,7 @@ fn config(server: &ServerConfig, password: &str) -> WatchConfig {
             },
         },
         connect_timeout: PATIENCE,
+        cancel: CancellationToken::new(),
     }
 }
 
@@ -266,6 +267,55 @@ async fn a_party_that_never_answers_is_a_sync_failure() {
     .expect("no answer");
 
     assert_eq!(error.kind(), "sync_failed");
+    assert!(launcher.launched().is_empty());
+    silent.abort();
+}
+
+#[tokio::test]
+async fn a_watch_called_off_while_the_party_has_not_answered_opens_no_player() {
+    // Accepts the connection and then says nothing at all.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+
+    let launcher = Arc::new(FakeLauncher::new());
+    let mut watch_config = config(
+        &ServerConfig {
+            port: address.port(),
+            password: PASSWORD.to_owned(),
+            salt: String::new(),
+            timing: ServerTiming::default(),
+        },
+        PASSWORD,
+    );
+    // Far longer than the test waits: only the call-off can end it in time.
+    watch_config.connect_timeout = PATIENCE * 4;
+    let cancel = watch_config.cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+    });
+
+    let started = tokio::time::Instant::now();
+    let error = WatchSession::start(
+        watch_config,
+        Arc::clone(&launcher) as Arc<dyn PlayerLauncher>,
+        Arc::new(NullEventBus),
+        true,
+    )
+    .await
+    .err()
+    .expect("called off");
+
+    assert_eq!(error.kind(), "not_watching");
+    assert!(started.elapsed() < PATIENCE, "took {:?}", started.elapsed());
     assert!(launcher.launched().is_empty());
     silent.abort();
 }
@@ -640,8 +690,10 @@ async fn a_player_that_starts_after_the_watch_stopped_is_closed_again() {
     while launcher.launches.load(Ordering::SeqCst) < 2 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    watch.stop().await;
+    // Released first, so the launch has finished by the time the reopen
+    // runs again — and it finds the watch already stopped.
     launcher.released.notify_one();
+    watch.stop().await;
 
     let outcome = tokio::time::timeout(PATIENCE, reopening)
         .await
@@ -651,6 +703,60 @@ async fn a_player_that_starts_after_the_watch_stopped_is_closed_again() {
         outcome.err().map(|error| error.kind()),
         Some("not_watching")
     );
+    assert_eq!(launcher.fake.launched().len(), 2, "the late one started");
     let late = launcher.fake.last().expect("the late player");
     assert!(late.is_closed(), "nobody is left to watch it");
+}
+
+#[tokio::test]
+async fn stopping_abandons_a_player_that_is_still_starting() {
+    let (_server, server_config) = server().await;
+    let launcher = Arc::new(HeldLauncher {
+        fake: FakeLauncher::new(),
+        hold: AtomicBool::new(true),
+        released: tokio::sync::Notify::new(),
+        launches: AtomicUsize::new(0),
+    });
+    let watch = Arc::new(
+        WatchSession::start(
+            config(&server_config, PASSWORD),
+            Arc::clone(&launcher) as Arc<dyn PlayerLauncher>,
+            Arc::new(NullEventBus),
+            false,
+        )
+        .await
+        .expect("started"),
+    );
+    launcher.fake.last().expect("first").user_closes();
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while watch.state().player != PlayerStatus::Closed {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let reopening = tokio::spawn({
+        let watch = Arc::clone(&watch);
+        async move { watch.reopen_player().await }
+    });
+    while launcher.launches.load(Ordering::SeqCst) < 2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // Never released: a launch that would not finish on its own.
+    tokio::time::timeout(PATIENCE, watch.stop())
+        .await
+        .expect("stopping does not wait for the player to start");
+
+    let outcome = tokio::time::timeout(PATIENCE, reopening)
+        .await
+        .expect("the reopen is called off")
+        .expect("no panic");
+    assert_eq!(
+        outcome.err().map(|error| error.kind()),
+        Some("not_watching")
+    );
+    assert_eq!(
+        launcher.fake.launched().len(),
+        1,
+        "the launch was dropped before it produced a player"
+    );
 }

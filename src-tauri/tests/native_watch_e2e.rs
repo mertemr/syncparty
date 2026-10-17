@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
+use tokio_util::sync::CancellationToken;
 
 use syncparty_lib::core::error::Result;
 use syncparty_lib::core::events::NullEventBus;
@@ -219,6 +220,7 @@ impl Viewer {
                     timing: ClientTiming::default(),
                 },
                 connect_timeout: CONNECT_TIMEOUT,
+                cancel: CancellationToken::new(),
             },
             Arc::clone(&players) as Arc<dyn PlayerLauncher>,
             Arc::new(NullEventBus),

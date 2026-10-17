@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use crate::core::events::test_support::RecordingEventBus;
 use crate::core::events::NullEventBus;
 use crate::core::paths::AppPaths;
 use crate::core::player::fake::{Command, FakeLauncher, FakePlayer};
+use crate::core::player::{Player, PlayerEvents};
 use crate::core::syncplay::{NativeServer, ServerTiming};
 
 /// Discards whatever arrives on the control channel — these tests are not
@@ -71,6 +73,11 @@ impl LoopbackDialer {
 
     fn closes(&self) -> usize {
         self.closes.load(Ordering::SeqCst)
+    }
+
+    /// Sends every route from now on somewhere else.
+    fn redirect(&self, address: SocketAddr) {
+        *self.address.lock().expect("address") = address;
     }
 
     /// What the host stopping its party does to the route a guest holds: it
@@ -891,6 +898,228 @@ async fn shutting_down_leaves_the_party_a_guest_is_in() {
         party.remembered().is_some(),
         "quitting the app is not leaving: the party is resumed next time"
     );
+}
+
+/// A server that takes connections and never says a word, so a join waits
+/// on it for as long as it is allowed to.
+struct Silent {
+    address: SocketAddr,
+    accepted: Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Silent {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let accepted = Arc::clone(&accepted);
+            async move {
+                let mut held = Vec::new();
+                while let Ok((stream, _)) = listener.accept().await {
+                    held.push(stream);
+                    accepted.notify_one();
+                }
+            }
+        });
+        Self {
+            address,
+            accepted,
+            task,
+        }
+    }
+}
+
+impl Drop for Silent {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A player that never finishes starting, and says when it was given up on —
+/// which, for mpv, is when it is killed.
+#[derive(Default)]
+struct StuckLauncher {
+    entered: tokio::sync::Notify,
+    abandoned: AtomicBool,
+}
+
+#[async_trait]
+impl PlayerLauncher for StuckLauncher {
+    async fn launch(&self) -> Result<(Arc<dyn Player>, PlayerEvents)> {
+        struct Abandoned<'a>(&'a AtomicBool);
+        impl Drop for Abandoned<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let _abandoned = Abandoned(&self.abandoned);
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// A player that starts at the very instant the app begins exiting.
+#[derive(Default)]
+struct LastMomentLauncher {
+    fake: FakeLauncher,
+    exiting: std::sync::OnceLock<CancellationToken>,
+}
+
+#[async_trait]
+impl PlayerLauncher for LastMomentLauncher {
+    async fn launch(&self) -> Result<(Arc<dyn Player>, PlayerEvents)> {
+        let launched = self.fake.launch().await;
+        self.exiting.get().expect("wired to the session").cancel();
+        launched
+    }
+}
+
+fn players_of<L: PlayerLauncher + 'static>(launcher: &Arc<L>) -> PlayerSource {
+    let launcher = Arc::clone(launcher);
+    Arc::new(move |_: &ConfigStore| Ok(Arc::clone(&launcher) as Arc<dyn PlayerLauncher>))
+}
+
+/// Well inside both the time a join may wait for the host and the time the
+/// app gives itself to exit: a shutdown slower than this waited for the join.
+const PROMPTLY: Duration = Duration::from_secs(3);
+
+/// Runs a join and an exit side by side. Bounded, so a join that does not hear
+/// the exit fails the test instead of hanging it.
+async fn racing<T>(join: impl Future<Output = T>, exit: impl Future<Output = ()>) -> T {
+    let (joined, ()) =
+        tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(join, exit) })
+            .await
+            .expect("the join never heard the app was exiting");
+    joined
+}
+
+#[tokio::test]
+async fn shutting_down_calls_off_a_join_the_host_has_not_answered() {
+    let party = Party::new("shutdown-connecting").await;
+    let silent = Silent::start().await;
+    party.dialer.redirect(silent.address);
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        silent.accepted.notified().await;
+        party.session.shutdown().await;
+    })
+    .await;
+
+    assert!(joined.is_err());
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        party.launcher.launched().is_empty(),
+        "no player was started"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn shutting_down_abandons_a_player_that_is_still_starting() {
+    let stuck = Arc::new(StuckLauncher::default());
+    let party = Party::with_players("shutdown-launching", Some(players_of(&stuck))).await;
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        stuck.entered.notified().await;
+        party.session.shutdown().await;
+    })
+    .await;
+
+    assert!(joined.is_err());
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        stuck.abandoned.load(Ordering::SeqCst),
+        "the launch was dropped"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn shutting_down_abandons_the_hosts_player_that_is_still_starting() {
+    let stuck = Arc::new(StuckLauncher::default());
+    let party = Party::with_players("shutdown-host-launching", Some(players_of(&stuck))).await;
+    party.hosting(true).await;
+
+    let started = tokio::time::Instant::now();
+    let watching = racing(party.session.join_as_host(), async {
+        stuck.entered.notified().await;
+        party.session.shutdown().await;
+    })
+    .await;
+
+    assert!(watching.is_err());
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        stuck.abandoned.load(Ordering::SeqCst),
+        "the launch was dropped"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert!(matches!(party.session.state().await, SessionState::Idle));
+}
+
+#[tokio::test]
+async fn a_player_that_starts_as_the_app_exits_is_closed_again() {
+    let late = Arc::new(LastMomentLauncher::default());
+    let party = Party::with_players("exit-as-started", Some(players_of(&late))).await;
+    let _ = late.exiting.set(party.session.closing.clone());
+
+    let error = party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect_err("the app is exiting");
+
+    assert_eq!(error.kind(), "sync_failed");
+    assert!(late.fake.last().expect("it started").is_closed());
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn the_hosts_player_that_starts_as_the_app_exits_is_closed_again() {
+    let late = Arc::new(LastMomentLauncher::default());
+    let party = Party::with_players("host-exit-as-started", Some(players_of(&late))).await;
+    let _ = late.exiting.set(party.session.closing.clone());
+    party.hosting(true).await;
+
+    let error = party
+        .session
+        .join_as_host()
+        .await
+        .expect_err("the app is exiting");
+
+    assert_eq!(error.kind(), "sync_failed");
+    assert!(late.fake.last().expect("it started").is_closed());
+    assert_eq!(party.session.watch_state(), None);
+}
+
+#[tokio::test]
+async fn nothing_is_joined_once_the_app_has_shut_down() {
+    let party = Party::new("join-after-shutdown").await;
+    party.session.shutdown().await;
+
+    let joined = party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await;
+
+    assert!(joined.is_err());
+    assert_eq!(party.dialer.dials(), 0);
+    assert!(party.launcher.launched().is_empty());
 }
 
 #[test]

@@ -26,6 +26,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use crate::core::error::{Result, SyncPartyError};
@@ -146,6 +147,11 @@ pub struct WatchConfig {
     /// How long to wait for the party to let this machine in.
     /// [`CONNECT_TIMEOUT`] everywhere but the tests.
     pub connect_timeout: Duration,
+    /// Cancelled when nobody wants this watch any more — the app is exiting.
+    /// It cuts short every wait the watch would otherwise sit out: for the
+    /// party to answer, and for mpv to start. Where nothing will ever call a
+    /// watch off, a token nobody cancels does.
+    pub cancel: CancellationToken,
 }
 
 /// One machine watching one party.
@@ -167,6 +173,10 @@ pub struct WatchSession {
     /// not wait behind a file that takes thirty seconds to open.
     player_lock: tokio::sync::Mutex<()>,
     publisher: Mutex<Option<JoinHandle<()>>>,
+    /// Cancelled by `stop`, or with the config's token. A launch still in
+    /// progress is abandoned then rather than waited out, which also kills
+    /// the mpv it had started.
+    cancel: CancellationToken,
 }
 
 /// What the publishing task and the handle both look at.
@@ -255,11 +265,16 @@ impl Shared {
 impl WatchSession {
     /// Connects to the party, then opens the player.
     ///
-    /// Returns an error only when the party would not have this machine: the
+    /// Returns an error when the party would not have this machine: the
     /// server turned it away (`sync_rejected`) or never answered
-    /// (`sync_failed`). A player that will not start is not one of those. The
-    /// session is up either way, and the state says the player failed, so
-    /// the UI can offer to try again.
+    /// (`sync_failed`) — or when the config's token was cancelled before it
+    /// did (`not_watching`). A player that will not start is not one of
+    /// those. The session is up either way, and the state says the player
+    /// failed, so the UI can offer to try again.
+    ///
+    /// A token cancelled while the player is starting abandons that launch,
+    /// and the session still comes back, without a player: whoever cancelled
+    /// it is the one to stop it.
     pub async fn start(
         config: WatchConfig,
         launcher: Arc<dyn PlayerLauncher>,
@@ -267,8 +282,14 @@ impl WatchSession {
         publish_room: bool,
     ) -> Result<Self> {
         let room = config.client.room.clone();
+        let cancel = config.cancel.child_token();
         let client = SyncClient::start(config.client);
-        if let Err(error) = client.wait_connected(config.connect_timeout).await {
+
+        let connected = tokio::select! {
+            connected = client.wait_connected(config.connect_timeout) => connected,
+            () = cancel.cancelled() => Err(SyncPartyError::NotWatching),
+        };
+        if let Err(error) = connected {
             client.stop().await;
             return Err(error);
         }
@@ -305,12 +326,17 @@ impl WatchSession {
             publish_room,
             player_lock: tokio::sync::Mutex::new(()),
             publisher: Mutex::new(Some(publisher)),
+            cancel,
         };
 
         {
             let _launching = session.player_lock.lock().await;
+            // A launch called off is not a player that failed: `launch` has
+            // already said so, and the caller is about to stop the session.
             if let Err(error) = session.launch().await {
-                tracing::warn!(%error, "the player did not start; the party is joined without it");
+                if !session.cancel.is_cancelled() {
+                    tracing::warn!(%error, "the player did not start; the party is joined without it");
+                }
             }
         }
 
@@ -386,6 +412,7 @@ impl WatchSession {
             }
             slot.player.take()
         };
+        self.cancel.cancel();
 
         let publisher = self
             .publisher
@@ -429,14 +456,26 @@ impl WatchSession {
     async fn launch(&self) -> Result<()> {
         {
             let mut slot = self.shared.lock();
-            if slot.stopped {
+            if slot.stopped || self.cancel.is_cancelled() {
                 return Err(SyncPartyError::NotWatching);
             }
             slot.status = PlayerStatus::Starting;
         }
         self.shared.changed.notify_one();
 
-        let launched = self.launcher.launch().await;
+        // Dropping a launch part way through kills the mpv it started, so a
+        // watch that is called off does not wait ten seconds for a window
+        // only to close it again. A launch that has finished is taken even
+        // if the call-off came in the same instant: the player is real by
+        // then, and the slot below sees to it.
+        let launched = tokio::select! {
+            biased;
+            launched = self.launcher.launch() => launched,
+            () = self.cancel.cancelled() => {
+                tracing::info!("a player still starting was abandoned");
+                return Err(SyncPartyError::NotWatching);
+            }
+        };
 
         // Decided under the lock and acted on after it, so no guard is held
         // across a wait.

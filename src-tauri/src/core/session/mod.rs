@@ -13,12 +13,12 @@ mod route;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::{Mutex, OnceCell};
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use crate::core::config::{generate_token, ConfigStore, SecretKey, SecretStore};
@@ -147,9 +147,10 @@ pub struct PartySession {
     /// joins — a double click, a resume racing a paste — happen one after
     /// the other and the second finds the first already done.
     lifecycle: Mutex<()>,
-    /// Set once the app is exiting, so a join still in flight does not leave
-    /// a player behind.
-    closing: AtomicBool,
+    /// Cancelled once the app is exiting. Every watch is started with it, so
+    /// a join still waiting for the host or for mpv gives up at once instead
+    /// of opening a player as the app goes.
+    closing: CancellationToken,
     /// Where the party log is written. Attached after construction, like
     /// `MovieVote`'s — `session` is built before the store exists.
     store: OnceCell<Arc<MovieStore>>,
@@ -190,7 +191,7 @@ impl PartySession {
             dialer: Arc::new(TunnelDialer),
             watch: std::sync::Mutex::new(None),
             lifecycle: Mutex::new(()),
-            closing: AtomicBool::new(false),
+            closing: CancellationToken::new(),
             store: OnceCell::new(),
             log: Arc::new(Mutex::new(None)),
         }
@@ -552,6 +553,9 @@ impl PartySession {
     /// refuses, is not the one restored on next startup.
     pub async fn join(&self, invite: &Invite) -> Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
+        if self.closing.is_cancelled() {
+            return Err(closing());
+        }
 
         let already_in = match self.guest.lock().await.as_ref() {
             Some(guest) if guest.invite == *invite => self.still_in(guest),
@@ -568,7 +572,10 @@ impl PartySession {
         self.leave_locked().await;
         self.stop_watch(None).await;
 
-        let route = self.dialer.dial(invite, Arc::clone(&self.control)).await?;
+        let route = tokio::select! {
+            route = self.dialer.dial(invite, Arc::clone(&self.control)) => route?,
+            () = self.closing.cancelled() => return Err(closing()),
+        };
         let config = self.watch_config(
             WatchRole::Guest,
             route.local_addr(),
@@ -584,7 +591,10 @@ impl PartySession {
             }
         };
 
-        if self.closing.load(Ordering::SeqCst) {
+        // The app began exiting while this was starting. The watch came back
+        // anyway — a cancelled start still returns one — and nobody else is
+        // going to stop it.
+        if self.closing.is_cancelled() {
             watch.stop().await;
             route.close().await;
             return Err(closing());
@@ -671,6 +681,9 @@ impl PartySession {
     /// resumed on next startup. A no-op if the host is already watching.
     pub async fn join_as_host(&self) -> Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
+        if self.closing.is_cancelled() {
+            return Err(closing());
+        }
 
         let SessionState::Hosting(info) = self.state().await else {
             return Err(SyncPartyError::ServerNotRunning);
@@ -703,7 +716,7 @@ impl PartySession {
         let watch =
             WatchSession::start(config, launcher, Arc::clone(&self.bus), publish_room).await?;
 
-        if self.closing.load(Ordering::SeqCst) {
+        if self.closing.is_cancelled() {
             watch.stop().await;
             return Err(closing());
         }
@@ -746,15 +759,21 @@ impl PartySession {
     ///
     /// The player goes first and without waiting on anything else: it is the
     /// one thing that would outlive syncparty, carrying on unsynchronised.
-    /// All of it is bounded, because an exit that hangs is worse than one
-    /// that leaves a party to time out.
+    /// A join still in flight is called off before anything else, so it lets
+    /// go of the lifecycle lock at once rather than at the end of its wait
+    /// for the host, and never gets as far as starting mpv. All of it is
+    /// bounded, because an exit that hangs is worse than one that leaves a
+    /// party to time out.
     pub async fn shutdown(&self) {
-        self.closing.store(true, Ordering::SeqCst);
+        self.closing.cancel();
 
         let everything = async {
             self.stop_watch(None).await;
 
             let _lifecycle = self.lifecycle.lock().await;
+            // A join that was installing its watch as the token was
+            // cancelled finished while this waited for the lock.
+            self.stop_watch(None).await;
             self.leave_locked().await;
             if !matches!(self.state().await, SessionState::Idle) {
                 if let Err(error) = self.stop_hosting_locked().await {
@@ -791,6 +810,7 @@ impl PartySession {
                 timing: ClientTiming::default(),
             },
             connect_timeout: CONNECT_TIMEOUT,
+            cancel: self.closing.clone(),
         }
     }
 

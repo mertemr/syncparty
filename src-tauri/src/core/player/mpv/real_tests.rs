@@ -15,11 +15,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{TcpListener, UnixStream};
 
-use super::{MpvLauncher, MpvPlayer};
+use super::connection::Liveness;
+use super::{MpvLauncher, MpvPlayer, Timing};
 use crate::core::player::{
     find_mpv, CloseReason, LaunchMode, Origin, Player, PlayerEvent, PlayerEvents,
 };
@@ -535,4 +536,81 @@ async fn real_mpv_unloads_a_playing_file_replaced_by_one_it_cannot_open() {
     assert!(player.snapshot().file.is_none());
 
     quit_and_check_closed(&player, &mut events).await;
+}
+
+/// mpv's process id, asked over a connection of its own.
+async fn pid_of(player: &MpvPlayer) -> u32 {
+    let stream = UnixStream::connect(player.endpoint())
+        .await
+        .expect("a second connection");
+    let (reader, mut writer) = stream.into_split();
+    writer
+        .write_all(b"{\"command\":[\"get_property\",\"pid\"],\"request_id\":7}\n")
+        .await
+        .expect("write");
+
+    let mut lines = BufReader::new(reader).lines();
+    loop {
+        let line = tokio::time::timeout(SOON, lines.next_line())
+            .await
+            .expect("an answer in time")
+            .expect("readable")
+            .expect("an answer before the end");
+        let message: Value = serde_json::from_str(&line).expect("JSON");
+        if message["request_id"] == 7 {
+            let pid = message["data"].as_u64().expect("a pid");
+            return u32::try_from(pid).expect("a pid fits");
+        }
+    }
+}
+
+/// Freezes a process the way a hung player looks from outside.
+fn freeze(pid: u32) {
+    let status = std::process::Command::new("kill")
+        .args(["-STOP", &pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(status.success());
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn real_mpv_that_stops_answering_is_killed_and_reported_as_crashed() {
+    let fixture = Fixture::make("frozen");
+    let launcher = MpvLauncher::new(mpv(), LaunchMode::Headless).with_timing(Timing {
+        liveness: Liveness {
+            probe_every: Duration::from_millis(100),
+            hung_after: Duration::from_millis(500),
+        },
+        ..Timing::default()
+    });
+    let (player, mut events) = launcher.spawn().await.expect("mpv starts");
+    player.load(&fixture.film).await.expect("loaded");
+    player.set_paused(false).await.expect("playing");
+    let socket = PathBuf::from(player.endpoint());
+
+    freeze(pid_of(&player).await);
+
+    let (reason, _) = wait_for(&mut events, SOON, |event| match event {
+        PlayerEvent::Closed(reason) => Some(reason.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(reason, CloseReason::Crashed(None));
+    assert!(!socket.exists());
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn real_mpv_frozen_when_asked_to_quit_is_killed() {
+    let launcher = MpvLauncher::new(mpv(), LaunchMode::Headless).with_timing(Timing {
+        quit_grace: Duration::from_millis(300),
+        ..Timing::default()
+    });
+    let (player, mut events) = launcher.spawn().await.expect("mpv starts");
+    freeze(pid_of(&player).await);
+
+    let started = Instant::now();
+    quit_and_check_closed(&player, &mut events).await;
+    assert!(started.elapsed() < SOON, "{:?}", started.elapsed());
 }

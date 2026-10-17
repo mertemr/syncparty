@@ -19,12 +19,14 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::watch;
 
+use super::connection::{Liveness, PROBE};
 use super::endpoint::Endpoint;
 use super::tracker::{NOT_A_FILM, OBSERVED};
 use super::transport::{self, Process};
-use super::{start, MpvPlayer};
+use super::{start, MpvLauncher, MpvPlayer, Timing};
+use crate::core::error::Result;
 use crate::core::player::{
-    CloseReason, LoadedFile, Origin, Player, PlayerEvent, PlayerEvents, PlayerSnapshot,
+    CloseReason, LaunchMode, LoadedFile, Origin, Player, PlayerEvent, PlayerEvents, PlayerSnapshot,
 };
 
 /// How long anything the fake waits for may take. Everything here is a
@@ -109,19 +111,54 @@ impl FakeMpv {
         }
     }
 
-    /// The next request the driver sent: its id and its command.
-    async fn request(&mut self) -> (i64, Value) {
-        let mut line = String::new();
-        tokio::time::timeout(PATIENCE, self.lines.read_line(&mut line))
+    /// The next request the driver sent, whatever it is: its id and its
+    /// command.
+    async fn next_request(&mut self) -> (i64, Value) {
+        self.next_request_within(PATIENCE)
             .await
             .expect("a request in time")
+    }
+
+    async fn next_request_within(&mut self, within: Duration) -> Option<(i64, Value)> {
+        let mut line = String::new();
+        tokio::time::timeout(within, self.lines.read_line(&mut line))
+            .await
+            .ok()?
             .expect("readable");
         let message: Value = serde_json::from_str(&line).expect("requests are JSON");
         let id = message["request_id"]
             .as_i64()
             .expect("an integer request id");
         assert!(id > 0, "0 is mpv's 'no id': {line}");
-        (id, message["command"].clone())
+        Some((id, message["command"].clone()))
+    }
+
+    /// The next request that is not a liveness probe. Probes are answered
+    /// on the way, as any mpv answers them, so no test depends on when the
+    /// driver happens to ask.
+    async fn request(&mut self) -> (i64, Value) {
+        loop {
+            let (id, command) = self.next_request().await;
+            if command != json!(PROBE) {
+                return (id, command);
+            }
+            self.succeed(id, json!(4242)).await;
+        }
+    }
+
+    /// Answers every probe for `period`, and says how many there were.
+    async fn answer_probes_for(&mut self, period: Duration) -> usize {
+        let until = Instant::now() + period;
+        let mut answered = 0;
+        while let Some((id, command)) = self
+            .next_request_within(until.saturating_duration_since(Instant::now()))
+            .await
+        {
+            assert_eq!(command, json!(PROBE), "only probes were expected");
+            self.succeed(id, json!(4242)).await;
+            answered += 1;
+        }
+        answered
     }
 
     async fn raw(&mut self, line: &[u8]) {
@@ -162,6 +199,12 @@ impl FakeMpv {
     /// the observe replies carry no data, and each is followed by the
     /// property's current value — missing for one that is unavailable.
     async fn answer_startup(&mut self) {
+        self.answer_startup_as("mpv v0.41.0").await;
+    }
+
+    async fn answer_startup_as(&mut self, version: &str) {
+        self.answer_version(version).await;
+
         for (index, name) in OBSERVED.iter().enumerate() {
             let (id, command) = self.request().await;
             assert_eq!(command, json!(["observe_property", index + 1, name]));
@@ -179,9 +222,12 @@ impl FakeMpv {
         }
 
         self.accept(json!(["request_log_messages", "error"])).await;
+    }
+
+    async fn answer_version(&mut self, version: &str) {
         let (id, command) = self.request().await;
         assert_eq!(command, json!(["get_property", "mpv-version"]));
-        self.succeed(id, json!("mpv v0.41.0")).await;
+        self.succeed(id, json!(version)).await;
     }
 }
 
@@ -192,10 +238,19 @@ struct Scratch {
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
+        Self::at(std::env::temp_dir().join(format!(
             "syncparty-mpv-script-{label}-{}",
             std::process::id()
-        ));
+        )))
+    }
+
+    /// One short enough to hold a socket: macOS's `$TMPDIR` alone takes
+    /// half of the 103 bytes a socket path may have there.
+    fn short(label: &str) -> Self {
+        Self::at(PathBuf::from("/tmp").join(format!("sp-{label}-{}", std::process::id())))
+    }
+
+    fn at(dir: PathBuf) -> Self {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         Self { dir }
@@ -206,6 +261,61 @@ impl Scratch {
         std::fs::write(&path, b"not really a film").expect("scratch file");
         path
     }
+
+    fn folder(&self, name: &str) -> PathBuf {
+        let path = self.dir.join(name);
+        std::fs::create_dir(&path).expect("scratch folder");
+        path
+    }
+
+    /// A stand-in for the mpv executable: a shell script that ignores the
+    /// options it is given.
+    fn stand_in(&self, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = self.dir.join("mpv");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("stand-in");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        path
+    }
+}
+
+/// Starts `launcher` with its endpoint under `base`, where the test can see
+/// what is left behind.
+///
+/// A script written a moment ago can be "busy" to run: a child that another
+/// test forked meanwhile holds it open for writing until it execs. That
+/// clears up at once, so a busy script is simply tried again.
+async fn spawn_under(
+    launcher: &MpvLauncher,
+    base: &Path,
+) -> Result<(Arc<MpvPlayer>, PlayerEvents)> {
+    for _ in 0..50 {
+        let endpoint = Endpoint::create_in(&[base.to_path_buf()]).expect("endpoint");
+        match launcher.spawn_at(endpoint).await {
+            Err(error) if error.to_string().contains("os error 26") => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            started => return started,
+        }
+    }
+    panic!("the stand-in stayed busy");
+}
+
+fn is_empty(dir: &Path) -> bool {
+    std::fs::read_dir(dir).expect("readable").next().is_none()
+}
+
+/// Waits until `done` holds, or fails the test.
+async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(PATIENCE, async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what} did not happen in time"));
 }
 
 impl Drop for Scratch {
@@ -223,7 +333,18 @@ struct Rig {
     socket: PathBuf,
 }
 
-async fn rig() -> Rig {
+/// The driver's end of a socket and the fake's end, before the driver has
+/// said anything.
+struct Wired {
+    client: UnixStream,
+    mpv: FakeMpv,
+    process: ScriptedProcess,
+    control: Arc<ExitControl>,
+    endpoint: Endpoint,
+    socket: PathBuf,
+}
+
+async fn wire() -> Wired {
     // The real endpoint, so its private directory and its removal are what
     // these tests see too.
     let endpoint = Endpoint::create().expect("endpoint");
@@ -233,8 +354,34 @@ async fn rig() -> Rig {
     let (server, _) = listener.accept().await.expect("accept");
     let (process, control) = scripted_process();
 
-    let mut mpv = FakeMpv::new(server);
-    let (started, ()) = tokio::join!(start(client, process, endpoint), mpv.answer_startup());
+    Wired {
+        client,
+        mpv: FakeMpv::new(server),
+        process,
+        control,
+        endpoint,
+        socket,
+    }
+}
+
+async fn rig() -> Rig {
+    rig_with(Timing::default()).await
+}
+
+async fn rig_with(timing: Timing) -> Rig {
+    let Wired {
+        client,
+        mut mpv,
+        process,
+        control,
+        endpoint,
+        socket,
+    } = wire().await;
+
+    let (started, ()) = tokio::join!(
+        start(client, process, endpoint, timing),
+        mpv.answer_startup()
+    );
     let (player, events) = started.expect("the driver starts");
 
     Rig {
@@ -243,6 +390,17 @@ async fn rig() -> Rig {
         mpv,
         process: control,
         socket,
+    }
+}
+
+/// Probes every 40 ms, and a hung mpv after 200 ms of them.
+fn quick_liveness() -> Timing {
+    Timing {
+        liveness: Liveness {
+            probe_every: Duration::from_millis(40),
+            hung_after: Duration::from_millis(200),
+        },
+        ..Timing::default()
     }
 }
 
@@ -1009,4 +1167,184 @@ async fn a_failed_load_over_a_playing_file_unloads_the_old_one() {
     assert_eq!(rig.next_event().await, PlayerEvent::Unloaded);
     rig.settle().await;
     rig.assert_quiet();
+}
+
+#[tokio::test]
+async fn an_mpv_older_than_syncparty_needs_is_refused_with_its_version() {
+    let Wired {
+        client,
+        mut mpv,
+        process,
+        control,
+        endpoint,
+        socket,
+    } = wire().await;
+
+    let (started, ()) = tokio::join!(
+        start(client, process, endpoint, Timing::default()),
+        mpv.answer_version("mpv 0.32.0")
+    );
+
+    let error = started.expect_err("too old");
+    let message = error.to_string();
+    assert!(message.contains("mpv 0.32.0 is too old"), "{message}");
+    assert!(message.contains("0.33 or newer"), "{message}");
+    assert_eq!(error.kind(), "player_failed");
+
+    eventually("killing it", || control.was_killed()).await;
+    drop(mpv);
+    eventually("removing its socket", || !socket.exists()).await;
+}
+
+#[tokio::test]
+async fn an_mpv_whose_version_cannot_be_read_is_driven_all_the_same() {
+    let Wired {
+        client,
+        mut mpv,
+        process,
+        control,
+        endpoint,
+        ..
+    } = wire().await;
+
+    let (started, ()) = tokio::join!(
+        start(client, process, endpoint, Timing::default()),
+        mpv.answer_startup_as("mpv git-2019-05-01")
+    );
+
+    let (player, _events) = started.expect("started");
+    assert!(!player.has_exited());
+    assert!(!control.was_killed());
+}
+
+#[tokio::test]
+async fn an_mpv_that_stops_answering_is_killed_and_reported_as_crashed() {
+    let Rig {
+        player,
+        mut events,
+        mut mpv,
+        process,
+        socket,
+    } = rig_with(quick_liveness()).await;
+
+    // A probe arrives, and from here on mpv says nothing at all.
+    let (_, command) = mpv.next_request().await;
+    assert_eq!(command, json!(PROBE));
+    let silent_since = Instant::now();
+
+    eventually("killing the silent mpv", || process.was_killed()).await;
+    assert!(
+        silent_since.elapsed() >= Duration::from_millis(120),
+        "killed after {:?}, before several probes had gone unanswered",
+        silent_since.elapsed()
+    );
+    drop(mpv);
+
+    assert_eq!(closed(&mut events).await, CloseReason::Crashed(None));
+    assert!(!socket.exists());
+    assert!(player.snapshot().file.is_none());
+}
+
+#[tokio::test]
+async fn an_mpv_that_answers_its_probes_is_left_alone() {
+    let mut rig = rig_with(quick_liveness()).await;
+
+    let answered = rig.mpv.answer_probes_for(Duration::from_millis(600)).await;
+
+    assert!(answered >= 5, "{answered} probes in 600 ms");
+    assert!(!rig.process.was_killed());
+    rig.settle().await;
+}
+
+#[tokio::test]
+async fn quit_kills_an_mpv_that_does_not_go_when_asked() {
+    let Rig {
+        player,
+        mut events,
+        mut mpv,
+        process,
+        socket,
+    } = rig_with(Timing {
+        quit_grace: Duration::from_millis(100),
+        ..Timing::default()
+    })
+    .await;
+
+    let quitting = {
+        let player = Arc::clone(&player);
+        tokio::spawn(async move { player.quit().await })
+    };
+    // mpv reads the command and then does nothing at all.
+    let (_, command) = mpv.request().await;
+    assert_eq!(command, json!(["quit"]));
+
+    eventually("killing it", || process.was_killed()).await;
+    // A killed mpv's socket goes with it.
+    drop(mpv);
+
+    quitting.await.expect("task").expect("quit");
+    assert_eq!(closed(&mut events).await, CloseReason::QuitRequested);
+    assert!(!socket.exists());
+    assert!(!socket.parent().expect("dir").exists());
+}
+
+#[tokio::test]
+async fn an_mpv_that_exits_as_soon_as_it_starts_is_reported_at_once_and_leaves_nothing_behind() {
+    let scratch = Scratch::short("exits");
+    let base = scratch.folder("e");
+    let launcher = MpvLauncher::new(scratch.stand_in("exit 3"), LaunchMode::Headless);
+
+    let started = Instant::now();
+    let error = spawn_under(&launcher, &base).await.expect_err("it exited");
+
+    assert!(started.elapsed() < PATIENCE, "{:?}", started.elapsed());
+    let message = error.to_string();
+    assert!(
+        message.contains("exited as soon as it started"),
+        "{message}"
+    );
+    assert!(message.contains('3'), "the exit code is given: {message}");
+    assert_eq!(error.kind(), "player_failed");
+    assert!(is_empty(&base), "its socket folder is removed");
+}
+
+#[tokio::test]
+async fn an_mpv_that_never_opens_its_socket_is_given_up_on_and_killed() {
+    let scratch = Scratch::short("never");
+    let base = scratch.folder("e");
+    let pid_file = scratch.dir.join("pid");
+    let stand_in = scratch.stand_in(&format!(
+        "echo $$ > '{}'\nexec sleep 30",
+        pid_file.display()
+    ));
+    let launcher = MpvLauncher::new(stand_in, LaunchMode::Headless).with_timing(Timing {
+        connect: Duration::from_millis(300),
+        ..Timing::default()
+    });
+
+    let started = Instant::now();
+    let error = spawn_under(&launcher, &base)
+        .await
+        .expect_err("it never listened");
+
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_millis(300)..PATIENCE).contains(&waited),
+        "{waited:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("did not open its control socket within 0.3 s"),
+        "{message}"
+    );
+    assert!(is_empty(&base), "its socket folder is removed");
+
+    let pid = std::fs::read_to_string(&pid_file).expect("the stand-in ran");
+    let still_there = std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("kill runs")
+        .success();
+    assert!(!still_there, "the stand-in {} was left running", pid.trim());
 }

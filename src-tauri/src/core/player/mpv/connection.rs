@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::AsyncRead;
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
@@ -28,6 +28,54 @@ const EXIT_GRACE: Duration = Duration::from_secs(3);
 /// After mpv exits, how long the socket gets to deliver what mpv wrote
 /// before it went — the `end-file` that says the user quit, usually.
 const DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+/// How the connection task tells a hung mpv from a quiet one.
+///
+/// A paused mpv says nothing at all, and a hung one says nothing either —
+/// while the mirror, last told "playing", keeps estimating a film that is
+/// frozen on screen. So mpv is asked something cheap every so often, and an
+/// mpv that has said nothing through `hung_after` worth of asking is taken
+/// for hung and killed. The party then hears `Closed(Crashed)`, the contract's
+/// word for a player that is no use any more, and can offer to reopen it.
+///
+/// Counted in unanswered probes rather than read off the clock, so a laptop
+/// waking from sleep — whose clock may have run on while mpv could not
+/// answer — is not mistaken for a minute of silence: the first probe after
+/// waking is answered, and the count starts again.
+///
+/// The estimate is not frozen while probes go unanswered. Upstream Syncplay
+/// keeps extrapolating an mpv that stops answering until it gives up on it
+/// at the same threshold, and a position frozen by the driver would be sent
+/// to the room as a player falling behind, rewinding everyone to one that is
+/// merely stuck.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Liveness {
+    pub(super) probe_every: Duration,
+    pub(super) hung_after: Duration,
+}
+
+impl Liveness {
+    /// How many probes in a row may go by with nothing heard.
+    fn patience(&self) -> u32 {
+        let probes = self.hung_after.as_secs_f64() / self.probe_every.as_secs_f64().max(1e-3);
+        // `as` saturates, so an absurd `hung_after` still gives a count.
+        (probes.ceil() as u32).max(1)
+    }
+}
+
+impl Default for Liveness {
+    /// Upstream's `MPV_UNRESPONSIVE_THRESHOLD` is 60 s; asking every 5 s
+    /// with that as the limit is what the driver spec settled on.
+    fn default() -> Self {
+        Self {
+            probe_every: Duration::from_secs(5),
+            hung_after: Duration::from_secs(60),
+        }
+    }
+}
+
+/// What a probe asks: something every mpv has and answers at once.
+pub(super) const PROBE: [&str; 2] = ["get_property", "pid"];
 
 /// Why a command came to nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +175,27 @@ impl Shared {
         lock(&self.requests).waiting.remove(&id);
     }
 
+    /// Registers `command` and queues it for the writer. The reply arrives
+    /// on the receiver; `None` once mpv is gone or the writer has stopped.
+    pub(super) fn send(
+        &self,
+        writer: &mpsc::UnboundedSender<Vec<u8>>,
+        command: &Value,
+        effect: Effect,
+    ) -> Option<(i64, oneshot::Receiver<Reply>)> {
+        let (id, reply) = self.register(effect)?;
+
+        // serde_json never writes a raw newline, which is what mpv frames on.
+        let mut line = json!({ "command": command, "request_id": id }).to_string();
+        line.push('\n');
+
+        if writer.send(line.into_bytes()).is_err() {
+            self.abandon(id);
+            return None;
+        }
+        Some((id, reply))
+    }
+
     /// One line from mpv.
     pub(super) fn handle_line(&self, line: &[u8], now: Instant) {
         // mpv passes on bytes that are not UTF-8 — a file name, typically —
@@ -212,29 +281,53 @@ impl Shared {
     }
 }
 
+/// Everything the connection task is handed besides the socket and the
+/// process.
+pub(super) struct Wiring {
+    pub(super) shared: Arc<Shared>,
+    pub(super) endpoint: Endpoint,
+    /// For the probes. The task holding a sender keeps the writer alive as
+    /// long as the task runs, which is no longer than mpv does.
+    pub(super) writer: mpsc::UnboundedSender<Vec<u8>>,
+    pub(super) kill: Arc<Notify>,
+    pub(super) exited: watch::Sender<bool>,
+    pub(super) liveness: Liveness,
+}
+
 /// The connection task. Ends once the socket is closed and the process has
 /// exited, after removing the endpoint and sending `Closed`.
-pub(super) async fn run<R, P>(
-    mut lines: LineReader<R>,
-    mut process: P,
-    shared: Arc<Shared>,
-    endpoint: Endpoint,
-    kill: Arc<Notify>,
-    exited: watch::Sender<bool>,
-) where
+pub(super) async fn run<R, P>(mut lines: LineReader<R>, mut process: P, wiring: Wiring)
+where
     R: AsyncRead + Unpin + Send,
     P: Process,
 {
+    let Wiring {
+        shared,
+        endpoint,
+        writer,
+        kill,
+        exited,
+        liveness,
+    } = wiring;
+
     let mut reading = true;
     let mut exit: Option<Option<i32>> = None;
     let mut give_up_at: Option<Instant> = None;
+
+    let mut probe_at = Some(Instant::now() + liveness.probe_every);
+    let mut probe: Option<i64> = None;
+    let mut heard = true;
+    let mut unanswered = 0_u32;
 
     while reading || exit.is_none() {
         let tick_at = shared.with_tracker(|tracker| tracker.next_deadline());
 
         tokio::select! {
             line = lines.next_line(), if reading => match line {
-                Ok(Some(line)) => shared.handle_line(&line, Instant::now()),
+                Ok(Some(line)) => {
+                    heard = true;
+                    shared.handle_line(&line, Instant::now());
+                }
                 Ok(None) | Err(_) => {
                     reading = false;
                     if exit.is_none() {
@@ -251,6 +344,27 @@ pub(super) async fn run<R, P>(
             () = kill.notified(), if exit.is_none() => process.kill(),
             () = sleep_until(tick_at), if tick_at.is_some() => {
                 shared.with_tracker(|tracker| tracker.on_tick(Instant::now()));
+            },
+            () = sleep_until(probe_at), if probe_at.is_some() && reading && exit.is_none() => {
+                unanswered = if std::mem::take(&mut heard) { 0 } else { unanswered + 1 };
+                if unanswered >= liveness.patience() {
+                    tracing::warn!(
+                        "mpv has not answered for {} s; killing it",
+                        liveness.hung_after.as_secs()
+                    );
+                    probe_at = None;
+                    process.kill();
+                } else {
+                    // Only the newest probe is worth an answer; an older one
+                    // still waiting would sit in the map until mpv went.
+                    if let Some(previous) = probe.take() {
+                        shared.abandon(previous);
+                    }
+                    probe = shared
+                        .send(&writer, &json!(PROBE), Effect::None)
+                        .map(|(id, _reply)| id);
+                    probe_at = Some(Instant::now() + liveness.probe_every);
+                }
             },
             () = sleep_until(give_up_at), if give_up_at.is_some() => {
                 give_up_at = None;

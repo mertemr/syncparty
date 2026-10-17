@@ -100,7 +100,7 @@ pub(super) async fn connect(
         if Instant::now() >= deadline {
             return Err(SyncPartyError::PlayerFailed(format!(
                 "mpv started but did not open its control socket within {} s",
-                patience.as_secs()
+                patience.as_secs_f64()
             )));
         }
         tokio::time::sleep(CONNECT_INTERVAL).await;

@@ -15,6 +15,7 @@ mod connection;
 mod endpoint;
 mod tracker;
 mod transport;
+mod version;
 
 #[cfg(all(test, unix))]
 mod real_tests;
@@ -39,13 +40,10 @@ use crate::core::player::{
 };
 use crate::core::process;
 
-use self::connection::{CommandError, Shared};
+use self::connection::{CommandError, Liveness, Shared, Wiring};
 use self::endpoint::Endpoint;
 use self::tracker::{Effect, LoadFailure, OBSERVED};
 use self::transport::{LineReader, MpvProcess, Process};
-
-/// How long mpv gets to start listening. Upstream Syncplay waits as long.
-const CONNECT_PATIENCE: Duration = Duration::from_secs(10);
 
 /// How long a command waits for mpv's answer. mpv answers at once — it
 /// replies before it acts — so a command still unanswered after this means
@@ -56,20 +54,51 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// milliseconds; the margin is for a network share waking up.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long mpv gets to quit when asked, and then to die once killed.
-const QUIT_GRACE: Duration = Duration::from_secs(3);
+/// How long mpv gets to die once killed.
 const KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// How long the driver gives mpv for the things that can run out of time.
+/// Always the defaults in use; the tests shorten them, so that running out
+/// takes milliseconds instead of the seconds a real mpv deserves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Timing {
+    /// To start listening. Upstream Syncplay waits as long.
+    connect: Duration,
+    /// To quit when asked, before it is killed.
+    quit_grace: Duration,
+    liveness: Liveness,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            quit_grace: Duration::from_secs(3),
+            liveness: Liveness::default(),
+        }
+    }
+}
 
 /// Starts mpv processes, each with its own private IPC endpoint.
 #[derive(Debug, Clone)]
 pub struct MpvLauncher {
     executable: PathBuf,
     mode: LaunchMode,
+    timing: Timing,
 }
 
 impl MpvLauncher {
     pub fn new(executable: PathBuf, mode: LaunchMode) -> Self {
-        Self { executable, mode }
+        Self {
+            executable,
+            mode,
+            timing: Timing::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_timing(self, timing: Timing) -> Self {
+        Self { timing, ..self }
     }
 
     /// Resolves mpv the way the dependency check does, honouring a path the
@@ -93,8 +122,12 @@ impl MpvLauncher {
     /// Starts mpv and returns the concrete player, for callers — the
     /// end-to-end test — that need to reach its IPC endpoint themselves.
     pub async fn spawn(&self) -> Result<(Arc<MpvPlayer>, PlayerEvents)> {
-        let endpoint = Endpoint::create()?;
+        self.spawn_at(Endpoint::create()?).await
+    }
 
+    /// The same, listening on an endpoint the caller made — the tests put it
+    /// somewhere they can see is cleaned up after a failed start.
+    async fn spawn_at(&self, endpoint: Endpoint) -> Result<(Arc<MpvPlayer>, PlayerEvents)> {
         let mut command = process::quiet(&self.executable);
         command.args(args::arguments(
             &self.executable,
@@ -113,16 +146,17 @@ impl MpvLauncher {
             ))
         })?;
 
-        let stream = match transport::connect(endpoint.name(), &mut child, CONNECT_PATIENCE).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                let _ = child.start_kill();
-                let _ = tokio::time::timeout(KILL_GRACE, child.wait()).await;
-                return Err(error);
-            }
-        };
+        let stream =
+            match transport::connect(endpoint.name(), &mut child, self.timing.connect).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = child.start_kill();
+                    let _ = tokio::time::timeout(KILL_GRACE, child.wait()).await;
+                    return Err(error);
+                }
+            };
 
-        start(stream, MpvProcess(child), endpoint).await
+        start(stream, MpvProcess(child), endpoint, self.timing).await
     }
 }
 
@@ -144,6 +178,7 @@ pub struct MpvPlayer {
     writer: mpsc::UnboundedSender<Vec<u8>>,
     kill: Arc<Notify>,
     exited: watch::Receiver<bool>,
+    quit_grace: Duration,
 }
 
 impl fmt::Debug for MpvPlayer {
@@ -165,6 +200,7 @@ async fn start<S, P>(
     stream: S,
     process: P,
     endpoint: Endpoint,
+    timing: Timing,
 ) -> Result<(Arc<MpvPlayer>, PlayerEvents)>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -180,19 +216,24 @@ where
     let player = MpvPlayer {
         endpoint: endpoint.name().to_owned(),
         shared: Arc::clone(&shared),
-        writer: line_sender,
+        writer: line_sender.clone(),
         kill: Arc::clone(&kill),
         exited,
+        quit_grace: timing.quit_grace,
     };
 
     tokio::spawn(transport::write_lines(writer, line_receiver));
     tokio::spawn(connection::run(
         LineReader::new(reader),
         process,
-        shared,
-        endpoint,
-        kill,
-        exited_sender,
+        Wiring {
+            shared,
+            endpoint,
+            writer: line_sender,
+            kill,
+            exited: exited_sender,
+            liveness: timing.liveness,
+        },
     ));
 
     // Should any of this fail, dropping `player` takes mpv down with it.
@@ -209,9 +250,33 @@ impl MpvPlayer {
         &self.endpoint
     }
 
-    /// Asks mpv to report every property the mirror is built from. Each one
-    /// arrives at once with its current value, which seeds the mirror.
+    /// Checks the version, then asks mpv to report every property the mirror
+    /// is built from. Each one arrives at once with its current value, which
+    /// seeds the mirror.
+    ///
+    /// The version comes first, so an mpv too old for the rest is refused
+    /// with that reason rather than with whatever it fails at first.
     async fn observe(&self) -> Result<()> {
+        match self
+            .request(json!(["get_property", "mpv-version"]), Effect::None)
+            .await
+        {
+            Ok(version) => {
+                let version = version.as_str().unwrap_or_default();
+                if version::too_old(version) {
+                    let (major, minor) = version::MINIMUM;
+                    return Err(SyncPartyError::PlayerFailed(format!(
+                        "{version} is too old for syncparty, which needs mpv {major}.{minor} or \
+                         newer"
+                    )));
+                }
+                tracing::info!(version, "mpv is listening");
+            }
+            // Whatever stops mpv answering this stops the observing below,
+            // which says so.
+            Err(error) => tracing::debug!(?error, "mpv did not say which version it is"),
+        }
+
         for (index, name) in OBSERVED.iter().enumerate() {
             self.request(json!(["observe_property", index + 1, name]), Effect::None)
                 .await
@@ -225,14 +290,6 @@ impl MpvPlayer {
         {
             tracing::debug!(?error, "mpv will not forward its error messages");
         }
-
-        match self
-            .request(json!(["get_property", "mpv-version"]), Effect::None)
-            .await
-        {
-            Ok(version) => tracing::info!(%version, "mpv is listening"),
-            Err(error) => tracing::debug!(?error, "mpv did not say which version it is"),
-        }
         Ok(())
     }
 
@@ -244,18 +301,8 @@ impl MpvPlayer {
     ) -> std::result::Result<Value, CommandError> {
         let (id, reply) = self
             .shared
-            .register(effect)
+            .send(&self.writer, &command, effect)
             .ok_or(CommandError::Disconnected)?;
-
-        // serde_json never writes a raw newline, which is what mpv frames on.
-        let mut line = serde_json::to_vec(&json!({ "command": command, "request_id": id }))
-            .map_err(|error| CommandError::Refused(error.to_string()))?;
-        line.push(b'\n');
-
-        if self.writer.send(line).is_err() {
-            self.shared.abandon(id);
-            return Err(CommandError::Disconnected);
-        }
 
         match tokio::time::timeout(REPLY_TIMEOUT, reply).await {
             Ok(Ok(reply)) => reply,
@@ -441,7 +488,7 @@ impl Player for MpvPlayer {
         }
         self.shared.quitting.store(true, Ordering::SeqCst);
 
-        let asked = tokio::time::timeout(QUIT_GRACE, async {
+        let asked = tokio::time::timeout(self.quit_grace, async {
             // mpv may close the socket before it answers; either is fine.
             let _ = self.request(json!(["quit"]), Effect::None).await;
             self.wait_exited().await;

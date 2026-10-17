@@ -22,7 +22,9 @@
 //! - Upstream seeks a newly opened file to the room's position but leaves its
 //!   pause state alone, and mpv starts paused, so somebody opening the film in
 //!   a playing room pauses the whole room a second later. Here the file is
-//!   brought to the room's pause state as well.
+//!   brought to the room's pause state as well. A file too short to reach
+//!   the room's position, which mpv parks on its last frame, paused, is not
+//!   taken to have paused or rewound anything either.
 
 use std::time::{Duration, Instant};
 
@@ -55,6 +57,9 @@ const FASTFORWARD_RESET_THRESHOLD: Duration = Duration::from_secs(3);
 /// Upstream's playlist thresholds, which are what decide it there.
 const END_OF_FILE_MINIMUM_LENGTH: f64 = 10.0;
 const END_OF_FILE_THRESHOLD: f64 = 5.0;
+/// A seek to within this of the end of the file, or past it, leaves the
+/// player on the last frame: the room is somewhere this file does not reach.
+const PAST_THE_END_MARGIN: f64 = SEEK_THRESHOLD;
 
 /// The knobs upstream exposes as settings. syncparty has no UI for them, so
 /// they stay at upstream's defaults; they exist so the branches those
@@ -119,6 +124,9 @@ pub(crate) struct Step {
 /// The file this client has open, and when it opened.
 #[derive(Debug, Clone)]
 struct OpenFile {
+    /// What the player calls it, which is how a snapshot showing some other
+    /// file is told apart from one showing this one.
+    path: String,
     report: FileReport,
     loaded_at: Instant,
 }
@@ -158,6 +166,10 @@ pub(crate) struct Engine {
     speed_changed: bool,
     behind_first_detected: Option<Instant>,
     position_before_last_seek: f64,
+    /// The last seek this client gave the player was to the end of its file
+    /// or beyond. mpv parks on the last frame there, paused, and ignores any
+    /// unpause, so nothing it reports from there is the user's doing.
+    parked_at_the_end: bool,
 
     // Readiness and the room list.
     ready: Option<bool>,
@@ -197,6 +209,7 @@ impl Engine {
             speed_changed: false,
             behind_first_detected: None,
             position_before_last_seek: 0.0,
+            parked_at_the_end: false,
             ready: None,
             rooms: RoomList::new(),
             have_list: false,
@@ -574,6 +587,7 @@ impl Engine {
         self.speed_changed = false;
         self.behind_first_detected = None;
         self.position_before_last_seek = 0.0;
+        self.parked_at_the_end = false;
         self.last_global_update = None;
     }
 
@@ -583,6 +597,11 @@ impl Engine {
     /// position and pause state straight away — the second half being one of
     /// the two fixes this port makes, so opening the film never pauses or
     /// rewinds a room that is already watching.
+    ///
+    /// A file too short to reach the room's position is still sent there:
+    /// mpv parks it on its last frame, and the room's state stands in for it
+    /// until something brings it back into the file. Leaving it at its start
+    /// instead would read as this client seeking the room back to the start.
     pub fn file_loaded(&mut self, file: &LoadedFile, now: Instant, epoch: f64) -> Step {
         let mut step = Step::default();
         if !self.player_attached {
@@ -595,9 +614,11 @@ impl Engine {
             size: file.size.unwrap_or(0),
         };
         self.file = Some(OpenFile {
+            path: file.path.clone(),
             report: report.clone(),
             loaded_at: now,
         });
+        self.parked_at_the_end = false;
 
         if self.last_global_update.is_some() {
             let position = self.global_position_at(now);
@@ -614,9 +635,11 @@ impl Engine {
         step
     }
 
-    /// The player closed its file and is idle again.
+    /// The player closed its file and is idle again — or failed to open
+    /// one, which closes whatever it had open first.
     pub fn file_unloaded(&mut self) {
         self.file = None;
+        self.parked_at_the_end = false;
     }
 
     /// One look at the player, upstream's `updatePlayerStatus`.
@@ -674,20 +697,47 @@ impl Engine {
 
     /// What the player is taken to be doing.
     ///
-    /// With nothing open, and for a moment after a file opens, the player's
-    /// own reports are not believed and the room's state stands in for them,
-    /// as upstream's mpv wrapper does. A file that has just opened reports
-    /// positions from before the seek that brings it to the room.
-    fn reported(&self, snapshot: &PlayerSnapshot, now: Instant) -> (bool, f64) {
-        let settled = snapshot.is_loaded()
-            && self.file.as_ref().is_some_and(|file| {
-                now.saturating_duration_since(file.loaded_at) > self.config.load_settle
-            });
+    /// The player's own reports are not believed, and the room's state stands
+    /// in for them as upstream's mpv wrapper does, whenever they cannot be
+    /// about the user:
+    ///
+    /// - with nothing open;
+    /// - for a moment after a file opens, which reports positions from before
+    ///   the seek that brings it to the room;
+    /// - while the player shows some other file than the one this client
+    ///   opened. mpv swaps files without closing the old one first, so the
+    ///   new file is on screen, at its start, before its load is reported —
+    ///   upstream stops believing the player the moment the swap begins;
+    /// - while it is parked on the last frame by a seek past the end.
+    fn reported(&mut self, snapshot: &PlayerSnapshot, now: Instant) -> (bool, f64) {
+        let room = (self.global_paused_now(), self.global_position_at(now));
+        let Some(file) = self.file.as_ref() else {
+            return room;
+        };
 
-        match snapshot.position(now) {
-            Some(position) if settled => (snapshot.paused, position),
-            _ => (self.global_paused_now(), self.global_position_at(now)),
+        let shows_this_file = snapshot
+            .file
+            .as_ref()
+            .is_some_and(|shown| shown.path == file.path);
+        let settled = now.saturating_duration_since(file.loaded_at) > self.config.load_settle;
+        let Some(position) = snapshot
+            .position(now)
+            .filter(|_| shows_this_file && settled)
+        else {
+            return room;
+        };
+
+        if self.parked_at_the_end {
+            let length = file.report.duration;
+            if snapshot.eof_reached || position >= length - PAST_THE_END_MARGIN {
+                return room;
+            }
+            // Back inside the file, and not by a seek of ours: the user
+            // moved it.
+            self.parked_at_the_end = false;
         }
+
+        (snapshot.paused, position)
     }
 
     // ---------------------------------------------------------- server state
@@ -971,10 +1021,14 @@ impl Engine {
     /// Upstream's `client.setPosition`: a seek, only with a file open. The
     /// player model moves with it, which is what keeps the next poll from
     /// mistaking the seek for the user's.
+    ///
+    /// The model takes the position asked for even when the file ends before
+    /// it. That is where the room is, and what replies report, so a short file
+    /// never becomes the slowest watcher the server follows.
     fn set_position(&mut self, position: f64, now: Instant, epoch: f64, step: &mut Step) {
-        if self.file.is_none() {
+        let Some(length) = self.file.as_ref().map(|file| file.report.duration) else {
             return;
-        }
+        };
 
         let mut position = position;
         if position < 0.0 {
@@ -983,9 +1037,19 @@ impl Engine {
             self.send_state(Some(local), true, None, true, epoch, step);
         }
 
+        let was_parked = self.parked_at_the_end;
+        self.parked_at_the_end = length > 0.0 && position >= length - PAST_THE_END_MARGIN;
+
         step.player.push(PlayerCommand::Seek(position));
         self.player_position = position;
         self.last_player_update = Some(now);
+
+        // mpv ignored any unpause while it sat on the last frame, so coming
+        // back into the file is when the pause state can be put right.
+        if was_parked && !self.parked_at_the_end {
+            step.player
+                .push(PlayerCommand::SetPaused(self.player_paused_now()));
+        }
     }
 
     /// A pause or unpause, with the player model moved along at once. Sent

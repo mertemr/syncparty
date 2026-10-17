@@ -94,6 +94,14 @@ fn showing(position: f64, paused: bool, now: Instant, length: f64) -> PlayerSnap
     }
 }
 
+/// Where mpv leaves a file once it has run out: on the last frame, paused.
+fn ended(now: Instant, length: f64) -> PlayerSnapshot {
+    PlayerSnapshot {
+        eof_reached: true,
+        ..showing(length, true, now, length)
+    }
+}
+
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
 }
@@ -256,6 +264,12 @@ impl Session {
 
     fn poll(&mut self, position: f64, paused: bool) -> Step {
         let snapshot = showing(position, paused, self.now, self.length);
+        self.engine.poll(&snapshot, self.now, EPOCH)
+    }
+
+    /// A poll of a player sitting on the last frame of its file.
+    fn poll_ended(&mut self) -> Step {
+        let snapshot = ended(self.now, self.length);
         self.engine.poll(&snapshot, self.now, EPOCH)
     }
 }
@@ -1263,6 +1277,134 @@ fn a_closed_file_is_no_longer_believed() {
     let step = session.poll(500.0, false);
 
     assert!(step.send.is_empty(), "{step:?}");
+}
+
+/// mpv swaps one file for another without closing the first, so for a
+/// moment the player shows the new file at its start while the engine still
+/// has the old one, long settled. That start is not the user seeking there.
+#[test]
+fn a_file_opened_over_a_settled_one_is_not_believed_before_it_has_loaded() {
+    let mut session = Session::watching(1500.0, false);
+    let other = LoadedFile {
+        path: "/films/Other.mkv".to_owned(),
+        name: "Other.mkv".to_owned(),
+        duration: Some(FILM_LENGTH),
+        size: Some(99),
+    };
+    let switched = PlayerSnapshot {
+        file: Some(other.clone()),
+        ..showing(0.05, false, session.now, FILM_LENGTH)
+    };
+
+    let step = session.engine.poll(&switched, session.now, EPOCH);
+    assert!(is_quiet(&step), "{step:?}");
+
+    let loaded = session.engine.file_loaded(&other, session.now, EPOCH);
+    assert_eq!(
+        loaded.player,
+        vec![
+            PlayerCommand::Seek(1501.25),
+            PlayerCommand::SetPaused(false)
+        ],
+        "once it has loaded it joins the room like any other file"
+    );
+}
+
+/// A shorter file — another cut, or the wrong film — cannot go where the
+/// room is. mpv parks it on its last frame, paused, and ignores every
+/// unpause there. None of that is anything the user did.
+#[test]
+fn a_joiner_whose_file_ends_before_the_room_neither_rewinds_nor_pauses_it() {
+    let mut session = Session::greeted();
+    session.length = 1200.0;
+    session.attach();
+    session.state(6000.0, false, Some("bob"));
+    session.after(2000);
+    let loaded = session.load();
+    assert_eq!(
+        loaded.player,
+        vec![PlayerCommand::Seek(6002.0), PlayerCommand::SetPaused(false)]
+    );
+
+    let mut sent = Vec::new();
+    for tick in 1..=30u64 {
+        session.after(100);
+        let polled = session.poll_ended();
+        assert!(polled.player.is_empty(), "{polled:?}");
+        sent.extend(polled.send);
+        if tick % 10 == 0 {
+            let heartbeat = session.state(6002.0 + tick as f64 * 0.1, false, Some("bob"));
+            assert!(
+                heartbeat.player.is_empty() && heartbeat.notices.is_empty(),
+                "the room playing on is not news: {heartbeat:?}"
+            );
+            sent.extend(heartbeat.send);
+        }
+    }
+
+    assert_eq!(sent.len(), 3, "one reply per heartbeat and nothing else");
+    for message in &sent {
+        let ClientMessage::State(state) = message else {
+            panic!("only replies were expected: {message:?}");
+        };
+        let playstate = state.playstate.expect("a playstate");
+        assert!(!playstate.paused && !playstate.do_seek, "{state:?}");
+        // The server follows its slowest watcher, so a reply from the last
+        // frame would drag everyone else back to it.
+        assert!(playstate.position > 6000.0, "{state:?}");
+        assert_eq!(state.ignoring_on_the_fly, (None, None), "{state:?}");
+    }
+}
+
+#[test]
+fn a_seek_by_somebody_else_past_the_end_of_this_file_parks_it_quietly() {
+    let mut session = Session::watching_film(100.0, false, 1200.0);
+    session.seek_state(6000.0, false, "bob");
+
+    session.after(100);
+    let step = session.poll_ended();
+
+    assert!(is_quiet(&step), "{step:?}");
+}
+
+#[test]
+fn a_parked_file_brought_back_by_the_room_plays_on_with_it() {
+    let mut session = Session::watching_film(100.0, false, 1200.0);
+    session.seek_state(6000.0, false, "bob");
+    session.after(100);
+    session.poll_ended();
+
+    session.after(1000);
+    let step = session.seek_state(300.0, false, "bob");
+
+    // mpv ignored the unpause on the last frame, so it has to be said again.
+    assert_eq!(
+        step.player,
+        vec![PlayerCommand::Seek(300.0), PlayerCommand::SetPaused(false)]
+    );
+    session.after(100);
+    let polled = session.poll(300.1, false);
+    assert!(is_quiet(&polled), "{polled:?}");
+}
+
+#[test]
+fn a_parked_file_the_user_moves_back_into_is_believed_again() {
+    let mut session = Session::watching_film(100.0, false, 1200.0);
+    session.seek_state(6000.0, false, "bob");
+    session.after(100);
+    session.poll_ended();
+
+    session.after(100);
+    let step = session.poll(400.0, false);
+
+    assert_eq!(
+        playstate(&step),
+        Some(ClientPlaystate {
+            position: 400.0,
+            paused: false,
+            do_seek: true
+        })
+    );
 }
 
 // ------------------------------------------------------------------ readiness

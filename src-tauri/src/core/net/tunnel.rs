@@ -1,26 +1,27 @@
-//! Carrying Syncplay's TCP connection over a QUIC one.
+//! Carrying the sync protocol's TCP connection over a QUIC one.
 //!
-//! Syncplay is not ours. The server binds a TCP port and the desktop client
-//! dials `host:port`, and neither can be taught to speak anything else. So
-//! rather than replace them, both ends are given a socket on their own machine
-//! that behaves exactly like the one they expect:
+//! The protocol is Syncplay's, and Syncplay runs it over plain TCP: the server
+//! binds a port and a client dials `host:port`. syncparty's own client and
+//! server still speak it that way — which is also what lets a guest on an
+//! older, Syncplay-based syncparty keep joining a new host. So rather than
+//! teach either end QUIC, both are given a socket on their own machine that
+//! behaves exactly like the one they expect:
 //!
 //! ```text
 //! Guest machine                                Host machine
-//! Syncplay client                                Syncplay server
+//! sync client                                     sync server
 //!    │ TCP                                              ▲ TCP
 //!    ▼                                                  │
 //! 127.0.0.1:auto ─► syncparty ══ QUIC ══► syncparty ─► 127.0.0.1:8999
 //! ```
 //!
-//! The upshot is that `launcher`, `monitor` and `protocol` never learn that
-//! the transport changed — they still connect to a local address — and the
-//! Syncplay server no longer listens on any network interface at all.
+//! The upshot is that the client, the monitor and `protocol` never learn that
+//! the transport exists — they connect to a local address — and the server
+//! does not listen on any network interface at all.
 //!
-//! One consequence worth being explicit about: syncparty is now on the path
-//! for the whole film. Closing it mid-party takes the tunnel with it, where
-//! previously the two Syncplay processes talked over Tailscale on their own.
-//! Both tunnels are therefore owned by the session and live as long as it does.
+//! One consequence worth being explicit about: syncparty is on the path for
+//! the whole film. Closing it mid-party takes the tunnel with it. Both tunnels
+//! are therefore owned by the session and live as long as it does.
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -38,7 +39,8 @@ use crate::core::error::{Result, SyncPartyError};
 use crate::core::net::{PathKind, PeerPath, ALPN};
 
 /// Receives whatever the other side sends down the control channel — the one
-/// stream per connection that carries application data instead of Syncplay's.
+/// stream per connection that carries application data instead of the sync
+/// protocol.
 ///
 /// Implemented by whatever domain owns that data (movie voting, say); `net`
 /// itself has no opinion on what the bytes mean, only that they arrived.
@@ -85,7 +87,7 @@ async fn read_frame(reader: &mut (dyn AsyncRead + Unpin + Send)) -> io::Result<V
 type Peers = Arc<Mutex<BTreeMap<EndpointId, Connection>>>;
 
 /// The host half: turns incoming QUIC streams into connections to the local
-/// Syncplay server.
+/// sync server.
 pub struct HostTunnel {
     task: JoinHandle<()>,
     peers: Peers,
@@ -94,15 +96,15 @@ pub struct HostTunnel {
 
 impl HostTunnel {
     /// Starts accepting parties on `endpoint`, forwarding each stream to
-    /// `target` — the loopback address the Syncplay server is bound to.
+    /// `target` — the loopback address the sync server is bound to.
     ///
     /// Every guest gets its own QUIC connection, and every TCP connection that
-    /// guest makes is one stream inside it. Syncplay reconnects rather than
-    /// giving up when a connection drops, so a stream ending is routine and
-    /// must not bring the tunnel down with it.
+    /// guest makes is one stream inside it. The sync client reconnects rather
+    /// than giving up when a connection drops, so a stream ending is routine
+    /// and must not bring the tunnel down with it.
     ///
     /// `control` receives whatever a guest sends down its control channel —
-    /// the one stream every guest opens before dialling Syncplay at all.
+    /// the one stream every guest opens before its sync client dials at all.
     pub fn start(endpoint: Endpoint, target: SocketAddr, control: Arc<dyn ControlChannel>) -> Self {
         let peers: Peers = Arc::new(Mutex::new(BTreeMap::new()));
         let control_writers: ControlWriters = Arc::new(Mutex::new(BTreeMap::new()));
@@ -190,7 +192,7 @@ impl HostTunnel {
 impl Drop for HostTunnel {
     /// Stopping a party has to actually stop it. Without this the accept loop
     /// would outlive the session and the next one would find the endpoint
-    /// already serving the old, now-dead Syncplay port.
+    /// already serving the old, now-dead server port.
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -198,10 +200,10 @@ impl Drop for HostTunnel {
 
 /// Serves one guest until it disconnects.
 ///
-/// The guest always opens its control channel before dialling Syncplay at
+/// The guest always opens its control channel before its sync client dials at
 /// all (see [`GuestTunnel::open`]), so the first stream accepted here is
 /// always that one — no header byte or negotiation needed to tell it apart
-/// from the Syncplay passthrough streams that follow.
+/// from the sync passthrough streams that follow.
 async fn serve(
     connection: Connection,
     target: SocketAddr,
@@ -248,10 +250,10 @@ async fn serve(
             match TcpStream::connect(target).await {
                 Ok(stream) => splice(stream, send, recv).await,
                 Err(error) => {
-                    // The party is up but its Syncplay server is not answering
-                    // on loopback. Logged rather than fatal: the guest's client
+                    // The party is up but its sync server is not answering on
+                    // loopback. Logged rather than fatal: the guest's client
                     // will retry, and by then the server may have recovered.
-                    tracing::warn!(%error, %target, "could not reach the local Syncplay server");
+                    tracing::warn!(%error, %target, "could not reach the local sync server");
                 }
             }
         });
@@ -300,7 +302,7 @@ fn describe(connection: &Connection) -> PeerPath {
     }
 }
 
-/// The guest half: a loopback port that Syncplay can be pointed at.
+/// The guest half: a loopback port for the sync client to dial.
 pub struct GuestTunnel {
     local: SocketAddr,
     task: JoinHandle<()>,
@@ -325,7 +327,7 @@ impl GuestTunnel {
     ///
     /// The connection is established here rather than on first use so that a
     /// host who is offline is reported as such immediately, instead of
-    /// launching Syncplay against a port that will never answer — which is
+    /// connecting the sync client to a port that will never answer — which is
     /// exactly the failure the Tailscale-era address probing existed to avoid.
     ///
     /// `host` is anything that names the far side: an
@@ -373,7 +375,7 @@ impl GuestTunnel {
         });
 
         // Port 0 asks the OS for a free one: a fixed port would collide with
-        // the guest's own Syncplay server if they ever host, and with a second
+        // the guest's own sync server if they ever host, and with a second
         // window of syncparty.
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let local = listener.local_addr()?;
@@ -406,8 +408,8 @@ impl GuestTunnel {
         })
     }
 
-    /// The address to hand to Syncplay. Always on loopback, so nothing else on
-    /// the network can reach it.
+    /// The address for the sync client to dial. Always on loopback, so nothing
+    /// else on the network can reach it.
     pub fn local_addr(&self) -> SocketAddr {
         self.local
     }
@@ -437,14 +439,14 @@ impl Drop for GuestTunnel {
 /// `copy_bidirectional` is not usable here: it wants one object that is both
 /// reader and writer, and a QUIC stream arrives already split in two. Each
 /// direction therefore gets its own copy, and the first one to end tears down
-/// the other — a half-open TCP connection would leave Syncplay waiting on a
+/// the other — a half-open TCP connection would leave the client waiting on a
 /// reply that can no longer arrive.
 async fn splice<S, R>(stream: TcpStream, mut send: S, mut recv: R)
 where
     S: AsyncWrite + Unpin + Send + 'static,
     R: AsyncRead + Unpin + Send + 'static,
 {
-    // Nagle's algorithm delays small writes to coalesce them. Syncplay's
+    // Nagle's algorithm delays small writes to coalesce them. The sync
     // traffic is almost entirely small writes whose whole value is arriving
     // promptly, which is the case this optimisation is wrong for.
     let _ = stream.set_nodelay(true);
@@ -464,14 +466,14 @@ where
 mod tests {
     use super::*;
 
-    /// Discards whatever arrives — these tests are exercising Syncplay
+    /// Discards whatever arrives — these tests are exercising the sync
     /// passthrough, not the control channel itself.
     struct NullControl;
     impl ControlChannel for NullControl {
         fn on_message(self: Arc<Self>, _peer: EndpointId, _bytes: Vec<u8>) {}
     }
 
-    /// A stand-in for the Syncplay server: echoes whatever it is sent.
+    /// A stand-in for the sync server: echoes whatever it is sent.
     async fn echo_server() -> SocketAddr {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -696,8 +698,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_guest_tunnel_listens_only_on_loopback() {
-        // Built without a host on purpose: the address the guest hands to
-        // Syncplay must never be routable from the local network, and that is
+        // Built without a host on purpose: the address the guest's sync client
+        // dials must never be routable from the local network, and that is
         // decided by the bind alone.
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await

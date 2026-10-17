@@ -38,7 +38,8 @@ const BIND_ADDRESS: Ipv4Addr = Ipv4Addr::LOCALHOST;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
-    /// Plaintext. Reaches the server through the environment, never `argv`.
+    /// Plaintext. The server runs inside syncparty, so this is handed over in
+    /// memory and never appears on any command line.
     pub password: String,
     /// Stable across restarts, or every room operator password breaks.
     pub salt: String,
@@ -46,7 +47,8 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Where the tunnel and the host's own Syncplay client should connect.
+    /// Where the tunnel, the room monitor and the host's own sync client
+    /// connect.
     pub fn local_address(&self) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(BIND_ADDRESS), self.port)
     }

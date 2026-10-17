@@ -19,7 +19,7 @@ use crate::core::paths::AppPaths;
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum AppMode {
-    /// Runs the Syncplay server and hands out invites.
+    /// Runs the sync server and hands out invites.
     Host,
     /// Joins somebody else's party.
     Guest,

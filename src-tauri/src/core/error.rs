@@ -158,8 +158,14 @@ impl From<serde_json::Error> for SyncPartyError {
     }
 }
 
+/// The URL comes off before anything is turned into text. Every request
+/// syncparty makes carries a secret in it — the Discord webhook token is part
+/// of the path, the TMDB key is a query parameter — and reqwest names the URL
+/// in its message, which would carry the secret into the failure banner, the
+/// event stream and the logs.
 impl From<reqwest::Error> for SyncPartyError {
     fn from(value: reqwest::Error) -> Self {
+        let value = value.without_url();
         let mut message = value.to_string();
         let mut source = std::error::Error::source(&value);
         while let Some(err) = source {
@@ -204,5 +210,22 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("handshake timed out"), "{message}");
         assert_eq!(error.kind(), "party_unreachable");
+    }
+
+    /// A request that fails says why, never where it was going — the where
+    /// is a webhook token or an API key.
+    #[tokio::test]
+    async fn a_failed_request_does_not_repeat_the_secret_in_its_url() {
+        // Port 1 on loopback refuses at once, so this needs no network.
+        let error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/api/webhooks/42/hunter2-token?api_key=hunter2-key")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+
+        let message = SyncPartyError::from(error).to_string();
+
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(!message.contains("127.0.0.1:1/"), "{message}");
     }
 }

@@ -7,6 +7,8 @@ import { Badge, Button, Card, Dot } from "@/shared/ui";
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
 import type { TransportReport } from "@/shared/types/TransportReport";
 
+import { describeWatch } from "@/features/watch/watchState";
+
 import { safeToShare } from "./diagnosticsReport";
 
 export function DiagnosticsPanel() {
@@ -33,7 +35,10 @@ export function DiagnosticsPanel() {
       .length ?? 0;
   const dependencyTotal = report?.dependencies.items.length ?? 0;
   const dependenciesReady = dependencyTotal > 0 && installed === dependencyTotal;
-
+  // The same words the watch card's badge uses, so the two never disagree.
+  // No room is passed: this row is about the connection and the player, not
+  // about who else has which file.
+  const watch = report?.watch ? describeWatch(report.watch, null, t) : null;
 
   return (
     <Card
@@ -74,6 +79,12 @@ export function DiagnosticsPanel() {
             good={report.session.phase === "hosting"}
             neutral={report.session.phase === "idle"}
             detail={t(`settings.diagnostics.session.${report.session.phase}`)}
+          />
+          <HealthRow
+            label={t("settings.diagnostics.watch")}
+            good={watch?.tone === "good"}
+            neutral={watch === null}
+            detail={watch ? watch.status : t("settings.diagnostics.watch.none")}
           />
 
           {report.transport ? (

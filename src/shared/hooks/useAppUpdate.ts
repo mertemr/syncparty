@@ -2,11 +2,12 @@
  * Checks for a new release on startup and downloads it in the background.
  *
  * Deliberately does not install and relaunch on its own — doing that while a
- * party is running would kill the host's Syncplay server out from under
- * everyone still watching. Downloading ahead of time is silent and has no
- * downside, so it happens automatically; the actual restart is always an
- * explicit action, and the caller is expected to gate it on
- * `session.phase !== "hosting"` (see `UpdateBanner`).
+ * party is running would kill the host's server out from under everyone
+ * still watching, and doing it mid-film would close the player syncparty is
+ * keeping in step. Downloading ahead of time is silent and has no downside,
+ * so it happens automatically; the actual restart is always an explicit
+ * action, and the caller is expected to gate it on nothing being hosted or
+ * watched (see `UpdateBanner`).
  *
  * On Linux none of that applies. Every Linux artifact is owned by a package
  * manager, so the backend reports `selfInstalls: false` and this stops after

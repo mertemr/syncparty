@@ -32,12 +32,15 @@ use crate::core::syncplay::server::{stamp, ServerConfig};
 /// whole server's problem.
 const OUTBOUND_CAPACITY: usize = 64;
 
-/// The longest line accepted before the greeting, terminator included.
+/// The longest line accepted, terminator included, before the greeting and
+/// after it.
 ///
-/// Twisted's `LineReceiver.MAX_LENGTH`, which upstream inherits. Until the
-/// password has been checked the peer could be anybody, and a line that never
-/// ends would otherwise be memory without limit.
-const PRE_LOGIN_LINE_LIMIT: usize = 16 * 1024;
+/// Twisted's `LineReceiver.MAX_LENGTH`, which upstream inherits and applies to
+/// every line, so no Syncplay client sends a longer one. A line that never
+/// ends would otherwise be memory without limit: from anybody at all until
+/// the password has been checked, and after that from anybody holding an
+/// invite, which is enough to take the host's whole party down.
+const LINE_LIMIT: usize = 16 * 1024;
 
 /// Serves one connection to completion.
 ///
@@ -155,10 +158,9 @@ impl Session {
 
         loop {
             let greeted = self.username.is_some();
-            let limit = (!greeted).then_some(PRE_LOGIN_LINE_LIMIT);
 
             let event = tokio::select! {
-                line = read_line(&mut reader, &mut pending, limit) => Event::Line(line?),
+                line = read_line(&mut reader, &mut pending, LINE_LIMIT) => Event::Line(line?),
                 () = next_tick(&mut self.heartbeat) => Event::Heartbeat,
                 () = &mut hello_deadline, if !greeted => Event::HelloOverdue,
             };
@@ -166,9 +168,11 @@ impl Session {
             match event {
                 Event::Line(None) => return Ok(Ending::Closed),
                 Event::Line(Some(Line::TooLong)) => {
-                    self.log(
-                        "closed a connection that sent an overlong line before greeting".to_owned(),
-                    );
+                    self.log(match &self.username {
+                        Some(username) => format!("dropped {username}, who sent an overlong line"),
+                        None => "closed a connection that sent an overlong line before greeting"
+                            .to_owned(),
+                    });
                     return Ok(Ending::Dropped);
                 }
                 Event::Line(Some(Line::Text(line))) => {
@@ -742,25 +746,18 @@ impl Session {
 ///
 /// Cancel safe, which is what lets it sit in a `select!` beside the
 /// heartbeat: whatever part of a line has arrived stays in `pending` when the
-/// future is dropped, and the next call carries on from there. With a `limit`,
-/// a line that reaches it without ending is reported rather than read on.
+/// future is dropped, and the next call carries on from there. A line that
+/// reaches `limit` without ending is reported rather than read on.
 async fn read_line<R>(
     reader: &mut R,
     pending: &mut Vec<u8>,
-    limit: Option<usize>,
+    limit: usize,
 ) -> io::Result<Option<Line>>
 where
     R: AsyncBufRead + Unpin,
 {
-    match limit {
-        Some(limit) => {
-            let room = limit.saturating_sub(pending.len()) as u64;
-            (&mut *reader).take(room).read_until(b'\n', pending).await?;
-        }
-        None => {
-            reader.read_until(b'\n', pending).await?;
-        }
-    }
+    let room = limit.saturating_sub(pending.len()) as u64;
+    (&mut *reader).take(room).read_until(b'\n', pending).await?;
 
     if pending.last() == Some(&b'\n') {
         let mut bytes = std::mem::take(pending);
@@ -771,7 +768,7 @@ where
         return text(bytes).map(Some);
     }
 
-    if limit.is_some_and(|limit| pending.len() >= limit) {
+    if pending.len() >= limit {
         return Ok(Some(Line::TooLong));
     }
 
@@ -1138,13 +1135,14 @@ mod tests {
         );
     }
 
-    /// The limit is for strangers. A greeted client's line is read whole.
+    /// The limit is upstream's, which is generous: anything under it is read
+    /// whole, however long.
     #[tokio::test]
-    async fn a_long_line_after_the_greeting_is_read_like_any_other() {
+    async fn a_long_line_within_the_limit_is_read_like_any_other() {
         let registry = Registry::shared();
         let mut ahmet = arrive(&registry, "ahmet", "MovieNight").await;
 
-        let chat = json!({ "Chat": "a".repeat(32 * 1024) }).to_string();
+        let chat = json!({ "Chat": "a".repeat(15 * 1024) }).to_string();
         write_line(&mut ahmet, &chat).await;
 
         let relayed = parse(&read_until(&mut ahmet, "Chat").await);
@@ -1154,6 +1152,27 @@ mod tests {
                 .map(|message| message.chars().count()),
             Some(MAX_CHAT_MESSAGE_LENGTH)
         );
+    }
+
+    /// The password is in every invite, so being greeted proves little. One
+    /// guest sending a line that never ends must not be able to make the host
+    /// buffer it until the whole party falls over.
+    #[tokio::test]
+    async fn an_overlong_line_after_the_greeting_drops_the_connection_too() {
+        let (ahmet, mut mehmet) = two_in_a_room().await;
+        let (mut read, mut write) = tokio::io::split(ahmet);
+        tokio::spawn(async move {
+            let chat = json!({ "Chat": "a".repeat(32 * 1024) }).to_string();
+            // Ignored: once the server hangs up, the rest has nowhere to go.
+            let _ = write.write_all(format!("{chat}\r\n").as_bytes()).await;
+        });
+
+        let left = read_until(&mut mehmet, "left").await;
+        assert!(
+            left.contains("ahmet"),
+            "the room is told he has gone: {left}"
+        );
+        assert!(hung_up(&mut read).await, "and his connection is closed");
     }
 
     #[tokio::test]
@@ -1342,7 +1361,7 @@ mod tests {
 
     /// Whether the server closes this connection, reading past whatever was
     /// still on its way.
-    async fn hung_up(client: &mut DuplexStream) -> bool {
+    async fn hung_up<R: AsyncRead + Unpin>(client: &mut R) -> bool {
         let mut rest = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut rest))
             .await

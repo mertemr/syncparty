@@ -331,41 +331,60 @@ async function startHosting(): Promise<HostingInfo> {
 }
 
 /**
+ * One lifecycle step at a time, as the real backend's lifecycle lock does: a
+ * leave sent while a join is still connecting waits for that join to land
+ * and then undoes it, rather than finding nothing to leave and letting the
+ * party open behind it.
+ */
+let lifecycle: Promise<unknown> = Promise.resolve();
+
+function serialized<T>(step: () => Promise<T> | T): Promise<T> {
+  const run = lifecycle.then(step, step);
+  lifecycle = run.catch(() => {});
+  return run;
+}
+
+/**
  * The guest's join, in the order the real one goes: connect through the
  * tunnel, be let in (or not), then open the player.
+ *
+ * Nothing is published until the party has answered — the real backend has
+ * no watch to describe before then — so for those seconds the join exists
+ * only in the frontend's own `guestJoins`. That is the stretch the Back
+ * prompt and the host screen's guest-party notice are there for.
  */
 async function joinParty(invite: Invite): Promise<void> {
   if (watch && watchedInvite && sameInvite(watchedInvite, invite)) return;
   if (watch) stopWatch();
 
   const mine = ++generation;
-  watchedInvite = invite;
-  setWatch({
-    role: "guest",
-    room: invite.room,
-    username: null,
-    connection: { state: "connecting" },
-    player: { state: "starting" },
-    ready: false,
-  });
-  await sleep(1200);
+  await sleep(2000);
   if (mine !== generation) return;
 
   if (scenario === "rejected") {
-    stopWatch();
     fail(
       "sync_rejected",
       "the party did not let this machine in: the room password is wrong",
     );
   }
 
-  await openPlayer(mine, settings.nickname);
+  watchedInvite = invite;
   lastInvite = invite;
+  await admitted(mine, { role: "guest", room: invite.room });
 }
 
-/** Greeted by the server, then mpv comes up empty. Shared by host and guest. */
-async function openPlayer(mine: number, username: string) {
-  patchWatch({ username, connection: { state: "connected" } });
+/**
+ * Let in: the watch appears already connected, with mpv still starting,
+ * and then mpv comes up empty. Shared by host and guest.
+ */
+async function admitted(mine: number, who: Pick<WatchState, "role" | "room">) {
+  setWatch({
+    ...who,
+    username: settings.nickname,
+    connection: { state: "connected" },
+    player: { state: "starting" },
+    ready: false,
+  });
   await sleep(800);
   if (mine !== generation) return;
   patchWatch({ player: { state: "idle" } });
@@ -643,42 +662,37 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
     return INVITE;
   },
 
-  join_party: ({ invite }) => joinParty(invite as Invite),
+  join_party: ({ invite }) => serialized(() => joinParty(invite as Invite)),
 
-  leave_party: () => {
-    if (watch?.role === "guest") stopWatch();
-  },
+  leave_party: () =>
+    serialized(() => {
+      if (watch?.role === "guest") stopWatch();
+    }),
 
-  resume_last_session: async () => {
-    if (!lastInvite) return null;
-    const invite = lastInvite;
-    await joinParty(invite);
-    return invite;
-  },
+  resume_last_session: () =>
+    serialized(async () => {
+      if (!lastInvite) return null;
+      const invite = lastInvite;
+      await joinParty(invite);
+      return invite;
+    }),
 
   clear_last_session: () => {
     lastInvite = null;
   },
 
-  join_hosted_party: async () => {
-    if (session.phase !== "hosting") fail("server_not_running", "the sync server is not running");
-    if (watch?.role === "host") return;
-    if (watch) stopWatch();
+  join_hosted_party: () =>
+    serialized(async () => {
+      if (session.phase !== "hosting") fail("server_not_running", "the sync server is not running");
+      if (watch?.role === "host") return;
+      if (watch) stopWatch();
 
-    const mine = ++generation;
-    setWatch({
-      role: "host",
-      room: INVITE.room,
-      username: null,
-      connection: { state: "connecting" },
-      player: { state: "starting" },
-      ready: false,
-    });
-    // Loopback to its own server: no tunnel, so it is in almost at once.
-    await sleep(300);
-    if (mine !== generation) return;
-    await openPlayer(mine, settings.nickname);
-  },
+      const mine = ++generation;
+      // Loopback to its own server: no tunnel, so it is in almost at once.
+      await sleep(300);
+      if (mine !== generation) return;
+      await admitted(mine, { role: "host", room: INVITE.room });
+    }),
 
   watch_state: () => watch,
 

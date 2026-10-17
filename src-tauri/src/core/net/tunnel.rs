@@ -306,13 +306,9 @@ fn describe(connection: &Connection) -> PeerPath {
 pub struct GuestTunnel {
     local: SocketAddr,
     task: JoinHandle<()>,
-    /// The connection the forwarding task is using, held here only so the
-    /// diagnostics screen can ask how it is carried. Cloning a [`Connection`]
-    /// clones a handle, not the connection.
-    connection: Connection,
-    /// The write half of the control channel opened in [`Self::open`], kept
-    /// so [`Self::send_control`] can be called any time after connecting.
-    control_writer: Arc<AsyncMutex<BoxedWriter>>,
+    /// The connection to the host and its control channel. Both are replaced
+    /// whenever the tunnel has to dial again.
+    link: Arc<Link>,
     /// Kept alive, never used again.
     ///
     /// An [`Endpoint`] is a handle to the QUIC stack, and dropping the last
@@ -320,6 +316,96 @@ pub struct GuestTunnel {
     /// means a tunnel cannot be quietly killed by whoever handed the endpoint
     /// over letting go of theirs.
     _endpoint: Endpoint,
+}
+
+/// What a guest currently holds open to its host.
+struct Link {
+    /// Cloning a [`Connection`] clones a handle, not the connection, so this
+    /// is only ever locked long enough to swap or copy one out.
+    connection: Mutex<Connection>,
+    /// The write half of the control channel. The writer inside is replaced
+    /// on every dial, so a [`GuestTunnel::send_control`] that waits for the
+    /// lock writes to whichever connection is current by the time it gets it.
+    control_writer: Arc<AsyncMutex<BoxedWriter>>,
+}
+
+impl Link {
+    fn current(&self) -> Connection {
+        self.connection
+            .lock()
+            .expect("the guest link is never poisoned")
+            .clone()
+    }
+
+    /// The live connection, dialling the host again first if the old one has
+    /// gone.
+    ///
+    /// Only ever called from the accept loop, one connection at a time, so
+    /// two dials can never race each other.
+    async fn usable(
+        &self,
+        endpoint: &Endpoint,
+        host: &EndpointAddr,
+        control: &Arc<dyn ControlChannel>,
+    ) -> Option<Connection> {
+        let current = self.current();
+        if current.close_reason().is_none() {
+            return Some(current);
+        }
+
+        match dial(endpoint, host, control).await {
+            Ok((connection, writer)) => {
+                tracing::info!(host = %host.id, "dialled the host again");
+                *self.control_writer.lock().await = writer;
+                *self
+                    .connection
+                    .lock()
+                    .expect("the guest link is never poisoned") = connection.clone();
+                Some(connection)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the host is still out of reach");
+                None
+            }
+        }
+    }
+}
+
+/// Dials `host` and opens the control channel on the new connection.
+///
+/// The control channel is the first bi-stream on every connection, so the
+/// host's `serve` loop can rely on it always coming first. `control` receives
+/// whatever the host sends back down it, for as long as that connection lasts.
+async fn dial(
+    endpoint: &Endpoint,
+    host: &EndpointAddr,
+    control: &Arc<dyn ControlChannel>,
+) -> Result<(Connection, BoxedWriter)> {
+    let unreachable = |reason: String| SyncPartyError::PartyUnreachable {
+        host: host.id.to_string(),
+        reason,
+    };
+
+    let connection = endpoint
+        .connect(host.clone(), ALPN)
+        .await
+        .map_err(|error| unreachable(error.to_string()))?;
+
+    let (control_send, control_recv) = connection
+        .open_bi()
+        .await
+        .map_err(|error| unreachable(error.to_string()))?;
+
+    let mut control_reader: BoxedReader = Box::new(control_recv);
+    let peer = connection.remote_id();
+    let control = Arc::clone(control);
+    tokio::spawn(async move {
+        while let Ok(bytes) = read_frame(&mut *control_reader).await {
+            Arc::clone(&control).on_message(peer, bytes);
+        }
+    });
+
+    Ok((connection, Box::new(control_send)))
 }
 
 impl GuestTunnel {
@@ -336,42 +422,25 @@ impl GuestTunnel {
     /// [`EndpointAddr`] when the addresses are already known and there is no
     /// lookup service to ask.
     ///
-    /// Opens the control channel — the first bi-stream on the connection —
-    /// before anything else, so the host's `serve` loop can rely on it always
-    /// being first. `control` receives whatever the host sends back down it.
+    /// Opens the control channel before anything else, and again on every
+    /// later dial. `control` receives whatever the host sends back down it.
+    ///
+    /// The tunnel outlives the connection under it. When the host stops its
+    /// party and starts it again, restarts syncparty, or goes quiet for longer
+    /// than the idle timeout, the next connection the sync client makes dials
+    /// the host again — the invite still names the same endpoint, so the
+    /// client's own reconnect loop is all it takes to get back in.
     pub async fn open(
         endpoint: Endpoint,
         host: impl Into<EndpointAddr>,
         control: Arc<dyn ControlChannel>,
     ) -> Result<Self> {
         let host = host.into();
-        let id = host.id;
+        let (connection, writer) = dial(&endpoint, &host, &control).await?;
 
-        let connection = endpoint.connect(host, ALPN).await.map_err(|error| {
-            SyncPartyError::PartyUnreachable {
-                host: id.to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-
-        let (control_send, control_recv) =
-            connection
-                .open_bi()
-                .await
-                .map_err(|error| SyncPartyError::PartyUnreachable {
-                    host: id.to_string(),
-                    reason: error.to_string(),
-                })?;
-
-        let control_writer: Arc<AsyncMutex<BoxedWriter>> =
-            Arc::new(AsyncMutex::new(Box::new(control_send)));
-
-        let mut control_reader: BoxedReader = Box::new(control_recv);
-        let peer = connection.remote_id();
-        tokio::spawn(async move {
-            while let Ok(bytes) = read_frame(&mut *control_reader).await {
-                Arc::clone(&control).on_message(peer, bytes);
-            }
+        let link = Arc::new(Link {
+            connection: Mutex::new(connection),
+            control_writer: Arc::new(AsyncMutex::new(writer)),
         });
 
         // Port 0 asks the OS for a free one: a fixed port would collide with
@@ -380,14 +449,21 @@ impl GuestTunnel {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let local = listener.local_addr()?;
 
-        let forwarding = connection.clone();
+        let forwarding = Arc::clone(&link);
+        let dialler = endpoint.clone();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
 
-                let connection = forwarding.clone();
+                // Dropping the stream unanswered when the host cannot be
+                // reached is what the sync client expects of a dead server:
+                // it backs off and tries again, and so do we.
+                let Some(connection) = forwarding.usable(&dialler, &host, &control).await else {
+                    continue;
+                };
+
                 tokio::spawn(async move {
                     match connection.open_bi().await {
                         Ok((send, recv)) => splice(stream, send, recv).await,
@@ -402,8 +478,7 @@ impl GuestTunnel {
         Ok(Self {
             local,
             task,
-            connection,
-            control_writer,
+            link,
             _endpoint: endpoint,
         })
     }
@@ -416,23 +491,22 @@ impl GuestTunnel {
 
     /// How this guest is reaching the host.
     pub fn host_path(&self) -> PeerPath {
-        describe(&self.connection)
+        describe(&self.link.current())
     }
 
-    /// Whether the tunnel can still carry a connection to the host.
+    /// Whether the connection to the host is up right now.
     ///
-    /// The tunnel dials once, in [`Self::open`], and never again: once the
-    /// QUIC connection is closed — the host stopped its party or restarted,
-    /// or it went quiet for longer than the idle timeout — every stream the
-    /// sync client opens through it is refused. Asking lets the session
-    /// replace a dead tunnel instead of keeping it.
+    /// False between the host going away and the next successful dial. The
+    /// tunnel dials again by itself, but only when the sync client next
+    /// connects, so the session can use this to tell a party that is really
+    /// still there from one it is only trying to get back to.
     pub fn is_alive(&self) -> bool {
-        self.connection.close_reason().is_none() && !self.task.is_finished()
+        self.link.current().close_reason().is_none() && !self.task.is_finished()
     }
 
     /// Sends `bytes` to the host down the control channel.
     pub async fn send_control(&self, bytes: &[u8]) -> Result<()> {
-        let mut writer = self.control_writer.lock().await;
+        let mut writer = self.link.control_writer.lock().await;
         write_frame(&mut *writer, bytes).await.map_err(|error| {
             SyncPartyError::Other(format!("control channel write failed: {error}"))
         })
@@ -668,6 +742,106 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// Whether one plain TCP round trip through `local` makes it to the echo
+    /// server and back.
+    async fn echoes_through(local: SocketAddr) -> bool {
+        let Ok(mut client) = TcpStream::connect(local).await else {
+            return false;
+        };
+        if client.write_all(b"hello syncplay").await.is_err() {
+            return false;
+        }
+
+        let mut buffer = [0_u8; 14];
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut buffer),
+        )
+        .await;
+        matches!(read, Ok(Ok(_))) && &buffer == b"hello syncplay"
+    }
+
+    /// A host that stops its party and starts it again keeps its key, so the
+    /// invite still names it. The guest's tunnel has to notice that the old
+    /// connection is gone and dial again behind the same local port — the one
+    /// the sync client keeps retrying — or every guest would sit reconnecting
+    /// to a party that is back.
+    #[tokio::test]
+    async fn a_guest_tunnel_dials_again_when_the_host_comes_back() {
+        use iroh::endpoint::presets;
+
+        let syncplay = echo_server().await;
+        let key = iroh::SecretKey::generate();
+        // The same port both times, standing in for the address lookup that
+        // finds a restarted host in real use and that this test leaves out.
+        let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("a free port")
+            .local_addr()
+            .expect("address")
+            .port();
+        // Retried briefly: the aborted accept loop of the first host lets go
+        // of its handle on the socket a moment after it is told to.
+        let bind_host = |key: iroh::SecretKey| async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let bound = Endpoint::builder(presets::Minimal)
+                    .secret_key(key.clone())
+                    .alpns(vec![ALPN.to_vec()])
+                    .clear_ip_transports()
+                    .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+                    .expect("a loopback address")
+                    .bind()
+                    .await;
+                match bound {
+                    Ok(endpoint) => break endpoint,
+                    Err(error) if tokio::time::Instant::now() > deadline => {
+                        panic!("host endpoint: {error}")
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+                }
+            }
+        };
+
+        let host_endpoint = bind_host(key.clone()).await;
+        let host_addr = addr_of(&host_endpoint).await;
+        let host = HostTunnel::start(host_endpoint.clone(), syncplay, Arc::new(NullControl));
+
+        let guest_endpoint = Endpoint::bind(presets::Minimal)
+            .await
+            .expect("guest endpoint");
+        let guest = GuestTunnel::open(guest_endpoint, host_addr, Arc::new(NullControl))
+            .await
+            .expect("the tunnel should open");
+        assert!(echoes_through(guest.local_addr()).await);
+
+        // The party stops...
+        drop(host);
+        host_endpoint.close().await;
+        drop(host_endpoint);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while guest.is_alive() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the guest never noticed the host had gone"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // ...and starts again, under the same key.
+        let host_endpoint = bind_host(key).await;
+        let _host = HostTunnel::start(host_endpoint, syncplay, Arc::new(NullControl));
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !echoes_through(guest.local_addr()).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the guest never got back to the restarted host"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        assert!(guest.is_alive(), "a tunnel that got back in is alive again");
     }
 
     /// The claim the whole move off Tailscale rests on: an invite code alone

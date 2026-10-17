@@ -316,11 +316,17 @@ impl Driver {
             self.connection = ConnectionState::Reconnecting {
                 attempt: self.attempt,
             };
-            self.execute(Step {
-                notices: vec![Notice::Reconnecting],
-                ..Step::default()
-            })
-            .await;
+            // Said once, when the connection goes. Upstream repeats it on every
+            // attempt, which over a host that is gone for a while means the
+            // same line over the film every three seconds; the watch card
+            // keeps counting the attempts instead.
+            if self.attempt == 1 {
+                self.execute(Step {
+                    notices: vec![Notice::Reconnecting],
+                    ..Step::default()
+                })
+                .await;
+            }
         }
     }
 

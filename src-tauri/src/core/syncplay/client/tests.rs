@@ -367,6 +367,36 @@ async fn silence_for_the_protocol_timeout_reconnects_with_backoff() {
     );
 }
 
+/// A host that is gone for a while is announced once over the film, not
+/// again on every attempt to reach it — the watch card is where the count
+/// goes up.
+#[tokio::test]
+async fn a_party_that_stays_away_is_announced_once_not_on_every_attempt() {
+    let server = Server::bind().await;
+    let client = SyncClient::start(config(server.address()));
+    let (player, events) = FakePlayer::new();
+    client.attach_player(player.clone(), events);
+    let mut first = server.accept().await;
+    first.greet().await;
+    drop(first);
+
+    // Every attempt after that is turned away the moment it arrives.
+    for _ in 0..3 {
+        drop(server.accept().await);
+    }
+    until_status(&client, |status| {
+        matches!(status.connection, ConnectionState::Reconnecting { attempt } if attempt >= 3)
+    })
+    .await;
+
+    let announced = player
+        .texts()
+        .iter()
+        .filter(|text| text.as_str() == "Lost the connection to the party, reconnecting…")
+        .count();
+    assert_eq!(announced, 1, "{:?}", player.texts());
+}
+
 #[tokio::test]
 async fn heartbeats_keep_the_connection_alive_past_the_timeout() {
     let server = Server::bind().await;

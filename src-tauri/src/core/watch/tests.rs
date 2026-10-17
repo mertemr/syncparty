@@ -86,10 +86,9 @@ impl Fixture {
 
         let film = dir.join("Film.mkv");
         std::fs::write(&film, b"not really a film").expect("fixture");
-        Self {
-            film: film.canonicalize().expect("canonical"),
-            dir,
-        }
+        // Not canonicalized: what the player is handed is the path as given,
+        // made absolute, and the temporary directory already is.
+        Self { film, dir }
     }
 }
 
@@ -363,6 +362,35 @@ async fn only_an_existing_regular_file_is_opened() {
             .any(|command| matches!(command, Command::Load(_))),
         "nothing reached the player"
     );
+    watching.watch.stop().await;
+}
+
+/// A film reached through a link is opened through the link, so the name the
+/// room sees is the one the user picked, not whatever the file behind it is
+/// called.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_opened_through_a_link_keeps_the_links_name() {
+    let watching = Watching::start(false).await;
+    let fixture = Fixture::new();
+    let stored = fixture.dir.join("abc123.bin");
+    std::fs::rename(&fixture.film, &stored).expect("move the film");
+    std::os::unix::fs::symlink(&stored, &fixture.film).expect("link");
+
+    watching
+        .watch
+        .open_file(&fixture.film)
+        .await
+        .expect("opened");
+
+    assert_eq!(
+        watching.player().commands().first(),
+        Some(&Command::Load(fixture.film.clone()))
+    );
+    let PlayerStatus::Loaded { file, .. } = watching.until(loaded).await.player else {
+        unreachable!();
+    };
+    assert_eq!(file.name, "Film.mkv");
     watching.watch.stop().await;
 }
 

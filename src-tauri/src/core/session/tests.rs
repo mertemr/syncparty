@@ -291,7 +291,6 @@ fn film(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("Film.mkv");
     std::fs::write(&path, b"not really a film").expect("film");
-    let path = path.canonicalize().expect("canonical");
     (dir, path)
 }
 

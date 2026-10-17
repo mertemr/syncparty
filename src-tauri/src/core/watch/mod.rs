@@ -563,21 +563,29 @@ fn reason(error: &SyncPartyError) -> String {
 }
 
 /// `path` made absolute, if it names an existing regular file.
+///
+/// Absolute, not canonical: a symlink is checked through to what it points
+/// at, but it is the link that is opened, so the room sees the name the user
+/// picked rather than whatever the file is called on the disk behind it. It
+/// also keeps Windows' `\\?\` form of a path, which `canonicalize` returns,
+/// away from mpv. The same rule the mpv driver applies to whatever it loads.
 async fn regular_file(path: &Path) -> Result<PathBuf> {
-    let resolved = tokio::fs::canonicalize(path).await.map_err(|error| {
-        SyncPartyError::PlayerFailed(match error.kind() {
-            std::io::ErrorKind::NotFound => format!("there is no file at {}", path.display()),
-            _ => format!("cannot open {}: {error}", path.display()),
-        })
+    let absolute = std::path::absolute(path).map_err(|error| {
+        SyncPartyError::PlayerFailed(format!("cannot open {}: {error}", path.display()))
     })?;
 
-    let metadata = tokio::fs::metadata(&resolved).await?;
+    let metadata = tokio::fs::metadata(&absolute).await.map_err(|error| {
+        SyncPartyError::PlayerFailed(match error.kind() {
+            std::io::ErrorKind::NotFound => format!("there is no file at {}", absolute.display()),
+            _ => format!("cannot open {}: {error}", absolute.display()),
+        })
+    })?;
     if !metadata.is_file() {
         return Err(SyncPartyError::PlayerFailed(format!(
             "{} is not a file",
-            resolved.display()
+            absolute.display()
         )));
     }
 
-    Ok(resolved)
+    Ok(absolute)
 }

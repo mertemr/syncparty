@@ -1,7 +1,7 @@
 //! Running external programs without flashing console windows at the user.
 //!
-//! Every subprocess syncparty starts — `winget`, the Syncplay client — goes
-//! through here. On Windows a bare
+//! Every subprocess syncparty starts — `winget`, `brew`, mpv — goes through
+//! here. On Windows a bare
 //! [`tokio::process::Command`] pops a console window for a fraction of a
 //! second, which looks broken in a GUI app; `CREATE_NO_WINDOW` suppresses it.
 
@@ -29,12 +29,6 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command.creation_flags(CREATE_NO_WINDOW);
 
     command
-}
-
-/// Builds a [`Command`] for a process syncparty keeps running and reads from
-/// line by line, rather than waiting on to completion.
-pub fn spawnable(program: impl AsRef<OsStr>) -> Command {
-    command(program)
 }
 
 /// Builds a [`Command`] for a long-lived program syncparty talks to some
@@ -112,9 +106,9 @@ where
 /// Resolves an executable, preferring `PATH` and falling back to a list of
 /// well-known install locations.
 ///
-/// mpv and Syncplay both install somewhere predictable but do not
-/// reliably add themselves to `PATH`, so looking in both places is what makes
-/// detection work on a stock machine.
+/// mpv installs somewhere predictable but does not reliably add itself to
+/// `PATH`, so looking in both places is what makes detection work on a stock
+/// machine.
 pub fn locate(binary: &str, fallbacks: &[&str]) -> Option<std::path::PathBuf> {
     if let Ok(found) = which::which(binary) {
         return Some(found);

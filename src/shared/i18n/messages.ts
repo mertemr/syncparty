@@ -29,6 +29,10 @@ export const en = {
   "nav.leaveWatching.detail":
     "Going back closes the player and leaves the party.",
   "nav.leaveWatching.confirm": "Leave and go back",
+  "nav.leaveJoining.title": "You're still joining a party",
+  "nav.leaveJoining.detail":
+    "Going back gives up on it. If the party lets you in meanwhile, you'll leave it right away.",
+  "nav.leaveJoining.confirm": "Give up and go back",
 
   "onboarding.title": "What are you doing tonight?",
   "onboarding.eyebrow": "Watch together, privately",
@@ -81,6 +85,9 @@ export const en = {
   "host.live": "Live",
   "host.join": "Watch on this machine",
   "host.joining": "Opening the player…",
+  "host.guestParty.title": "Still in someone else's party",
+  "host.guestParty.detail":
+    "You joined it as a guest. Its player stays open and in step with that party until you leave it.",
   "host.watch.stop": "Stop watching here",
   "host.invite.title": "Invite",
   "host.invite.link": "Join link",
@@ -370,6 +377,10 @@ export const tr: Messages = {
   "nav.leaveWatching.detail":
     "Geri dönersen oynatıcı kapanır ve film gecesinden ayrılırsın.",
   "nav.leaveWatching.confirm": "Ayrıl ve geri dön",
+  "nav.leaveJoining.title": "Hâlâ bir film gecesine bağlanılıyor",
+  "nav.leaveJoining.detail":
+    "Geri dönersen bağlanmaktan vazgeçilir. O arada içeri alınırsan film gecesinden hemen çıkarsın.",
+  "nav.leaveJoining.confirm": "Vazgeç ve geri dön",
 
   "onboarding.title": "Bu akşam ne yapıyorsun?",
   "onboarding.eyebrow": "Aynı film, aynı an",
@@ -421,6 +432,9 @@ export const tr: Messages = {
   "host.live": "Yayında",
   "host.join": "Bu bilgisayarda izle",
   "host.joining": "Oynatıcı açılıyor…",
+  "host.guestParty.title": "Hâlâ başka birinin film gecesindesin",
+  "host.guestParty.detail":
+    "Ona misafir olarak katıldın. Sen ayrılana kadar oynatıcısı açık kalır ve o odayla senkron oynamaya devam eder.",
   "host.watch.stop": "Burada izlemeyi bırak",
   "host.invite.title": "Davet",
   "host.invite.link": "Katılma bağlantısı",

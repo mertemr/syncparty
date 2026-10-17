@@ -12,6 +12,7 @@ import { PartyLogCard } from "@/features/movie/PartyLogCard";
 import { HostMoviePanel } from "@/features/movie-voting/HostMoviePanel";
 import { WatchCard } from "@/features/watch/WatchCard";
 
+import { GuestPartyNotice } from "./GuestPartyNotice";
 import { InviteCard } from "./InviteCard";
 import { LobbyPanel } from "./LobbyPanel";
 import { RoomPanel } from "./RoomPanel";
@@ -184,6 +185,7 @@ export function HostScreen() {
     return (
       <div className="mx-auto max-w-2xl space-y-5 px-8 py-8">
         {statusCard}
+        <GuestPartyNotice />
         {logsCard}
       </div>
     );
@@ -206,6 +208,7 @@ export function HostScreen() {
           siblings down to whatever is left over. */}
       <div className="min-w-0 space-y-5 md:tall:sticky md:tall:top-4 md:tall:self-start">
         {statusCard}
+        <GuestPartyNotice />
 
         {watching && (
           <WatchCard watch={watching} room={room} onLeave={ipc.stopWatching} />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useAppState } from "@/app/AppState";
 import { GuestMoviePanel } from "@/features/movie-voting/GuestMoviePanel";
@@ -19,8 +19,9 @@ import {
   Rewind,
   cx,
 } from "@/shared/ui";
-import type { Invite } from "@/shared/types/Invite";
 import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
+
+import { guestJoins, leaveGuestParty, useGuestJoin } from "./useGuestJoin";
 
 const DOT_TONES: Record<WatchTone, string> = {
   neutral: "bg-ink-faint",
@@ -30,22 +31,14 @@ const DOT_TONES: Record<WatchTone, string> = {
 };
 
 /**
- * Rejoining the last party is for coming back after a restart, so it is
- * tried once per launch. Held outside the component because the screen
- * remounts every time Settings opens and closes, and a remount must not join
- * again — kept as the attempt itself, so a screen mounted while one is still
- * running shows that rather than a paste box.
- */
-let resumeAttempt: { settled: boolean; done: Promise<void> } | null = null;
-
-/**
  * The guest half: accept an invite, then watch the party on this machine —
  * syncparty connects to the host and keeps mpv in step itself.
  *
- * What is being watched lives in the backend, not here: this screen only
- * holds an invite that has not been joined yet. An invite arriving by deep
- * link skips the paste step entirely, which is the path this whole feature
- * exists to make possible.
+ * What is being watched lives in the backend, not here, and the invite on
+ * screen and any join under way live in `guestJoins`: the screen remounts
+ * every time Settings opens and closes, and a join outlives that. An invite
+ * arriving by deep link skips the paste step entirely, which is the path
+ * this whole feature exists to make possible.
  */
 export function GuestScreen() {
   const t = useTranslate();
@@ -55,17 +48,18 @@ export function GuestScreen() {
   // screen started or can leave.
   const watching = watch?.role === "guest" ? watch : null;
 
+  const joinState = useGuestJoin();
+  const { invite, fromLink } = joinState;
+  const joining = joinState.joining !== null;
+  // The invite on screen is the one being joined — not one that arrived by
+  // link while another was already on its way in.
+  const joiningThis = joining && joinState.joining === invite;
+  // "untried" counts too, so a cold start goes straight to "rejoining"
+  // instead of flashing the paste box before the first effect runs.
+  const resuming = joinState.resume !== "settled";
+
   const [text, setText] = useState("");
-  const [invite, setInvite] = useState<Invite | null>(null);
-  const [fromLink, setFromLink] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
-  const [joining, setJoining] = useState(false);
-  // True before the first attempt has even started, so a cold start goes
-  // straight to "rejoining" instead of flashing the paste box first.
-  const [resuming, setResuming] = useState(() => !resumeAttempt?.settled);
-  // State alone lets a fast second click through before the re-render that
-  // disables the button; the ref closes that gap.
-  const joinInFlight = useRef(false);
   // When this guest started watching, for the counter. Same source as the
   // host's: the transition the frontend already sees.
   const [since, setSince] = useState<number | null>(null);
@@ -79,76 +73,44 @@ export function GuestScreen() {
   useEffect(() => {
     if (!pendingInvite) return;
 
-    setInvite(pendingInvite);
-    setFromLink(true);
+    guestJoins.offer(pendingInvite, true);
     setParseError(null);
     clearPendingInvite();
   }, [pendingInvite, clearPendingInvite]);
 
-  // Deliberately once per mount, with what was true at the first one: whether
-  // to resume is decided once per launch, not re-decided as state moves.
+  // Rejoining the last party is for coming back after a restart, so it is
+  // tried once per launch: every mount after the first, Settings closing
+  // included, finds it already tried and does nothing. Runs after the effect
+  // above, so an invite from a link is already on screen and wins.
   useEffect(() => {
-    if (!resumeAttempt) {
-      const attempt = { settled: false, done: Promise.resolve() };
-      attempt.done = (pendingInvite ? Promise.resolve() : resumeUnlessWatching())
-        .catch(reportFailure)
-        .finally(() => {
-          attempt.settled = true;
-        });
-      resumeAttempt = attempt;
-    }
-
-    let cancelled = false;
-    void resumeAttempt.done.finally(() => {
-      if (!cancelled) setResuming(false);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    guestJoins.resumeOnce().catch(reportFailure);
+  }, [reportFailure]);
 
   async function decode() {
     setParseError(null);
     try {
-      setInvite(await ipc.decodeInvite(text));
-      setFromLink(false);
+      guestJoins.offer(await ipc.decodeInvite(text), false);
     } catch (error) {
       setParseError(errorMessage(error));
     }
   }
 
   async function join() {
-    if (!invite || joinInFlight.current) return;
-
-    joinInFlight.current = true;
-    setJoining(true);
     try {
-      await ipc.joinParty(invite);
-      // In: from here the backend's watch state is the whole story.
-      dismissInvite();
+      // Guarded in `guestJoins` rather than by the button alone: state lets a
+      // fast second click through before the re-render that disables it.
+      await guestJoins.join();
+      setText("");
     } catch (error) {
       // A wrong password lands here as `sync_rejected`, before any watch
       // card was shown, so the invite stays up to try another.
       reportFailure(error);
-    } finally {
-      joinInFlight.current = false;
-      setJoining(false);
     }
   }
 
   function dismissInvite() {
-    setInvite(null);
+    guestJoins.dismiss();
     setText("");
-    setFromLink(false);
-  }
-
-  async function leave() {
-    // Leaving is what closes the player and the tunnel. Clearing the saved
-    // invite only stops it being reopened on the next launch.
-    await ipc.leaveParty();
-    await ipc.clearLastSession();
   }
 
   const view = watching ? describeWatch(watching, room, t) : null;
@@ -197,10 +159,15 @@ export function GuestScreen() {
               </p>
             </div>
 
-            {joining ? (
+            {joiningThis ? (
               <Rewind label={t("guest.joining")} />
             ) : (
-              <Button variant="primary" className="w-full" onClick={() => void join()}>
+              <Button
+                variant="primary"
+                className="w-full"
+                disabled={joining}
+                onClick={() => void join()}
+              >
                 {t("guest.join")}
               </Button>
             )}
@@ -211,7 +178,7 @@ export function GuestScreen() {
             <Button
               variant="ghost"
               className="w-full"
-              disabled={joining}
+              disabled={joiningThis}
               onClick={dismissInvite}
             >
               {watching && !joining ? t("common.cancel") : t("guest.clear")}
@@ -222,7 +189,7 @@ export function GuestScreen() {
 
       {shown && (
         <>
-          <WatchCard watch={shown} room={room} onLeave={leave} />
+          <WatchCard watch={shown} room={room} onLeave={leaveGuestParty} />
           {/* A party that turned this machine away will never list its room. */}
           {shown.connection.state !== "rejected" && <GuestRoster snapshot={room} />}
           <GuestMoviePanel />
@@ -268,16 +235,6 @@ export function GuestScreen() {
       )}
     </div>
   );
-}
-
-/**
- * Asked of the backend rather than read from state: on a cold start the
- * hydrated watch state may not have landed yet, and joining a party this
- * machine is already in is exactly what the once-per-launch rule is for.
- */
-async function resumeUnlessWatching() {
-  if (await ipc.watchState()) return;
-  await ipc.resumeLastSession();
 }
 
 /**

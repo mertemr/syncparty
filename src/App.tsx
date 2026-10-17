@@ -2,7 +2,10 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
+import { leaveReason, type LeaveReason } from "@/app/leaveReason";
 import { GuestScreen } from "@/features/guest/GuestScreen";
+import { guestJoinInFlight } from "@/features/guest/guestJoin";
+import { leaveGuestParty, useGuestJoin } from "@/features/guest/useGuestJoin";
 import { HostScreen } from "@/features/host/HostScreen";
 import { LaunchScreen } from "@/features/launch/LaunchScreen";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -38,21 +41,24 @@ function Localised() {
   );
 }
 
-/** The two ways stepping back can break something, each with its own words. */
+/** The ways stepping back can break something, each with its own words. */
 const LEAVE_PROMPTS = {
   hosting: {
     title: "nav.leaveHosting.title",
     detail: "nav.leaveHosting.detail",
     confirm: "nav.leaveHosting.confirm",
   },
+  joining: {
+    title: "nav.leaveJoining.title",
+    detail: "nav.leaveJoining.detail",
+    confirm: "nav.leaveJoining.confirm",
+  },
   watching: {
     title: "nav.leaveWatching.title",
     detail: "nav.leaveWatching.detail",
     confirm: "nav.leaveWatching.confirm",
   },
-} satisfies Record<string, Record<"title" | "detail" | "confirm", MessageKey>>;
-
-type LeaveReason = keyof typeof LEAVE_PROMPTS;
+} satisfies Record<LeaveReason, Record<"title" | "detail" | "confirm", MessageKey>>;
 
 function Shell() {
   const t = useTranslate();
@@ -61,6 +67,10 @@ function Shell() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [confirmingLeave, setConfirmingLeave] = useState<LeaveReason | null>(null);
+  // A leave sent mid-join waits for the join to land before undoing it, so
+  // the prompt can sit there a while; it must not take a second click.
+  const [leaving, setLeaving] = useState(false);
+  const guestJoin = useGuestJoin();
   // Set when the user steps back to the launch surface. The stored mode stays
   // as their last answer — `SettingsPatch` cannot clear it — but the slots
   // come back, so a mistaken pick is one click to undo.
@@ -84,8 +94,6 @@ function Shell() {
 
   const mode = atLaunch ? null : (settings?.mode ?? null);
 
-  const partyRunning =
-    session.phase === "starting" || session.phase === "hosting";
   const canGoBack = settings !== null && !showSettings && mode !== null;
 
   function stepBack() {
@@ -94,37 +102,34 @@ function Shell() {
   }
 
   /**
-   * Two steps back break something, so both ask first. Hosting takes the
-   * server down and everyone connected to it; a guest who is watching would
-   * be walking away from a player that nothing keeps in step any more, so
-   * going back means leaving the party — said once, then done.
+   * A step back that would break something asks first — which ones, and
+   * why, is `leaveReason`'s to say. Confirming ends what it named, then
+   * steps back: said once, then done.
    */
   function goBack() {
-    if (mode === "host" && partyRunning) {
-      setConfirmingLeave("hosting");
-      return;
-    }
-    if (mode === "guest" && watch?.role === "guest") {
-      setConfirmingLeave("watching");
-      return;
-    }
-    stepBack();
+    const reason = leaveReason({ mode, session, guestJoin, watch });
+    if (reason) setConfirmingLeave(reason);
+    else stepBack();
   }
 
   async function leaveAndGoBack(reason: LeaveReason) {
+    if (leaving) return;
+
+    setLeaving(true);
     try {
       if (reason === "hosting") {
         await ipc.stopHosting();
       } else {
         // The same as the watch card's Leave: a party left on purpose is not
         // one to reopen on the next launch.
-        await ipc.leaveParty();
-        await ipc.clearLastSession();
+        await leaveGuestParty();
       }
     } catch (error) {
       reportFailure(error);
       setConfirmingLeave(null);
       return;
+    } finally {
+      setLeaving(false);
     }
     stepBack();
   }
@@ -142,6 +147,7 @@ function Shell() {
       {confirmingLeave && (
         <LeavePrompt
           reason={confirmingLeave}
+          busy={leaving}
           onConfirm={() => void leaveAndGoBack(confirmingLeave)}
           onCancel={() => setConfirmingLeave(null)}
         />
@@ -182,10 +188,12 @@ function Shell() {
  */
 function LeavePrompt({
   reason,
+  busy,
   onConfirm,
   onCancel,
 }: {
   reason: LeaveReason;
+  busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -205,10 +213,10 @@ function LeavePrompt({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="ghost" onClick={onCancel}>
+          <Button variant="ghost" disabled={busy} onClick={onCancel}>
             {t("common.cancel")}
           </Button>
-          <Button variant="danger" onClick={onConfirm}>
+          <Button variant="danger" disabled={busy} onClick={onConfirm}>
             {t(words.confirm)}
           </Button>
         </div>
@@ -325,12 +333,15 @@ function FailureBanner() {
  * The restart button is withheld while a party is running or being watched —
  * installing replaces the running binary and relaunches it, which would take
  * the server down along with everyone still watching, or close the player
- * syncparty is keeping in step. Once hosting and watching both stop, the
- * button appears on its own; nothing needs to be re-triggered manually.
+ * syncparty is keeping in step. A guest join still connecting counts as
+ * watching: it has no watch state yet, but it will open the player the
+ * moment the party answers. Once hosting and watching both stop, the button
+ * appears on its own; nothing needs to be re-triggered manually.
  */
 function UpdateBanner() {
   const t = useTranslate();
   const { session, watch } = useAppState();
+  const guestJoin = useGuestJoin();
   const { state, install } = useAppUpdate();
 
   if (state.status === "packageManaged") {
@@ -340,7 +351,7 @@ function UpdateBanner() {
   if (state.status !== "ready") return null;
 
   const hosting = session.phase === "hosting";
-  const watching = watch !== null;
+  const watching = watch !== null || guestJoinInFlight(guestJoin);
   const notice = hosting
     ? t("update.hostingNotice")
     : watching

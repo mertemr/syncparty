@@ -20,7 +20,7 @@ secretStorage: string, dependencies: PreflightReport,
  * identity. Included because it is the one value that identifies a
  * machine when comparing notes about a party that would not connect.
  */
-endpoint: string | null, session: SessionState, watch: WatchState | null, 
+endpoint: string | null, session: SessionState, 
 /**
  * How this machine sits on the network, measured live.
  *
@@ -29,4 +29,11 @@ endpoint: string | null, session: SessionState, watch: WatchState | null,
  * single most useful thing this screen can say, and a blank section would
  * bury it.
  */
-transport: TransportReport | null, transportError: string | null, };
+transport: TransportReport | null, transportError: string | null, 
+/**
+ * What this machine is watching: whether the sync connection is up and
+ * what the player is doing. `None` when nothing is being watched. The
+ * file name is in here; the UI leaves it out of anything copied for
+ * sharing.
+ */
+watch: WatchState | null, };

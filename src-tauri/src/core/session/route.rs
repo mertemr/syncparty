@@ -32,6 +32,11 @@ pub(crate) trait Route: Send + Sync {
     /// Where the sync client connects. Always on loopback.
     fn local_addr(&self) -> SocketAddr;
 
+    /// Whether the route still reaches the host. A route that has died stays
+    /// dead — the sync client behind it retries forever and gets nowhere —
+    /// so the only way back into the party is a new one.
+    fn is_alive(&self) -> bool;
+
     /// How this machine is placed on the network, and how the route to the
     /// host is carried.
     fn report(&self) -> TransportReport;
@@ -79,6 +84,10 @@ struct Tunnel {
 impl Route for Tunnel {
     fn local_addr(&self) -> SocketAddr {
         self.tunnel.local_addr()
+    }
+
+    fn is_alive(&self) -> bool {
+        self.tunnel.is_alive()
     }
 
     fn report(&self) -> TransportReport {

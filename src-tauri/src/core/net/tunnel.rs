@@ -419,6 +419,17 @@ impl GuestTunnel {
         describe(&self.connection)
     }
 
+    /// Whether the tunnel can still carry a connection to the host.
+    ///
+    /// The tunnel dials once, in [`Self::open`], and never again: once the
+    /// QUIC connection is closed — the host stopped its party or restarted,
+    /// or it went quiet for longer than the idle timeout — every stream the
+    /// sync client opens through it is refused. Asking lets the session
+    /// replace a dead tunnel instead of keeping it.
+    pub fn is_alive(&self) -> bool {
+        self.connection.close_reason().is_none() && !self.task.is_finished()
+    }
+
     /// Sends `bytes` to the host down the control channel.
     pub async fn send_control(&self, bytes: &[u8]) -> Result<()> {
         let mut writer = self.control_writer.lock().await;
@@ -617,6 +628,46 @@ mod tests {
             &buffer, b"hello syncplay",
             "bytes must survive the round trip through QUIC and back to TCP"
         );
+    }
+
+    /// A tunnel dials once and never again, so it has to be able to say when
+    /// the connection under it is gone: that is how the session knows a
+    /// second join of the same party is a real one and not a repeat.
+    #[tokio::test]
+    async fn a_guest_tunnel_knows_when_the_host_has_gone() {
+        use iroh::endpoint::presets;
+
+        let syncplay = echo_server().await;
+
+        let host_endpoint = Endpoint::builder(presets::Minimal)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("host endpoint");
+        let guest_endpoint = Endpoint::bind(presets::Minimal)
+            .await
+            .expect("guest endpoint");
+
+        let host_addr = addr_of(&host_endpoint).await;
+        let host = HostTunnel::start(host_endpoint.clone(), syncplay, Arc::new(NullControl));
+        let guest = GuestTunnel::open(guest_endpoint, host_addr, Arc::new(NullControl))
+            .await
+            .expect("the tunnel should open");
+        assert!(guest.is_alive());
+
+        // What stopping a party does: the tunnel goes, then the endpoint is
+        // closed, which tells every guest.
+        drop(host);
+        host_endpoint.close().await;
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while guest.is_alive() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the guest never noticed the host had gone"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     /// The claim the whole move off Tailscale rests on: an invite code alone

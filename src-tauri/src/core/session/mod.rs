@@ -33,7 +33,9 @@ use crate::core::syncplay::{
     ClientConfig, ClientTiming, MonitorConfig, RoomMonitor, ServerConfig, ServerController,
     ServerState,
 };
-use crate::core::watch::{WatchConfig, WatchRole, WatchSession, WatchState, CONNECT_TIMEOUT};
+use crate::core::watch::{
+    WatchConfig, WatchConnection, WatchRole, WatchSession, WatchState, CONNECT_TIMEOUT,
+};
 
 use self::route::{Dialer, Route, TunnelDialer};
 
@@ -519,7 +521,9 @@ impl PartySession {
     ///
     /// Joining the party this machine is already in does nothing, which is
     /// what lets the UI resume on every mount without opening a second
-    /// player. Joining a different one leaves the first.
+    /// player. Joining a different one leaves the first — and so does joining
+    /// the same one over a route that has died or a connection the party has
+    /// since refused, since staying would leave the guest stuck where it is.
     ///
     /// The invite is only remembered once the party has let this machine in,
     /// so a code that turns out to be unreachable, or a password the party
@@ -527,13 +531,11 @@ impl PartySession {
     pub async fn join(&self, invite: &Invite) -> Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
 
-        if self
-            .guest
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|guest| guest.invite == *invite)
-        {
+        let already_in = match self.guest.lock().await.as_ref() {
+            Some(guest) if guest.invite == *invite => self.still_in(guest),
+            _ => false,
+        };
+        if already_in {
             return Ok(());
         }
 
@@ -582,9 +584,20 @@ impl PartySession {
         Ok(())
     }
 
+    /// Whether the party `guest` is in is still being watched over a route
+    /// that works, so that joining it again has nothing to fix.
+    fn still_in(&self, guest: &GuestSession) -> bool {
+        let watching = self.current_watch().is_some_and(|watch| {
+            watch.role() == WatchRole::Guest
+                && !matches!(watch.state().connection, WatchConnection::Rejected { .. })
+        });
+        watching && guest.route.is_alive()
+    }
+
     /// Rejoins the party this machine was last in, after an app restart.
     ///
-    /// Safe to call while already in it: joining the same invite is a no-op.
+    /// Safe to call while already in it: joining the same invite is a no-op
+    /// as long as the party is still reachable.
     /// A saved invite the party refuses outright is forgotten, since it will
     /// be refused on every start from now on; one whose host is merely away
     /// is kept for when they are back.

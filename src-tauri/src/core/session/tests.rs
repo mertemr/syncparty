@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
@@ -48,17 +48,20 @@ impl ServerController for FakeServer {
 /// Stands a server on this machine in for the host: every invite leads
 /// straight to it, with no endpoint and no tunnel.
 struct LoopbackDialer {
-    address: SocketAddr,
+    address: std::sync::Mutex<SocketAddr>,
     dials: AtomicUsize,
     closes: Arc<AtomicUsize>,
+    /// Whether the route handed out last still reaches the host.
+    alive: std::sync::Mutex<Arc<AtomicBool>>,
 }
 
 impl LoopbackDialer {
     fn new(address: SocketAddr) -> Self {
         Self {
-            address,
+            address: std::sync::Mutex::new(address),
             dials: AtomicUsize::new(0),
             closes: Arc::new(AtomicUsize::new(0)),
+            alive: std::sync::Mutex::new(Arc::new(AtomicBool::new(true))),
         }
     }
 
@@ -68,6 +71,15 @@ impl LoopbackDialer {
 
     fn closes(&self) -> usize {
         self.closes.load(Ordering::SeqCst)
+    }
+
+    /// What the host stopping its party does to the route a guest holds: it
+    /// stays open at this end and reaches nothing.
+    fn cut(&self) {
+        self.alive
+            .lock()
+            .expect("alive")
+            .store(false, Ordering::SeqCst);
     }
 }
 
@@ -79,9 +91,12 @@ impl Dialer for LoopbackDialer {
         _control: Arc<dyn ControlChannel>,
     ) -> Result<Box<dyn Route>> {
         self.dials.fetch_add(1, Ordering::SeqCst);
+        let alive = Arc::new(AtomicBool::new(true));
+        *self.alive.lock().expect("alive") = Arc::clone(&alive);
         Ok(Box::new(LoopbackRoute {
-            address: self.address,
+            address: *self.address.lock().expect("address"),
             closes: Arc::clone(&self.closes),
+            alive,
         }))
     }
 }
@@ -89,12 +104,17 @@ impl Dialer for LoopbackDialer {
 struct LoopbackRoute {
     address: SocketAddr,
     closes: Arc<AtomicUsize>,
+    alive: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl Route for LoopbackRoute {
     fn local_addr(&self) -> SocketAddr {
         self.address
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 
     fn report(&self) -> TransportReport {
@@ -404,6 +424,71 @@ async fn joining_a_different_party_leaves_the_first() {
     );
     assert_eq!(party.remembered(), Some(second));
     party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn joining_the_same_party_over_a_dead_route_dials_it_again() {
+    let party = Party::new("join-dead-route").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+    party.session.join(&invite).await.expect("joined");
+    let first_player = party.player();
+
+    // The host stopped its party and started it again: the invite is as good
+    // as ever, but the route this guest holds leads nowhere.
+    party.dialer.cut();
+    party.session.join(&invite).await.expect("joined again");
+
+    assert_eq!(party.dialer.dials(), 2, "a new route to the host");
+    assert_eq!(party.dialer.closes(), 1, "the dead one is closed");
+    assert!(first_player.is_closed());
+    assert_eq!(party.launcher.launched().len(), 2);
+    assert!(!party.player().is_closed());
+    assert_eq!(
+        party.session.watch_state().map(|state| state.connection),
+        Some(crate::core::watch::WatchConnection::Connected)
+    );
+    assert_eq!(party.remembered(), Some(invite.clone()));
+
+    party.session.resume_last_session().await.expect("resumed");
+    assert_eq!(party.dialer.dials(), 2, "a working route is kept");
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn joining_the_same_party_after_it_turned_this_machine_away_asks_again() {
+    let party = Party::new("join-after-refusal").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+    party.session.join(&invite).await.expect("joined");
+
+    // The host's password changed under a guest already in the room: the
+    // client is dropped, reconnects, and is refused.
+    party.server.stop().await.expect("server stops");
+    party
+        .server
+        .start(&ServerConfig {
+            password: "a new password".to_owned(),
+            ..party.config.clone()
+        })
+        .await
+        .expect("server restarts");
+    party
+        .until_watching(|state| {
+            matches!(
+                state.connection,
+                crate::core::watch::WatchConnection::Rejected { .. }
+            )
+        })
+        .await;
+
+    let error = party
+        .session
+        .join(&invite)
+        .await
+        .expect_err("refused again, and said so");
+
+    assert_eq!(error.kind(), "sync_rejected");
+    assert_eq!(party.dialer.dials(), 2);
+    assert_eq!(party.session.watch_state(), None);
 }
 
 #[tokio::test]

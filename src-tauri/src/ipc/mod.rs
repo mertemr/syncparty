@@ -20,7 +20,8 @@ use crate::core::movie_vote::MovieVote;
 use crate::core::net::ControlChannel;
 use crate::core::notify::DiscordNotifier;
 use crate::core::paths::AppPaths;
-use crate::core::session::PartySession;
+use crate::core::player::{LaunchMode, MpvLauncher, PlayerLauncher};
+use crate::core::session::{PartySession, PlayerSource};
 use crate::core::syncplay::NativeServer;
 
 /// The single Tauri event name everything travels on.
@@ -83,6 +84,14 @@ impl AppState {
         // Neither needs the other at construction, so there is no cycle.
         let movie_vote = Arc::new(MovieVote::new(Arc::clone(&bus)));
 
+        // A window for people to watch in, at whichever mpv the dependency
+        // check would report — looked up again at every join, so one
+        // installed or located after startup is found.
+        let players: PlayerSource = Arc::new(|settings: &ConfigStore| {
+            let launcher = MpvLauncher::discover(settings, LaunchMode::Window)?;
+            Ok(Arc::new(launcher) as Arc<dyn PlayerLauncher>)
+        });
+
         let session = Arc::new(PartySession::new(
             Arc::clone(&settings),
             Arc::clone(&secrets),
@@ -90,6 +99,7 @@ impl AppState {
             Arc::clone(&discord),
             Arc::clone(&bus),
             Arc::clone(&movie_vote) as Arc<dyn ControlChannel>,
+            players,
         ));
         movie_vote.attach_session(Arc::clone(&session));
 

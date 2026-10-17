@@ -1,30 +1,52 @@
 //! The orchestrator the UI talks to.
 //!
-//! The transport, the server process, the room monitor and Discord are each
-//! useful on their own; this is the piece that knows the order they go in and
-//! how to unwind when a step fails partway through.
+//! The transport, the server, the room monitor, the watch session and Discord
+//! are each useful on their own; this is the piece that knows the order they
+//! go in and how to unwind when a step fails partway through.
+//!
+//! It also keeps the one rule that holds across host and guest: this machine
+//! watches one party at a time, in one player. Whatever starts a watch stops
+//! the one before it.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use serde::Serialize;
-use tokio::sync::Mutex;
-use ts_rs::TS;
+mod route;
 
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::OnceCell;
+use serde::Serialize;
+use tokio::sync::{Mutex, OnceCell};
+use ts_rs::TS;
 
 use crate::core::config::{generate_token, ConfigStore, SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
 use crate::core::movie::MovieStore;
-use crate::core::net::{ControlChannel, GuestTunnel, HostTunnel, PartyEndpoint, TransportReport};
+use crate::core::net::{ControlChannel, HostTunnel, PartyEndpoint, TransportReport};
 use crate::core::notify::{self, DiscordNotifier};
+use crate::core::player::PlayerLauncher;
 use crate::core::syncplay::{
-    ClientLauncher, MonitorConfig, RoomMonitor, ServerConfig, ServerController, ServerState,
+    ClientConfig, ClientTiming, MonitorConfig, RoomMonitor, ServerConfig, ServerController,
+    ServerState,
 };
+use crate::core::watch::{WatchConfig, WatchRole, WatchSession, WatchState, CONNECT_TIMEOUT};
+
+use self::route::{Dialer, Route, TunnelDialer};
+
+/// Finds the player to launch, at the moment a watch starts.
+///
+/// Resolved then rather than once at startup, so an mpv installed or located
+/// while the app is open is the one that gets used. Fails with
+/// `dependency_missing` when there is no player to be found.
+pub type PlayerSource = Arc<dyn Fn(&ConfigStore) -> Result<Arc<dyn PlayerLauncher>> + Send + Sync>;
+
+/// How long the app gives everything to wind down when it exits: long enough
+/// for mpv to be asked to quit and, failing that, killed.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Length of the generated server password. Long enough that guessing is
 /// hopeless, short enough to read aloud if the link ever fails.
@@ -66,22 +88,19 @@ pub struct HostingInfo {
     pub invite: Invite,
     pub invite_code: String,
     pub deep_link: String,
-    /// Where the Syncplay server is listening, for the host's own client and
-    /// for diagnostics. Always on loopback — guests never see this.
+    /// Where the sync server is listening, for the host's own client and for
+    /// diagnostics. Always on loopback — guests never see this.
     pub server_address: String,
     pub server: ServerState,
     pub monitor_attached: bool,
 }
 
-/// What a guest holds open for as long as it is in a party.
-///
-/// Both halves have to outlive the call that created them. The tunnel is the
-/// route Syncplay's connection actually runs through, and the endpoint owns
-/// the QUIC state underneath it, so dropping either mid-film disconnects the
-/// guest even though the Syncplay window is still open.
+/// What a guest holds open for as long as it is in a party. Its watch is in
+/// the session's one watch slot, beside it.
 struct GuestSession {
-    tunnel: GuestTunnel,
-    endpoint: PartyEndpoint,
+    /// The party joined, so joining the same one again can be recognised.
+    invite: Invite,
+    route: Box<dyn Route>,
 }
 
 fn now_millis() -> i64 {
@@ -110,6 +129,19 @@ pub struct PartySession {
     monitor: Mutex<Option<RoomMonitor>>,
     network: Mutex<Option<HostNetwork>>,
     guest: Mutex<Option<GuestSession>>,
+    players: PlayerSource,
+    dialer: Arc<dyn Dialer>,
+    /// The one watch on this machine, the host's own or a guest's. A `std`
+    /// mutex: it is only ever held to look or swap, never across an `await`,
+    /// so reading the state never waits behind a file being opened.
+    watch: std::sync::Mutex<Option<Arc<WatchSession>>>,
+    /// Held by everything that starts or ends a watch or a party, so that two
+    /// joins — a double click, a resume racing a paste — happen one after
+    /// the other and the second finds the first already done.
+    lifecycle: Mutex<()>,
+    /// Set once the app is exiting, so a join still in flight does not leave
+    /// a player behind.
+    closing: AtomicBool,
     /// Where the party log is written. Attached after construction, like
     /// `MovieVote`'s — `session` is built before the store exists.
     store: OnceCell<Arc<MovieStore>>,
@@ -133,6 +165,7 @@ impl PartySession {
         discord: Arc<DiscordNotifier>,
         bus: Arc<dyn EventBus>,
         control: Arc<dyn ControlChannel>,
+        players: PlayerSource,
     ) -> Self {
         Self {
             settings,
@@ -145,9 +178,22 @@ impl PartySession {
             monitor: Mutex::new(None),
             network: Mutex::new(None),
             guest: Mutex::new(None),
+            players,
+            dialer: Arc::new(TunnelDialer),
+            watch: std::sync::Mutex::new(None),
+            lifecycle: Mutex::new(()),
+            closing: AtomicBool::new(false),
             store: OnceCell::new(),
             log: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Swaps the way guests reach the host, for tests that stand a local
+    /// server in for one.
+    #[cfg(test)]
+    fn with_dialer(mut self, dialer: Arc<dyn Dialer>) -> Self {
+        self.dialer = dialer;
+        self
     }
 
     pub fn attach_store(&self, store: Arc<MovieStore>) {
@@ -185,7 +231,7 @@ impl PartySession {
     /// if this machine is not currently in a party as a guest.
     pub async fn send_control(&self, bytes: Vec<u8>) -> Result<()> {
         match self.guest.lock().await.as_ref() {
-            Some(guest) => guest.tunnel.send_control(&bytes).await,
+            Some(guest) => guest.route.send_control(&bytes).await,
             None => Err(SyncPartyError::NotInParty),
         }
     }
@@ -216,7 +262,7 @@ impl PartySession {
         }
 
         if let Some(guest) = self.guest.lock().await.as_ref() {
-            return Ok(guest.endpoint.report(vec![guest.tunnel.host_path()]));
+            return Ok(guest.route.report());
         }
 
         let endpoint = PartyEndpoint::bind_joining().await?;
@@ -267,8 +313,8 @@ impl PartySession {
         let host_endpoint = endpoint.id();
 
         // Generated once and reused forever. The salt in particular must not
-        // change: Syncplay derives room operator passwords from it, and a new
-        // salt silently invalidates every one of them.
+        // change: room operator passwords are derived from it, as Syncplay
+        // derives them, and a new salt silently invalidates every one.
         let password = self
             .secrets
             .get_or_create(SecretKey::ServerPassword, PASSWORD_LENGTH)?;
@@ -430,11 +476,20 @@ impl PartySession {
 
     /// Stops the party.
     ///
-    /// The order matters: the tunnel goes first so no guest is mid-forward
-    /// into a server that is about to disappear, and the endpoint is closed
-    /// rather than dropped so guests are told the party ended instead of
-    /// waiting out a timeout.
+    /// The host's own watch goes first, so its player closes rather than
+    /// sitting there disconnected. After that the order still matters: the
+    /// tunnel goes before the server so no guest is mid-forward into a server
+    /// that is about to disappear, and the endpoint is closed rather than
+    /// dropped so guests are told the party ended instead of waiting out a
+    /// timeout.
     pub async fn stop_hosting(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.stop_hosting_locked().await
+    }
+
+    async fn stop_hosting_locked(&self) -> Result<()> {
+        self.stop_watch(Some(WatchRole::Host)).await;
+
         let settings = self.settings.get();
 
         if settings.discord_enabled && matches!(self.state().await, SessionState::Hosting(_)) {
@@ -459,39 +514,80 @@ impl PartySession {
         Ok(())
     }
 
-    /// Joins a party as a guest: opens a tunnel to the host, then points
-    /// Syncplay at the near end of it.
+    /// Joins a party as a guest: opens a route to the host, connects the sync
+    /// client through it, then opens the player.
     ///
-    /// The invite is only remembered once Syncplay has actually been launched,
-    /// so a code that turns out to be unreachable is not the one restored on
-    /// next startup.
+    /// Joining the party this machine is already in does nothing, which is
+    /// what lets the UI resume on every mount without opening a second
+    /// player. Joining a different one leaves the first.
+    ///
+    /// The invite is only remembered once the party has let this machine in,
+    /// so a code that turns out to be unreachable, or a password the party
+    /// refuses, is not the one restored on next startup.
     pub async fn join(&self, invite: &Invite) -> Result<()> {
-        let nickname = self.settings.get().nickname;
+        let _lifecycle = self.lifecycle.lock().await;
 
-        // Resolved before anything is spawned: a launcher that cannot be found
-        // should fail without having opened a connection to the host first.
-        let launcher = ClientLauncher::discover(&self.settings)?;
+        if self
+            .guest
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|guest| guest.invite == *invite)
+        {
+            return Ok(());
+        }
 
-        let endpoint = PartyEndpoint::bind_joining().await?;
-        let tunnel = GuestTunnel::open(
-            endpoint.inner().clone(),
-            invite.endpoint_id()?,
-            Arc::clone(&self.control),
-        )
-        .await?;
-        let address = tunnel.local_addr();
+        // Before anything is opened: with no player to drive there is no
+        // point dialling the host, nor leaving a party that is still working.
+        let launcher = (self.players)(&self.settings)?;
 
-        launcher.join(invite, address, &nickname).await?;
+        self.leave_locked().await;
+        self.stop_watch(None).await;
 
-        // Held for the length of the party. Assigning before the old session
-        // is dropped keeps a re-join from briefly having no tunnel at all.
-        *self.guest.lock().await = Some(GuestSession { tunnel, endpoint });
+        let route = self.dialer.dial(invite, Arc::clone(&self.control)).await?;
+        let config = self.watch_config(
+            WatchRole::Guest,
+            route.local_addr(),
+            &invite.room,
+            &invite.password,
+        );
 
-        self.secrets
-            .set(SecretKey::LastInvite, &encode_last_invite(invite)?)
+        let watch = match WatchSession::start(config, launcher, Arc::clone(&self.bus), true).await {
+            Ok(watch) => watch,
+            Err(error) => {
+                route.close().await;
+                return Err(error);
+            }
+        };
+
+        if self.closing.load(Ordering::SeqCst) {
+            watch.stop().await;
+            route.close().await;
+            return Err(closing());
+        }
+
+        self.install_watch(watch);
+        *self.guest.lock().await = Some(GuestSession {
+            invite: invite.clone(),
+            route,
+        });
+
+        // The party is joined whether or not it can be remembered; failing
+        // the join over it would leave the UI saying no with a film playing.
+        let remembered = encode_last_invite(invite)
+            .and_then(|encoded| self.secrets.set(SecretKey::LastInvite, &encoded));
+        if let Err(error) = remembered {
+            tracing::warn!(%error, "could not remember the party for next time");
+        }
+        Ok(())
     }
 
-    /// Reopens the last successfully launched guest session after an app restart.
+    /// Rejoins the party this machine was last in, after an app restart.
+    ///
+    /// Safe to call while already in it: joining the same invite is a no-op.
+    /// A saved invite the party refuses outright is forgotten, since it will
+    /// be refused on every start from now on; one whose host is merely away
+    /// is kept for when they are back.
     pub async fn resume_last_session(&self) -> Result<Option<Invite>> {
         let Some(raw) = self.secrets.get(SecretKey::LastInvite)? else {
             return Ok(None);
@@ -504,41 +600,207 @@ impl PartySession {
                 return Ok(None);
             }
         };
-        self.join(&invite).await?;
-        Ok(Some(invite))
+
+        match self.join(&invite).await {
+            Ok(()) => Ok(Some(invite)),
+            Err(error @ SyncPartyError::SyncRejected(_)) => {
+                self.secrets.delete(SecretKey::LastInvite)?;
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
-    /// Closes a guest's tunnel. Syncplay keeps running; it simply loses the
-    /// server, which is what leaving a party means.
+    /// Leaves the party a guest is in: closes the player, ends the sync
+    /// connection, then closes the route to the host.
     pub async fn leave(&self) -> Result<()> {
-        if let Some(guest) = self.guest.lock().await.take() {
-            drop(guest.tunnel);
-            guest.endpoint.close().await;
-        }
-
+        let _lifecycle = self.lifecycle.lock().await;
+        self.leave_locked().await;
         Ok(())
     }
 
-    /// Opens the host's own Syncplay client on the party it is running.
+    async fn leave_locked(&self) {
+        let Some(guest) = self.guest.lock().await.take() else {
+            return;
+        };
+
+        self.stop_watch(Some(WatchRole::Guest)).await;
+        guest.route.close().await;
+    }
+
+    /// Starts watching the party this machine is hosting.
     ///
     /// This deliberately bypasses `join`: the host's client connects straight
     /// to the server on loopback, with no tunnel and no endpoint in between,
     /// and a host-local connection must not replace the invite that gets
-    /// resumed on next startup.
+    /// resumed on next startup. A no-op if the host is already watching.
     pub async fn join_as_host(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+
         let SessionState::Hosting(info) = self.state().await else {
             return Err(SyncPartyError::ServerNotRunning);
         };
+        if self
+            .current_watch()
+            .is_some_and(|watch| watch.role() == WatchRole::Host)
+        {
+            return Ok(());
+        }
 
         let address = info
             .server_address
             .parse::<SocketAddr>()
             .map_err(|error| SyncPartyError::Other(format!("unusable server address: {error}")))?;
+        let launcher = (self.players)(&self.settings)?;
 
-        let nickname = self.settings.get().nickname;
-        ClientLauncher::discover(&self.settings)?
-            .join(&info.invite, address, &nickname)
+        self.leave_locked().await;
+        self.stop_watch(None).await;
+
+        let config = self.watch_config(
+            WatchRole::Host,
+            address,
+            &info.invite.room,
+            &info.invite.password,
+        );
+        // With the monitor attached the room panel already has a source, and
+        // two writers would take turns overwriting each other.
+        let publish_room = !info.monitor_attached;
+        let watch =
+            WatchSession::start(config, launcher, Arc::clone(&self.bus), publish_room).await?;
+
+        if self.closing.load(Ordering::SeqCst) {
+            watch.stop().await;
+            return Err(closing());
+        }
+
+        self.install_watch(watch);
+        Ok(())
+    }
+
+    /// Closes the host's own player and its connection, leaving the party
+    /// running for everyone else. A guest's watch is left alone: for a guest,
+    /// stopping watching is leaving, which is `leave`.
+    pub async fn stop_watching(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.stop_watch(Some(WatchRole::Host)).await;
+        Ok(())
+    }
+
+    /// What this machine is watching, if anything.
+    pub fn watch_state(&self) -> Option<WatchState> {
+        self.current_watch().map(|watch| watch.state())
+    }
+
+    /// Opens a file in this machine's player.
+    pub async fn open_watch_file(&self, path: &Path) -> Result<()> {
+        self.watching()?.open_file(path).await
+    }
+
+    /// Starts the player again after it was closed.
+    pub async fn reopen_player(&self) -> Result<()> {
+        self.watching()?.reopen_player().await
+    }
+
+    /// The Ready toggle.
+    pub fn set_ready(&self, ready: bool) -> Result<()> {
+        self.watching()?.set_ready(ready);
+        Ok(())
+    }
+
+    /// Ends everything, for the app exiting.
+    ///
+    /// The player goes first and without waiting on anything else: it is the
+    /// one thing that would outlive syncparty, carrying on unsynchronised.
+    /// All of it is bounded, because an exit that hangs is worse than one
+    /// that leaves a party to time out.
+    pub async fn shutdown(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+
+        let everything = async {
+            self.stop_watch(None).await;
+
+            let _lifecycle = self.lifecycle.lock().await;
+            self.leave_locked().await;
+            if !matches!(self.state().await, SessionState::Idle) {
+                if let Err(error) = self.stop_hosting_locked().await {
+                    tracing::warn!(%error, "could not stop the party cleanly");
+                }
+            }
+        };
+
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, everything)
             .await
+            .is_err()
+        {
+            tracing::warn!("gave up waiting for the party to wind down");
+        }
+    }
+
+    fn watch_config(
+        &self,
+        role: WatchRole,
+        address: SocketAddr,
+        room: &str,
+        password: &str,
+    ) -> WatchConfig {
+        let settings = self.settings.get();
+
+        WatchConfig {
+            role,
+            client: ClientConfig {
+                address,
+                username: settings.nickname,
+                room: room.to_owned(),
+                password: password.to_owned(),
+                language: settings.language,
+                timing: ClientTiming::default(),
+            },
+            connect_timeout: CONNECT_TIMEOUT,
+        }
+    }
+
+    fn watch_slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<WatchSession>>> {
+        self.watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn current_watch(&self) -> Option<Arc<WatchSession>> {
+        self.watch_slot().clone()
+    }
+
+    fn watching(&self) -> Result<Arc<WatchSession>> {
+        self.current_watch().ok_or(SyncPartyError::NotWatching)
+    }
+
+    /// Takes the watch out of its slot and stops it — any watch, or only one
+    /// in `role`.
+    async fn stop_watch(&self, role: Option<WatchRole>) {
+        let watch = {
+            let mut slot = self.watch_slot();
+            let matches = slot
+                .as_ref()
+                .is_some_and(|watch| role.is_none_or(|role| watch.role() == role));
+            if matches {
+                slot.take()
+            } else {
+                None
+            }
+        };
+
+        if let Some(watch) = watch {
+            watch.stop().await;
+        }
+    }
+
+    fn install_watch(&self, watch: WatchSession) {
+        let previous = self.watch_slot().replace(Arc::new(watch));
+        // Every caller stops the previous watch first, under the lifecycle
+        // lock, so there is never one here to replace.
+        debug_assert!(
+            previous.is_none(),
+            "a watch was replaced without being stopped"
+        );
     }
 
     pub fn clear_last_session(&self) -> Result<()> {
@@ -554,160 +816,9 @@ fn encode_last_invite(invite: &Invite) -> Result<String> {
     Ok(serde_json::to_string(invite)?)
 }
 
-#[cfg(test)]
-mod tests {
-    use async_trait::async_trait;
-
-    use super::*;
-    use crate::core::config::AppMode;
-    use crate::core::events::test_support::RecordingEventBus;
-    use crate::core::paths::AppPaths;
-
-    /// Discards whatever arrives on the control channel — these tests are not
-    /// exercising movie voting.
-    struct NullControl;
-    impl ControlChannel for NullControl {
-        fn on_message(self: Arc<Self>, _peer: iroh::EndpointId, _bytes: Vec<u8>) {}
-    }
-
-    /// A server that records what it was asked to do without starting Python.
-    #[derive(Default)]
-    struct FakeServer {
-        started: Mutex<Vec<ServerConfig>>,
-        stops: Mutex<usize>,
-        fail_on_start: bool,
-    }
-
-    #[async_trait]
-    impl ServerController for FakeServer {
-        async fn start(&self, config: &ServerConfig) -> Result<()> {
-            if self.fail_on_start {
-                return Err(SyncPartyError::ServerStartFailed("nope".to_owned()));
-            }
-            self.started.lock().await.push(config.clone());
-            Ok(())
-        }
-
-        async fn stop(&self) -> Result<()> {
-            *self.stops.lock().await += 1;
-            Ok(())
-        }
-
-        async fn state(&self) -> ServerState {
-            ServerState::Stopped
-        }
-    }
-
-    /// Each test gets its own directory: they run in parallel, and a shared
-    /// one means whichever test wipes it first breaks the others.
-    fn session_with(
-        label: &str,
-        server: Arc<FakeServer>,
-    ) -> (PartySession, Arc<RecordingEventBus>) {
-        let dir = std::env::temp_dir().join(format!("syncparty-session-{label}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-
-        let paths = AppPaths::rooted_at(dir);
-        let settings = Arc::new(ConfigStore::load(paths.clone()).expect("settings"));
-        settings
-            .update(|s| s.mode = Some(AppMode::Host))
-            .expect("update");
-
-        let secrets = Arc::new(SecretStore::new(paths));
-        let bus = Arc::new(RecordingEventBus::default());
-
-        let session = PartySession::new(
-            settings,
-            Arc::clone(&secrets),
-            server,
-            Arc::new(DiscordNotifier::new(secrets)),
-            Arc::clone(&bus) as Arc<dyn EventBus>,
-            Arc::new(NullControl),
-        );
-
-        (session, bus)
-    }
-
-    #[tokio::test]
-    async fn a_new_session_is_idle() {
-        let (session, _) = session_with("idle", Arc::new(FakeServer::default()));
-
-        assert!(matches!(session.state().await, SessionState::Idle));
-    }
-
-    #[tokio::test]
-    async fn stopping_an_idle_session_still_stops_the_server_and_returns_to_idle() {
-        let server = Arc::new(FakeServer::default());
-        let (session, bus) = session_with("stop", Arc::clone(&server));
-
-        session.stop_hosting().await.expect("stop");
-
-        assert_eq!(*server.stops.lock().await, 1);
-        assert!(matches!(session.state().await, SessionState::Idle));
-        assert!(bus
-            .events()
-            .iter()
-            .any(|event| matches!(event, AppEvent::SessionChanged { .. })));
-    }
-
-    #[tokio::test]
-    async fn leaving_without_having_joined_is_not_an_error() {
-        let (session, _) = session_with("leave-idle", Arc::new(FakeServer::default()));
-
-        assert!(session.leave().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn a_failed_start_leaves_no_server_running() {
-        let server = Arc::new(FakeServer {
-            fail_on_start: true,
-            ..FakeServer::default()
-        });
-        let (session, _) = session_with("failed-start", Arc::clone(&server));
-
-        // On a machine with no network the endpoint step fails first; on one
-        // with network the fake server fails instead. Either way the cleanup
-        // path is what this is checking.
-        let _ = session.start_hosting().await;
-
-        assert!(
-            *server.stops.lock().await >= 1,
-            "a failed start must stop whatever it started"
-        );
-        assert!(matches!(
-            session.state().await,
-            SessionState::Idle | SessionState::Failed { .. }
-        ));
-    }
-
-    #[test]
-    fn ignores_a_corrupt_saved_invite() {
-        assert!(parse_last_invite("not an invite").is_none());
-    }
-
-    #[test]
-    fn saved_invites_round_trip() {
-        let invite = Invite {
-            endpoint: iroh::SecretKey::generate().public().to_string(),
-            password: "swordfish".to_owned(),
-            room: "MovieNight".to_owned(),
-        };
-
-        assert_eq!(
-            parse_last_invite(&encode_last_invite(&invite).expect("encode")),
-            Some(invite)
-        );
-    }
-
-    #[test]
-    fn a_saved_invite_from_the_tailscale_era_is_discarded_rather_than_resumed() {
-        // The old shape, as it would still be sitting in the keychain after an
-        // upgrade. It has no endpoint, so there is nothing to dial; being
-        // rejected here is what makes the app clear it and start clean.
-        let legacy = r#"{"host":"100.127.167.56","alternateHosts":[],"port":8999,
-                         "password":"swordfish","room":"MovieNight"}"#;
-
-        assert!(parse_last_invite(legacy).is_none());
-    }
+fn closing() -> SyncPartyError {
+    SyncPartyError::SyncFailed("syncparty is closing".to_owned())
 }
+
+#[cfg(test)]
+mod tests;

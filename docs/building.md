@@ -14,16 +14,15 @@ needs already in place.
 | Node.js | 22 or newer |
 | pnpm | 10 (`corepack enable pnpm`) |
 
-Plus the WebKitGTK stack Tauri links against, and the programs syncparty
-drives at runtime.
+Plus the WebKitGTK stack Tauri links against, and mpv — the one program
+syncparty drives at runtime.
 
 **Debian / Ubuntu**
 
 ```bash
 sudo apt install build-essential curl file git pkg-config \
   libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-  libayatana-appindicator3-dev libssl-dev libxdo-dev patchelf \
-  syncplay mpv
+  libayatana-appindicator3-dev libssl-dev libxdo-dev patchelf mpv
 ```
 
 **Fedora**
@@ -31,26 +30,24 @@ sudo apt install build-essential curl file git pkg-config \
 ```bash
 sudo dnf install @development-tools webkit2gtk4.1-devel gtk3-devel \
   librsvg2-devel libayatana-appindicator-gtk3-devel openssl-devel \
-  libxdo-devel patchelf syncplay mpv
+  libxdo-devel patchelf mpv
 ```
 
 **Arch**
 
 ```bash
 sudo pacman -S base-devel webkit2gtk-4.1 gtk3 librsvg \
-  libayatana-appindicator xdotool syncplay pyside6 shiboken6 mpv
+  libayatana-appindicator xdotool mpv
 ```
 
-`pyside6` and `shiboken6` are separate because Arch ships them as *optional*
-dependencies of `syncplay` — without them `syncplay` installs a client with no
-window.
+mpv is the only supported player. Earlier versions also accepted VLC, through
+the Syncplay client; syncparty now drives the player itself over mpv's JSON
+IPC, which VLC does not have.
 
-Substitute `vlc` for `mpv` anywhere above if you prefer it; syncparty accepts
-either and prefers mpv when both are present.
-
-`syncplay` is in those lists as the *client* only. The server a party runs on
-is built into the syncparty binary, so hosting needs no Python, no Twisted, and
-no `syncplay` server process.
+Neither half of a party needs Syncplay installed. The server and the client
+are both built into the syncparty binary — they speak the Syncplay protocol,
+but there is no Python, no Twisted, no Qt and no `syncplay` package anywhere
+in these lists.
 
 ### Optional: a keyring
 
@@ -102,16 +99,24 @@ pnpm test                    # frontend
 cd src-tauri && cargo test   # backend, including the TypeScript bindings
 ```
 
-One backend test is ignored by default because it needs a Syncplay client on
-PATH: it starts the built-in server, points a real `syncplay` at it, and
-asserts the client shows up in the room. It is the only test that checks our
-idea of the protocol against something we did not write, so run it if you have
-the client installed:
+A few backend tests are ignored by default because they need mpv on PATH.
+The end-to-end one starts the built-in server, connects the built-in client to
+it, lets that client drive a headless mpv, and asserts that playback state
+really crosses the server. It makes its own test clip with `mpv --o`, so mpv is
+all it needs. It is the only test that runs the whole path, from one player's
+state to the server and back into a player, so run it if you have mpv
+installed — together with the mpv driver's own ignored tests:
 
 ```bash
-cd src-tauri && cargo test --test syncplay_compatibility -- --ignored
+cd src-tauri
+cargo test --test native_watch_e2e -- --ignored
+cargo test --lib player::mpv -- --ignored
 ```
 
+They need no display — mpv runs with `--vo=null --ao=null` — so they work over
+SSH and in CI, where the `Backend (native client + mpv)` job runs both.
+
 The Rust tests regenerate `src/shared/types/*.ts` through ts-rs. If `git
-status` shows changes there after a run, commit them — they are part of the
-source, not build output.
+status` shows changes there after a run, commit them — new files included —
+because they are part of the source, not build output. ts-rs never deletes a
+file, so the `.ts` of a type that no longer exists has to be removed by hand.

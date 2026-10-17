@@ -68,14 +68,16 @@ jobs:
           # linking against 24.04's would lock out Ubuntu 22.04 and Debian 12,
           # and 22.04 is the oldest release still carrying WebKitGTK 4.1.
           #
-          # `rpm` has no hard `depends` in tauri.conf.json: syncplay and mpv
-          # sit outside Fedora's and openSUSE's default repos (COPR / RPM
-          # Fusion respectively), so a hard dependency would make `dnf
-          # install`/`zypper install` refuse the package on a stock system.
+          # `rpm` only recommends mpv in tauri.conf.json rather than
+          # depending on it: an RPM also lands on systems whose enabled
+          # repositories carry no mpv (RHEL and its rebuilds get it from
+          # EPEL), and a hard dependency would make `dnf install`/`zypper
+          # install` refuse the package there instead of installing it.
           # `appimage` is self-contained and carries no package-manager
           # dependency concept at all. Either way the app's own dependency
-          # checker (`core/deps`) still offers to install what is missing on
-          # first launch, same as it does on Windows and macOS.
+          # check (`core/deps`) reports a missing mpv on first launch, with a
+          # link to mpv.io and a "Locate…" button. It cannot install it on
+          # Linux, where there is no single package manager to ask.
           - label: Linux (.deb, .rpm, .AppImage)
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -148,16 +150,17 @@ jobs:
             **No desktop, or none of the above fit** — build from source, see
             `docs/building.md`
 
-            On Windows and macOS everything syncparty needs — the Syncplay
-            client and mpv — is checked on first launch and installed for you
-            if it is missing. The `.deb` declares the same things as
-            dependencies, so apt has already installed them by the time the
-            app opens. The `.rpm` only recommends them, since Fedora and
-            openSUSE do not carry Syncplay or mpv in their default repositories
-            — dnf/zypper will not refuse the install over it, and syncparty's
-            own checker offers to install what is missing on first launch, the
-            same as it does on Windows and macOS. The AppImage carries no
-            package-manager dependencies at all, for the same reason.
+            mpv is the only program syncparty needs that it does not ship —
+            the sync server and the client that keeps mpv in step are both
+            built in. On Windows and macOS it is checked on first launch and
+            installed through winget or Homebrew if it is missing. The `.deb`
+            depends on it, so apt has already installed it by the time the app
+            opens, and `syncparty-bin` does the same on Arch. The `.rpm` only
+            recommends it, so dnf/zypper never refuse the install on a system
+            whose repositories carry no mpv. The AppImage carries no
+            package-manager dependencies at all. In both of those cases a
+            missing mpv is reported on first launch, with a link to mpv.io and
+            a "Locate…" button for a copy kept somewhere unusual.
 
             syncparty checks for updates on startup. On Windows and macOS it
             offers to install them in place. On Linux it tells you a new

@@ -8,44 +8,61 @@
 mod installer;
 mod manager;
 mod mpv;
-mod syncplay_client;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::core::config::AppMode;
+use crate::core::config::{AppMode, ConfigStore};
 use crate::core::error::Result;
 use crate::core::events::ProgressSink;
 
 pub use installer::{PackageSpec, SystemPackageManager};
 pub use manager::DependencyManager;
 pub use mpv::MpvDependency;
-pub use syncplay_client::SyncplayClientDependency;
 
 /// Stable identifier for each dependency, shared with the frontend.
+///
+/// One variant, and still an enum: the frontend keys installs and their
+/// progress events by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub enum DependencyId {
-    /// The Syncplay desktop client, used to join a party.
-    SyncplayClient,
-    /// The video player Syncplay drives.
+    /// The video player syncparty drives.
     Mpv,
 }
 
-/// Which player an automatic install should fetch.
+/// Settings keys under which earlier versions stored the location of a
+/// dependency syncparty no longer has.
 ///
-/// Only the player has more than one source, so this is the only dependency
-/// whose install takes an argument. Detection is unaffected: `find_player`
-/// prefers mpv when both are present, whichever one was installed from here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "camelCase")]
-pub enum PlayerChoice {
-    #[default]
-    Mpv,
-    Vlc,
+/// `"syncplayClient"` is the Syncplay desktop client, which syncparty used to
+/// launch before it became a Syncplay client itself.
+const RETIRED_OVERRIDES: &[&str] = &["syncplayClient"];
+
+/// Removes manually chosen locations for dependencies that no longer exist.
+///
+/// Nothing reads them any more, and nothing in the UI can clear them either:
+/// forgetting a location goes through a [`DependencyId`], and theirs is gone.
+/// Left alone they would sit in the settings file forever. Returns whether
+/// anything was removed, and writes only then, so a launch with nothing to
+/// forget does not rewrite the settings file.
+pub fn forget_retired_overrides(settings: &ConfigStore) -> Result<bool> {
+    let stale = RETIRED_OVERRIDES
+        .iter()
+        .any(|key| settings.executable_override(key).is_some());
+
+    if !stale {
+        return Ok(false);
+    }
+
+    settings.update(|settings| {
+        for key in RETIRED_OVERRIDES {
+            settings.executable_overrides.remove(*key);
+        }
+    })?;
+
+    Ok(true)
 }
 
 /// Whether a dependency is needed by hosts, guests, or both.
@@ -76,13 +93,15 @@ pub enum DependencyStatus {
         version: Option<String>,
         path: Option<String>,
     },
-    /// Present on disk and unable to run. Distinct from `Missing` because the
-    /// remedy is different: installing it again reinstalls the same broken
-    /// thing, so the UI must not offer that as the way out.
+    /// Present on disk and unable to run, or running and not the program it
+    /// was taken for. Distinct from `Missing` because the remedy is different:
+    /// installing it again reinstalls the same broken thing, so the UI must
+    /// not offer that as the way out.
     Unusable {
         path: String,
         /// The last line the program printed before giving up — the part that
-        /// names the problem, without the traceback around it.
+        /// names the problem, without the traceback around it — or, for a
+        /// program that runs fine but is something else, what it says it is.
         reason: String,
     },
 }
@@ -109,14 +128,7 @@ pub trait Dependency: Send + Sync {
     async fn detect(&self) -> DependencyStatus;
 
     /// Installs the dependency, reporting progress as it goes.
-    ///
-    /// `choice` is meaningful only for the player, which is the one dependency
-    /// with more than one source. Everything else ignores it.
-    async fn install(
-        &self,
-        progress: &dyn ProgressSink,
-        choice: Option<PlayerChoice>,
-    ) -> Result<()>;
+    async fn install(&self, progress: &dyn ProgressSink) -> Result<()>;
 
     /// Where to send the user when the automatic install does not work. Every
     /// dependency must have one — there is no dead end.
@@ -182,7 +194,10 @@ impl PreflightReport {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+    use crate::core::paths::AppPaths;
 
     #[test]
     fn host_only_dependencies_are_skipped_for_guests() {
@@ -205,31 +220,103 @@ mod tests {
         }
     }
 
+    fn report_of(status: DependencyStatus) -> PreflightReport {
+        PreflightReport {
+            mode: AppMode::Host,
+            items: vec![item(DependencyId::Mpv, status)],
+        }
+    }
+
     #[test]
     fn a_report_is_satisfied_only_when_everything_is_installed() {
-        let installed = DependencyStatus::Installed {
+        let report = report_of(DependencyStatus::Installed {
             version: None,
             path: None,
-        };
-
-        let report = PreflightReport {
-            mode: AppMode::Host,
-            items: vec![
-                item(DependencyId::SyncplayClient, installed.clone()),
-                item(DependencyId::Mpv, installed),
-            ],
-        };
+        });
         assert!(report.is_satisfied());
         assert_eq!(report.missing().count(), 0);
 
-        let report = PreflightReport {
-            mode: AppMode::Host,
-            items: vec![item(
-                DependencyId::SyncplayClient,
-                DependencyStatus::Missing,
-            )],
-        };
+        let report = report_of(DependencyStatus::Missing);
         assert!(!report.is_satisfied());
         assert_eq!(report.missing().count(), 1);
+
+        // On disk is not the same as usable: a player that will not run
+        // blocks a party exactly as much as one that is not there.
+        let report = report_of(DependencyStatus::Unusable {
+            path: "/usr/bin/vlc".to_owned(),
+            reason: "not mpv".to_owned(),
+        });
+        assert!(!report.is_satisfied());
+        assert_eq!(report.missing().count(), 1);
+    }
+
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    /// A settings store in a directory of its own, so tests running in
+    /// parallel never share a settings file.
+    fn fresh_settings() -> (AppPaths, ConfigStore) {
+        let id = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "syncparty-retired-overrides-{}-{id}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let paths = AppPaths::rooted_at(dir);
+        let settings = ConfigStore::load(paths.clone()).expect("settings");
+        (paths, settings)
+    }
+
+    #[test]
+    fn the_retired_syncplay_client_location_is_forgotten_and_the_player_kept() {
+        let (paths, settings) = fresh_settings();
+        settings
+            .set_executable_override("syncplayClient", Some("/opt/syncplay/syncplay".to_owned()))
+            .expect("seed the retired override");
+        settings
+            .set_executable_override("mpv", Some("/opt/mpv/mpv".to_owned()))
+            .expect("seed the player override");
+
+        assert!(forget_retired_overrides(&settings).expect("forget"));
+
+        let reloaded = ConfigStore::load(paths).expect("reload");
+        assert_eq!(
+            reloaded.executable_override("syncplayClient"),
+            None,
+            "the removal has to reach the settings file, not just memory"
+        );
+        assert_eq!(
+            reloaded.executable_override("mpv").as_deref(),
+            Some("/opt/mpv/mpv"),
+            "a location for a dependency that still exists is the user's choice"
+        );
+    }
+
+    #[test]
+    fn forgetting_retired_locations_twice_finds_nothing_the_second_time() {
+        let (_paths, settings) = fresh_settings();
+        settings
+            .set_executable_override(
+                "syncplayClient",
+                Some("C:/Syncplay/Syncplay.exe".to_owned()),
+            )
+            .expect("seed");
+
+        assert!(forget_retired_overrides(&settings).expect("first"));
+        assert!(!forget_retired_overrides(&settings).expect("second"));
+    }
+
+    #[test]
+    fn with_nothing_to_forget_the_settings_file_is_not_written() {
+        let (paths, settings) = fresh_settings();
+        assert!(!paths.settings_file().exists(), "a fresh install has none");
+
+        assert!(!forget_retired_overrides(&settings).expect("forget"));
+
+        assert!(
+            !paths.settings_file().exists(),
+            "this runs on every launch, so finding nothing must leave the disk alone"
+        );
     }
 }

@@ -61,7 +61,20 @@ const SEEK_TOLERANCE: f64 = 0.5;
 const SPEED_TOLERANCE: f64 = 1e-3;
 
 /// How a load ended, for the `load` call waiting on it.
-pub(super) type LoadOutcome = std::result::Result<(), String>;
+pub(super) type LoadOutcome = std::result::Result<(), LoadFailure>;
+
+/// Why a load did not end with the file playing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LoadFailure {
+    /// mpv could not open it, or it was closed or replaced first.
+    Failed(String),
+    /// mpv opened it as a playlist and has gone on to what that lists,
+    /// which is not the film that was asked for. The caller stops it there.
+    Playlist,
+}
+
+/// What a playlist of ours is reported as when it fails to be a film.
+pub(super) const NOT_A_FILM: &str = "it is a playlist, not a film";
 
 /// What a command does to the mirror once mpv has accepted it.
 ///
@@ -119,6 +132,10 @@ enum Phase {
     Starting(Option<u64>),
     Opened(Option<u64>),
     Playing,
+    /// Something a playlist of ours listed, which mpv went on to by itself
+    /// and is being stopped. Never announced: as far as the party is
+    /// concerned, nothing was opened.
+    Refused,
 }
 
 /// The end of the file, which mpv announces in two lines whose order varies.
@@ -159,9 +176,14 @@ pub(super) struct Tracker {
     seeks: Vec<ExpectedSeek>,
     next_id: u64,
     eof: Eof,
-    /// A playing file ended; `Unloaded` goes out once mpv is idle, which is
-    /// what tells a file closed apart from a file replaced by another.
-    unload_pending: bool,
+    /// A `FileLoaded` went out and no `Unloaded` since. `Unloaded` waits for
+    /// mpv to go idle, which is what tells a file closed apart from a file
+    /// replaced by another — including one replaced by a file that then
+    /// failed to open, which leaves mpv idle with nothing open all the same.
+    announced: bool,
+    /// A playlist of ours was refused, so whatever mpv starts next without
+    /// being asked comes from that playlist. Lasts until mpv is idle.
+    refusing: bool,
     last_end_reason: Option<String>,
     events: Vec<PlayerEvent>,
     settled: Vec<(oneshot::Sender<LoadOutcome>, LoadOutcome)>,
@@ -192,7 +214,8 @@ impl Tracker {
             seeks: Vec::new(),
             next_id: 1,
             eof: Eof::Clear,
-            unload_pending: false,
+            announced: false,
+            refusing: false,
             last_end_reason: None,
             events: Vec::new(),
             settled: Vec::new(),
@@ -275,7 +298,9 @@ impl Tracker {
         if let Some(previous) = previous {
             self.settled.push((
                 previous.waiter,
-                Err("another file was opened before this one started playing".to_owned()),
+                Err(LoadFailure::Failed(
+                    "another file was opened before this one started playing".to_owned(),
+                )),
             ));
         }
         generation
@@ -412,13 +437,7 @@ impl Tracker {
         }
 
         match self.eof {
-            Eof::HeldPause(deadline) if deadline <= now => {
-                self.eof = Eof::Clear;
-                self.events.push(PlayerEvent::PauseChanged {
-                    paused: true,
-                    origin: Origin::External,
-                });
-            }
+            Eof::HeldPause(deadline) if deadline <= now => self.release_held_pause(),
             Eof::AwaitingPause(deadline) if deadline <= now => self.end_of_file(),
             _ => {}
         }
@@ -459,12 +478,16 @@ impl Tracker {
         if let Some(load) = self.load.take() {
             self.settled.push((
                 load.waiter,
-                Err("mpv closed before the file started playing".to_owned()),
+                Err(LoadFailure::Failed(
+                    "mpv closed before the file started playing".to_owned(),
+                )),
             ));
         }
         self.pauses.clear();
         self.speeds.clear();
         self.seeks.clear();
+        // A pause still held goes unreported: the player it happened in is
+        // gone, and `Closed` is the last word on it.
         self.eof = Eof::Clear;
     }
 
@@ -522,6 +545,14 @@ impl Tracker {
             return;
         }
 
+        // Playing again, whoever made it so, means the pause being held was
+        // not the end of the file. It goes out first, because it came first:
+        // left to its deadline it would arrive after this, and the last word
+        // would be "paused" about an mpv that is playing.
+        if !paused {
+            self.release_held_pause();
+        }
+
         if let Some(index) = self
             .pauses
             .iter()
@@ -561,13 +592,6 @@ impl Tracker {
                 _ => self.eof = Eof::HeldPause(now + EOF_PAUSE_HOLD),
             }
         } else {
-            if matches!(self.eof, Eof::HeldPause(_)) {
-                self.eof = Eof::Clear;
-                self.events.push(PlayerEvent::PauseChanged {
-                    paused: true,
-                    origin: Origin::External,
-                });
-            }
             self.events.push(PlayerEvent::PauseChanged {
                 paused: false,
                 origin: Origin::External,
@@ -672,8 +696,15 @@ impl Tracker {
             None => None,
         };
 
-        self.phase = Phase::Starting(ours);
-        self.unload_pending = false;
+        // A pause made just before is still a pause, whatever opens next.
+        self.release_held_pause();
+
+        self.phase = if ours.is_none() && self.refusing {
+            Phase::Refused
+        } else {
+            self.refusing = false;
+            Phase::Starting(ours)
+        };
         self.eof = Eof::Clear;
         self.seeks.clear();
         self.mirror(now, |snapshot| snapshot.file = None);
@@ -701,7 +732,7 @@ impl Tracker {
                 self.snapshot.time_pos_at = Some(now);
                 self.events.push(PlayerEvent::Seeked { position, origin });
             }
-            Phase::Idle | Phase::Starting(_) => {}
+            Phase::Idle | Phase::Starting(_) | Phase::Refused => {}
         }
     }
 
@@ -740,6 +771,7 @@ impl Tracker {
             Origin::External
         };
         self.events.push(PlayerEvent::FileLoaded { file, origin });
+        self.announced = true;
         self.settle_load(ours, Ok(()));
     }
 
@@ -771,33 +803,38 @@ impl Tracker {
     fn on_end_file(&mut self, reason: &str, error: Option<&str>, now: Instant) {
         self.last_end_reason = Some(reason.to_owned());
 
-        match reason {
-            // The process is on its way out; `Closed` says the rest.
-            "quit" => return,
-            // A playlist pointing at its first entry; that entry starts next.
-            "redirect" => return,
-            _ => {}
+        // The process is on its way out; `Closed` says the rest.
+        if reason == "quit" {
+            return;
+        }
+        self.release_held_pause();
+
+        if reason == "redirect" {
+            self.on_redirect();
+            return;
         }
 
         let ours = match self.phase {
             Phase::Starting(ours) | Phase::Opened(ours) => ours,
-            Phase::Idle | Phase::Playing => None,
+            Phase::Idle | Phase::Playing | Phase::Refused => None,
         };
 
-        if reason == "error" {
-            let error = error.unwrap_or("mpv could not play it").to_owned();
-            self.events.push(PlayerEvent::FileFailed {
-                error: error.clone(),
-            });
-            self.settle_load(ours, Err(error));
-        } else {
-            if self.phase == Phase::Playing {
-                self.unload_pending = true;
+        // A refused file failing or being stopped is not news either.
+        if self.phase != Phase::Refused {
+            if reason == "error" {
+                let error = error.unwrap_or("mpv could not play it").to_owned();
+                self.events.push(PlayerEvent::FileFailed {
+                    error: error.clone(),
+                });
+                self.settle_load(ours, Err(LoadFailure::Failed(error)));
+            } else {
+                self.settle_load(
+                    ours,
+                    Err(LoadFailure::Failed(
+                        "the file was closed before it started playing".to_owned(),
+                    )),
+                );
             }
-            self.settle_load(
-                ours,
-                Err("the file was closed before it started playing".to_owned()),
-            );
         }
 
         self.phase = Phase::Idle;
@@ -806,9 +843,48 @@ impl Tracker {
         self.mirror(now, |snapshot| snapshot.file = None);
     }
 
+    /// The file turned out to be a playlist, and mpv is about to start what
+    /// it lists.
+    ///
+    /// For a file of ours that is the end of it: it is not a film, and what
+    /// a playlist lists can be anything, URLs included — exactly what `load`
+    /// keeps away from mpv. `--access-references=no` stops mpv from getting
+    /// this far at all; this is for an mpv or a demuxer that does not honour
+    /// it, so that a playlist fails at once — not after the load's timeout,
+    /// with what it listed playing meanwhile as somebody else's file.
+    ///
+    /// A playlist somebody else opened is their business, and plays.
+    fn on_redirect(&mut self) {
+        let Phase::Starting(Some(generation)) = self.phase else {
+            return;
+        };
+
+        self.events.push(PlayerEvent::FileFailed {
+            error: NOT_A_FILM.to_owned(),
+        });
+        self.settle_load(Some(generation), Err(LoadFailure::Playlist));
+        self.phase = Phase::Idle;
+        self.refusing = true;
+    }
+
     fn on_idle(&mut self) {
-        if std::mem::take(&mut self.unload_pending) {
+        self.refusing = false;
+        if std::mem::take(&mut self.announced) {
             self.events.push(PlayerEvent::Unloaded);
+        }
+    }
+
+    /// Reports an unexplained pause held back for the end of the file, now
+    /// that something the end of the file cannot explain has happened.
+    /// Called before that something is reported, so the events keep mpv's
+    /// order.
+    fn release_held_pause(&mut self) {
+        if matches!(self.eof, Eof::HeldPause(_)) {
+            self.eof = Eof::Clear;
+            self.events.push(PlayerEvent::PauseChanged {
+                paused: true,
+                origin: Origin::External,
+            });
         }
     }
 
@@ -1105,6 +1181,263 @@ mod tests {
             ]
         );
         assert_eq!(tracker.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_held_pause_is_reported_before_our_resume_that_overtakes_it() {
+        // The user pauses, and within the hold the room's state has the
+        // client resume the player. mpv's history is pause, then play.
+        let at = Instant::now();
+        let mut tracker = playing(at, 5.0);
+
+        property(&mut tracker, "pause", json!(true), at);
+        assert!(events(&mut tracker).is_empty(), "held");
+
+        let resumed = at + Duration::from_millis(80);
+        assert!(tracker.expect_pause(false, resumed));
+        tracker.on_reply(Effect::Pause(false), Some(&Value::Null), resumed);
+        property(&mut tracker, "pause", json!(false), resumed);
+        tracker.on_tick(at + EOF_PAUSE_HOLD + Duration::from_millis(1));
+
+        assert_eq!(
+            events(&mut tracker),
+            [
+                PlayerEvent::PauseChanged {
+                    paused: true,
+                    origin: Origin::External
+                },
+                PlayerEvent::PauseChanged {
+                    paused: false,
+                    origin: Origin::Ours
+                },
+            ],
+            "the last word is mpv's real state"
+        );
+        assert!(!tracker.snapshot().paused);
+        assert_eq!(tracker.next_deadline(), None, "nothing left held");
+    }
+
+    #[test]
+    fn a_held_pause_is_reported_before_the_next_file_starts() {
+        let at = Instant::now();
+        let mut tracker = playing(at, 5.0);
+
+        property(&mut tracker, "pause", json!(true), at);
+        event(
+            &mut tracker,
+            json!({ "event": "end-file", "reason": "stop" }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 2 }),
+            at,
+        );
+
+        assert_eq!(
+            events(&mut tracker),
+            [PlayerEvent::PauseChanged {
+                paused: true,
+                origin: Origin::External
+            }]
+        );
+        assert_eq!(tracker.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_playlist_of_ours_fails_at_once_and_what_it_lists_is_never_announced() {
+        let at = Instant::now();
+        let mut tracker = seeded(at);
+        let (waiter, mut outcome) = oneshot::channel();
+        let generation = tracker.expect_load(waiter);
+        tracker.on_reply(
+            Effect::Load(generation),
+            Some(&json!({ "playlist_entry_id": 1 })),
+            at,
+        );
+
+        // What mpv 0.41 sends for a playlist when references are followed.
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 1 }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({
+                "event": "end-file",
+                "reason": "redirect",
+                "playlist_entry_id": 1,
+                "playlist_insert_id": 2,
+                "playlist_insert_num_entries": 2
+            }),
+            at,
+        );
+        let (emitted, settled) = tracker.take_output();
+        assert_eq!(
+            emitted,
+            [PlayerEvent::FileFailed {
+                error: NOT_A_FILM.to_owned()
+            }]
+        );
+        for (waiter, result) in settled {
+            let _ = waiter.send(result);
+        }
+        assert_eq!(outcome.try_recv(), Ok(Err(LoadFailure::Playlist)));
+
+        // mpv goes on to the first entry, which fails, and then the next,
+        // which opens before the stop syncparty sends lands.
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 2 }),
+            at,
+        );
+        property(&mut tracker, "path", json!("http://example.com/x"), at);
+        event(
+            &mut tracker,
+            json!({ "event": "end-file", "reason": "error", "file_error": "loading failed" }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 3 }),
+            at,
+        );
+        property(&mut tracker, "path", json!("/films/Listed.mkv"), at);
+        event(&mut tracker, json!({ "event": "file-loaded" }), at);
+        event(&mut tracker, json!({ "event": "playback-restart" }), at);
+        event(
+            &mut tracker,
+            json!({ "event": "end-file", "reason": "stop" }),
+            at,
+        );
+        property(&mut tracker, "idle-active", json!(true), at);
+
+        assert!(events(&mut tracker).is_empty());
+        assert!(!tracker.snapshot().is_loaded());
+
+        // Idle again, so a file opened later is judged on its own.
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 9 }),
+            at,
+        );
+        event(&mut tracker, json!({ "event": "file-loaded" }), at);
+        event(&mut tracker, json!({ "event": "playback-restart" }), at);
+        assert!(matches!(
+            events(&mut tracker).as_slice(),
+            [PlayerEvent::FileLoaded {
+                origin: Origin::External,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_playlist_someone_else_opened_plays_as_theirs() {
+        let at = Instant::now();
+        let mut tracker = seeded(at);
+
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 1 }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({ "event": "end-file", "reason": "redirect", "playlist_entry_id": 1 }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 2 }),
+            at,
+        );
+        property(&mut tracker, "path", json!("/films/Listed.mkv"), at);
+        event(&mut tracker, json!({ "event": "file-loaded" }), at);
+        event(&mut tracker, json!({ "event": "playback-restart" }), at);
+
+        let played = events(&mut tracker);
+        assert!(
+            matches!(
+                played.as_slice(),
+                [PlayerEvent::FileLoaded { file, origin: Origin::External }] if file.name == "Listed.mkv"
+            ),
+            "{played:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_over_a_playing_file_still_unloads_the_old_one() {
+        let at = Instant::now();
+        let mut tracker = playing(at, 5.0);
+        let (waiter, _outcome) = oneshot::channel();
+        let generation = tracker.expect_load(waiter);
+        tracker.on_reply(
+            Effect::Load(generation),
+            Some(&json!({ "playlist_entry_id": 2 })),
+            at,
+        );
+
+        // What mpv 0.41 sends when a broken file replaces a playing one.
+        event(
+            &mut tracker,
+            json!({ "event": "end-file", "reason": "stop", "playlist_entry_id": 1 }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 2 }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({
+                "event": "end-file",
+                "reason": "error",
+                "playlist_entry_id": 2,
+                "file_error": "unrecognized file format"
+            }),
+            at,
+        );
+        event(&mut tracker, json!({ "event": "idle" }), at);
+        property(&mut tracker, "idle-active", json!(true), at);
+
+        assert_eq!(
+            events(&mut tracker),
+            [
+                PlayerEvent::FileFailed {
+                    error: "unrecognized file format".to_owned()
+                },
+                PlayerEvent::Unloaded,
+            ]
+        );
+        assert!(!tracker.snapshot().is_loaded());
+    }
+
+    #[test]
+    fn a_file_that_fails_with_nothing_open_before_it_unloads_nothing() {
+        let at = Instant::now();
+        let mut tracker = seeded(at);
+
+        event(
+            &mut tracker,
+            json!({ "event": "start-file", "playlist_entry_id": 1 }),
+            at,
+        );
+        event(
+            &mut tracker,
+            json!({ "event": "end-file", "reason": "error", "file_error": "loading failed" }),
+            at,
+        );
+        property(&mut tracker, "idle-active", json!(true), at);
+
+        assert_eq!(
+            events(&mut tracker),
+            [PlayerEvent::FileFailed {
+                error: "loading failed".to_owned()
+            }]
+        );
     }
 
     #[test]

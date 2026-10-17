@@ -472,3 +472,67 @@ async fn real_mpv_refuses_a_playlist_at_once_without_opening_what_it_lists() {
     player.load(&fixture.film).await.expect("loaded");
     quit_and_check_closed(&player, &mut events).await;
 }
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn real_mpv_reports_a_users_pause_before_our_resume_that_follows_it() {
+    let fixture = Fixture::make("held-pause");
+    let (player, mut events) = loaded(&fixture.film).await;
+    player.set_paused(false).await.expect("resumed");
+    let mut elsewhere = Elsewhere::connect(&player).await;
+
+    // The user pauses, and before the end-of-file hold runs out the room
+    // has the client resume.
+    elsewhere
+        .command(json!(["set_property", "pause", true]))
+        .await;
+    let deadline = Instant::now() + SOON;
+    while !player.snapshot().paused {
+        assert!(Instant::now() < deadline, "the pause never showed");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    player.set_paused(false).await.expect("resumed again");
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let mut pauses = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let PlayerEvent::PauseChanged { paused, origin } = event {
+            pauses.push((paused, origin));
+        }
+    }
+    assert_eq!(
+        pauses,
+        [
+            (false, Origin::Ours),
+            (true, Origin::External),
+            (false, Origin::Ours)
+        ]
+    );
+    assert!(!player.snapshot().paused);
+
+    quit_and_check_closed(&player, &mut events).await;
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn real_mpv_unloads_a_playing_file_replaced_by_one_it_cannot_open() {
+    let fixture = Fixture::make("bad-over-good");
+    let (player, mut events) = loaded(&fixture.film).await;
+    let broken = fixture.dir.join("broken.mkv");
+    std::fs::write(&broken, b"this is not a film").expect("broken file");
+
+    let error = player.load(&broken).await.expect_err("broken");
+    assert_eq!(error.kind(), "player_failed");
+
+    let (_, skipped) = wait_for(&mut events, SOON, |event| {
+        (*event == PlayerEvent::Unloaded).then_some(())
+    })
+    .await;
+    assert!(
+        matches!(skipped.as_slice(), [PlayerEvent::FileFailed { .. }]),
+        "{skipped:?}"
+    );
+    assert!(player.snapshot().file.is_none());
+
+    quit_and_check_closed(&player, &mut events).await;
+}

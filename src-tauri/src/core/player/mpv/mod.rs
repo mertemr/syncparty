@@ -41,7 +41,7 @@ use crate::core::process;
 
 use self::connection::{CommandError, Shared};
 use self::endpoint::Endpoint;
-use self::tracker::{Effect, OBSERVED};
+use self::tracker::{Effect, LoadFailure, OBSERVED};
 use self::transport::{LineReader, MpvProcess, Process};
 
 /// How long mpv gets to start listening. Upstream Syncplay waits as long.
@@ -385,9 +385,20 @@ impl Player for MpvPlayer {
 
         match tokio::time::timeout(LOAD_TIMEOUT, outcome).await {
             Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(reason))) => Err(SyncPartyError::PlayerFailed(format!(
+            Ok(Ok(Err(LoadFailure::Failed(reason)))) => Err(SyncPartyError::PlayerFailed(format!(
                 "could not open the file: {reason}"
             ))),
+            Ok(Ok(Err(LoadFailure::Playlist))) => {
+                // mpv has gone on to what the playlist lists; `stop` ends
+                // that and empties the playlist, so nothing else in it plays.
+                if let Err(error) = self.request(json!(["stop"]), Effect::None).await {
+                    tracing::warn!(?error, "could not stop what a refused playlist listed");
+                }
+                Err(SyncPartyError::PlayerFailed(format!(
+                    "could not open the file: {}",
+                    tracker::NOT_A_FILM
+                )))
+            }
             Ok(Err(_)) => Err(SyncPartyError::PlayerFailed(
                 "mpv closed before the file started playing".to_owned(),
             )),

@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,7 +20,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::watch;
 
 use super::endpoint::Endpoint;
-use super::tracker::OBSERVED;
+use super::tracker::{NOT_A_FILM, OBSERVED};
 use super::transport::{self, Process};
 use super::{start, MpvPlayer};
 use crate::core::player::{
@@ -873,4 +873,140 @@ async fn dropping_the_player_kills_mpv() {
 
     assert_eq!(closed(&mut events).await, CloseReason::QuitRequested);
     assert!(!socket.exists());
+}
+
+#[tokio::test]
+async fn a_pause_at_the_keyboard_is_reported_before_our_resume_that_follows_it() {
+    let scratch = Scratch::new("held-pause");
+    let mut rig = rig().await;
+    rig.open(&scratch.file("Film.mkv")).await;
+    rig.play_from_the_keyboard().await;
+
+    // Held for a possible end of the file...
+    rig.mpv.property("pause", json!(true)).await;
+    rig.settle().await;
+    rig.assert_quiet();
+
+    // ...when the room has the client resume the player.
+    let player = Arc::clone(&rig.player);
+    let resuming = tokio::spawn(async move { player.set_paused(false).await });
+    rig.mpv
+        .accept(json!(["set_property", "pause", false]))
+        .await;
+    rig.mpv.property("pause", json!(false)).await;
+    resuming.await.expect("task").expect("resumed");
+
+    assert_eq!(
+        rig.next_event().await,
+        PlayerEvent::PauseChanged {
+            paused: true,
+            origin: Origin::External
+        }
+    );
+    assert_eq!(
+        rig.next_event().await,
+        PlayerEvent::PauseChanged {
+            paused: false,
+            origin: Origin::Ours
+        }
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    rig.settle().await;
+    rig.assert_quiet();
+    assert!(!rig.player.snapshot().paused);
+}
+
+#[tokio::test]
+async fn a_playlist_we_were_asked_to_open_fails_at_once_and_is_stopped() {
+    let scratch = Scratch::new("playlist");
+    let list = scratch.file("Films.m3u");
+    let mut rig = rig().await;
+
+    let player = Arc::clone(&rig.player);
+    let wanted = list.clone();
+    let started = Instant::now();
+    let loading = tokio::spawn(async move { player.load(&wanted).await });
+
+    let (id, _) = rig.mpv.request().await;
+    rig.mpv.succeed(id, json!({ "playlist_entry_id": 1 })).await;
+    rig.mpv
+        .send(json!({ "event": "start-file", "playlist_entry_id": 1 }))
+        .await;
+    rig.mpv
+        .send(json!({
+            "event": "end-file",
+            "reason": "redirect",
+            "playlist_entry_id": 1,
+            "playlist_insert_id": 2,
+            "playlist_insert_num_entries": 1
+        }))
+        .await;
+    rig.mpv
+        .send(json!({ "event": "start-file", "playlist_entry_id": 2 }))
+        .await;
+    rig.mpv.event("file-loaded").await;
+    rig.mpv.event("playback-restart").await;
+
+    // What the playlist listed is stopped before the load gives its answer.
+    rig.mpv.accept(json!(["stop"])).await;
+    rig.mpv
+        .send(json!({ "event": "end-file", "reason": "stop", "playlist_entry_id": 2 }))
+        .await;
+    rig.mpv.property("idle-active", json!(true)).await;
+
+    let error = loading.await.expect("task").expect_err("refused");
+    assert!(started.elapsed() < PATIENCE, "not after the load's timeout");
+    assert!(error.to_string().contains(NOT_A_FILM), "{error}");
+    assert_eq!(error.kind(), "player_failed");
+
+    assert_eq!(
+        rig.next_event().await,
+        PlayerEvent::FileFailed {
+            error: NOT_A_FILM.to_owned()
+        }
+    );
+    rig.settle().await;
+    rig.assert_quiet();
+    assert!(rig.player.snapshot().file.is_none());
+}
+
+#[tokio::test]
+async fn a_failed_load_over_a_playing_file_unloads_the_old_one() {
+    let scratch = Scratch::new("bad-over-good");
+    let mut rig = rig().await;
+    rig.open(&scratch.file("Film.mkv")).await;
+
+    let player = Arc::clone(&rig.player);
+    let broken = scratch.file("Broken.mkv");
+    let loading = tokio::spawn(async move { player.load(&broken).await });
+
+    let (id, _) = rig.mpv.request().await;
+    rig.mpv.succeed(id, json!({ "playlist_entry_id": 2 })).await;
+    rig.mpv
+        .send(json!({ "event": "end-file", "reason": "stop", "playlist_entry_id": 1 }))
+        .await;
+    rig.mpv
+        .send(json!({ "event": "start-file", "playlist_entry_id": 2 }))
+        .await;
+    rig.mpv
+        .send(json!({
+            "event": "end-file",
+            "reason": "error",
+            "playlist_entry_id": 2,
+            "file_error": "unrecognized file format"
+        }))
+        .await;
+    rig.mpv.event("idle").await;
+    rig.mpv.property("idle-active", json!(true)).await;
+
+    loading.await.expect("task").expect_err("broken");
+    assert_eq!(
+        rig.next_event().await,
+        PlayerEvent::FileFailed {
+            error: "unrecognized file format".to_owned()
+        }
+    );
+    assert_eq!(rig.next_event().await, PlayerEvent::Unloaded);
+    rig.settle().await;
+    rig.assert_quiet();
 }

@@ -28,7 +28,7 @@ use crate::core::invite::Invite;
 use crate::core::movie::MovieStore;
 use crate::core::net::{ControlChannel, HostTunnel, PartyEndpoint, TransportReport};
 use crate::core::notify::{self, DiscordNotifier};
-use crate::core::player::PlayerLauncher;
+use crate::core::player::{Player, PlayerEvents, PlayerLauncher};
 use crate::core::syncplay::{
     ClientConfig, ClientTiming, MonitorConfig, RoomMonitor, ServerConfig, ServerController,
     ServerState,
@@ -147,10 +147,17 @@ pub struct PartySession {
     /// joins — a double click, a resume racing a paste — happen one after
     /// the other and the second finds the first already done.
     lifecycle: Mutex<()>,
-    /// Cancelled once the app is exiting. Every watch is started with it, so
-    /// a join still waiting for the host or for mpv gives up at once instead
-    /// of opening a player as the app goes.
+    /// Cancelled once the app is exiting. Every start and join runs under a
+    /// child of it, so one still waiting for the network, the host or mpv
+    /// gives up at once instead of opening a player as the app goes.
     closing: CancellationToken,
+    /// The party start in progress, if any. Stopping the party cancels it
+    /// before waiting for the lifecycle lock, so a party stopped while it is
+    /// still coming up never comes up behind the user's back.
+    starting: std::sync::Mutex<Option<CancellationToken>>,
+    /// The same for a guest join: leaving cancels it, so a leave pressed
+    /// mid-join does not wait out the host or open a player only to close it.
+    joining: std::sync::Mutex<Option<CancellationToken>>,
     /// Where the party log is written. Attached after construction, like
     /// `MovieVote`'s — `session` is built before the store exists.
     store: OnceCell<Arc<MovieStore>>,
@@ -192,6 +199,8 @@ impl PartySession {
             watch: std::sync::Mutex::new(None),
             lifecycle: Mutex::new(()),
             closing: CancellationToken::new(),
+            starting: std::sync::Mutex::new(None),
+            joining: std::sync::Mutex::new(None),
             store: OnceCell::new(),
             log: Arc::new(Mutex::new(None)),
         }
@@ -292,11 +301,38 @@ impl PartySession {
     /// On failure everything already started is torn down again rather than
     /// left running in the background where the next attempt would collide
     /// with it.
+    ///
+    /// A guest party this machine is still in is left first: there is one
+    /// player per machine, and the host's room panel cannot show two rooms.
+    ///
+    /// A stop that arrives while this is still under way calls it off — what
+    /// was already started is torn down and the result is `cancelled` rather
+    /// than a party nobody is looking at.
     pub async fn start_hosting(&self) -> Result<HostingInfo> {
-        match self.start_hosting_inner().await {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.closing.is_cancelled() {
+            return Err(closing());
+        }
+        // Starting again over a party that is up would fail at the server and
+        // then tear the running party down on the way out.
+        if matches!(self.state().await, SessionState::Hosting(_)) {
+            return Err(SyncPartyError::ServerAlreadyRunning);
+        }
+
+        let cancel = self.closing.child_token();
+        *lock(&self.starting) = Some(cancel.clone());
+
+        self.leave_for_own_party().await;
+        let started = self.start_hosting_inner(&cancel).await;
+        lock(&self.starting).take();
+
+        match started {
             Ok(info) => Ok(info),
             Err(error) => {
-                let _ = self.stop_hosting().await;
+                let _ = self.stop_hosting_locked().await;
+                if cancel.is_cancelled() {
+                    return Err(self.called_off());
+                }
                 self.transition(SessionState::Failed {
                     message: error.to_string(),
                 })
@@ -306,7 +342,7 @@ impl PartySession {
         }
     }
 
-    async fn start_hosting_inner(&self) -> Result<HostingInfo> {
+    async fn start_hosting_inner(&self, cancel: &CancellationToken) -> Result<HostingInfo> {
         let settings = self.settings.get();
 
         self.transition(SessionState::Starting {
@@ -318,7 +354,15 @@ impl PartySession {
         // that depends on the outside world. Failing here costs nothing to
         // unwind, whereas failing after the server is up does not.
         let endpoint = PartyEndpoint::bind_hosting(&self.secrets).await?;
-        endpoint.wait_online().await?;
+        let online = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(SyncPartyError::Cancelled),
+            online = endpoint.wait_online() => online,
+        };
+        if let Err(error) = online {
+            endpoint.close().await;
+            return Err(error);
+        }
         let host_endpoint = endpoint.id();
 
         // Generated once and reused forever. The salt in particular must not
@@ -376,6 +420,12 @@ impl PartySession {
         } else {
             false
         };
+
+        // The last moment a stop can still undo this before anyone is told
+        // the party is live.
+        if cancel.is_cancelled() {
+            return Err(SyncPartyError::Cancelled);
+        }
 
         let info = HostingInfo {
             invite_code: invite.encode(),
@@ -493,6 +543,9 @@ impl PartySession {
     /// timeout. Discord hears about it last, once everyone in the room
     /// already has.
     pub async fn stop_hosting(&self) -> Result<()> {
+        if let Some(start) = lock(&self.starting).take() {
+            start.cancel();
+        }
         let _lifecycle = self.lifecycle.lock().await;
         self.stop_hosting_locked().await
     }
@@ -567,37 +620,47 @@ impl PartySession {
 
         // Before anything is opened: with no player to drive there is no
         // point dialling the host, nor leaving a party that is still working.
-        let launcher = (self.players)(&self.settings)?;
+        (self.players)(&self.settings)?;
+
+        let cancel = self.closing.child_token();
+        *lock(&self.joining) = Some(cancel.clone());
 
         self.leave_locked().await;
         self.stop_watch(None).await;
 
         let route = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(self.called_off()),
             route = self.dialer.dial(invite, Arc::clone(&self.control)) => route?,
-            () = self.closing.cancelled() => return Err(closing()),
         };
         let config = self.watch_config(
             WatchRole::Guest,
             route.local_addr(),
             &invite.room,
             &invite.password,
+            cancel.clone(),
         );
 
-        let watch = match WatchSession::start(config, launcher, Arc::clone(&self.bus), true).await {
-            Ok(watch) => watch,
-            Err(error) => {
-                route.close().await;
-                return Err(error);
-            }
-        };
+        let watch =
+            match WatchSession::start(config, self.launcher(), Arc::clone(&self.bus), true).await {
+                Ok(watch) => watch,
+                Err(error) => {
+                    route.close().await;
+                    return Err(if cancel.is_cancelled() {
+                        self.called_off()
+                    } else {
+                        error
+                    });
+                }
+            };
 
-        // The app began exiting while this was starting. The watch came back
-        // anyway — a cancelled start still returns one — and nobody else is
-        // going to stop it.
-        if self.closing.is_cancelled() {
+        // The app began exiting, or the user left, while this was starting.
+        // The watch came back anyway — a cancelled start still returns one —
+        // and nobody else is going to stop it.
+        if cancel.is_cancelled() {
             watch.stop().await;
             route.close().await;
-            return Err(closing());
+            return Err(self.called_off());
         }
 
         self.install_watch(watch);
@@ -659,6 +722,9 @@ impl PartySession {
     /// Leaves the party a guest is in: closes the player, ends the sync
     /// connection, then closes the route to the host.
     pub async fn leave(&self) -> Result<()> {
+        if let Some(join) = lock(&self.joining).take() {
+            join.cancel();
+        }
         let _lifecycle = self.lifecycle.lock().await;
         self.leave_locked().await;
         Ok(())
@@ -671,6 +737,20 @@ impl PartySession {
 
         self.stop_watch(Some(WatchRole::Guest)).await;
         guest.route.close().await;
+    }
+
+    /// Leaves a guest party because this machine is about to host or watch a
+    /// party of its own. That is leaving on purpose, so it is not the party
+    /// reopened on the next launch either.
+    async fn leave_for_own_party(&self) {
+        if self.guest.lock().await.is_none() {
+            return;
+        }
+
+        self.leave_locked().await;
+        if let Err(error) = self.secrets.delete(SecretKey::LastInvite) {
+            tracing::warn!(%error, "could not forget the party that was left");
+        }
     }
 
     /// Starts watching the party this machine is hosting.
@@ -699,9 +779,9 @@ impl PartySession {
             .server_address
             .parse::<SocketAddr>()
             .map_err(|error| SyncPartyError::Other(format!("unusable server address: {error}")))?;
-        let launcher = (self.players)(&self.settings)?;
+        (self.players)(&self.settings)?;
 
-        self.leave_locked().await;
+        self.leave_for_own_party().await;
         self.stop_watch(None).await;
 
         let config = self.watch_config(
@@ -709,12 +789,14 @@ impl PartySession {
             address,
             &info.invite.room,
             &info.invite.password,
+            self.closing.child_token(),
         );
         // With the monitor attached the room panel already has a source, and
         // two writers would take turns overwriting each other.
         let publish_room = !info.monitor_attached;
         let watch =
-            WatchSession::start(config, launcher, Arc::clone(&self.bus), publish_room).await?;
+            WatchSession::start(config, self.launcher(), Arc::clone(&self.bus), publish_room)
+                .await?;
 
         if self.closing.is_cancelled() {
             watch.stop().await;
@@ -796,6 +878,7 @@ impl PartySession {
         address: SocketAddr,
         room: &str,
         password: &str,
+        cancel: CancellationToken,
     ) -> WatchConfig {
         let settings = self.settings.get();
 
@@ -810,7 +893,26 @@ impl PartySession {
                 timing: ClientTiming::default(),
             },
             connect_timeout: CONNECT_TIMEOUT,
-            cancel: self.closing.clone(),
+            cancel,
+        }
+    }
+
+    /// Starts players the way the settings say to *at the time*, not as they
+    /// were when the watch began — so a newer mpv located or installed after
+    /// a failed launch is the one "Reopen player" starts.
+    fn launcher(&self) -> Arc<dyn PlayerLauncher> {
+        Arc::new(Resolving {
+            players: Arc::clone(&self.players),
+            settings: Arc::clone(&self.settings),
+        })
+    }
+
+    /// Why a start or a join that was cancelled did not finish.
+    fn called_off(&self) -> SyncPartyError {
+        if self.closing.is_cancelled() {
+            closing()
+        } else {
+            SyncPartyError::Cancelled
         }
     }
 
@@ -869,6 +971,26 @@ fn parse_last_invite(raw: &str) -> Option<Invite> {
 
 fn encode_last_invite(invite: &Invite) -> Result<String> {
     Ok(serde_json::to_string(invite)?)
+}
+
+/// A [`PlayerLauncher`] that asks the [`PlayerSource`] which player to start
+/// every time it starts one.
+struct Resolving {
+    players: PlayerSource,
+    settings: Arc<ConfigStore>,
+}
+
+#[async_trait::async_trait]
+impl PlayerLauncher for Resolving {
+    async fn launch(&self) -> Result<(Arc<dyn Player>, PlayerEvents)> {
+        (self.players)(&self.settings)?.launch().await
+    }
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn closing() -> SyncPartyError {

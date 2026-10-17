@@ -10,10 +10,10 @@ import { Button, Card, Rewind } from "@/shared/ui";
  * Someone else's party, still open on this machine as a guest.
  *
  * Reached by switching the mode in Settings while a guest — or while still
- * joining as one. That party's player stays open and in step with it, and
- * its client publishes its room alongside this host's, so the host screen
- * cannot just leave it out: it says so, and offers the one thing to do.
- * Watching here as the host leaves it too, in the backend.
+ * joining as one. That party's player stays open and in step with it until
+ * this machine starts a party of its own or watches here as the host, which
+ * leave it in the backend; until then the host screen says so, and offers
+ * leaving it now.
  */
 export function GuestPartyNotice() {
   const t = useTranslate();

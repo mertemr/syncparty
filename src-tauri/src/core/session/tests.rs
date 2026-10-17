@@ -1151,3 +1151,252 @@ fn a_saved_invite_from_the_tailscale_era_is_discarded_rather_than_resumed() {
 
     assert!(parse_last_invite(legacy).is_none());
 }
+
+#[tokio::test]
+async fn leaving_calls_off_a_join_the_host_has_not_answered() {
+    let party = Party::new("leave-connecting").await;
+    let silent = Silent::start().await;
+    party.dialer.redirect(silent.address);
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        silent.accepted.notified().await;
+        party.session.leave().await.expect("leave");
+    })
+    .await;
+
+    let error = joined.expect_err("the join was called off");
+    assert_eq!(error.kind(), "cancelled", "{error}");
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        party.launcher.launched().is_empty(),
+        "no player was started"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn leaving_abandons_a_player_that_is_still_starting() {
+    let stuck = Arc::new(StuckLauncher::default());
+    let party = Party::with_players("leave-launching", Some(players_of(&stuck))).await;
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        stuck.entered.notified().await;
+        party.session.leave().await.expect("leave");
+    })
+    .await;
+
+    assert_eq!(joined.expect_err("called off").kind(), "cancelled");
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        stuck.abandoned.load(Ordering::SeqCst),
+        "the launch was dropped"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+}
+
+#[tokio::test]
+async fn a_join_that_finished_is_not_called_off_by_the_next_one() {
+    let party = Party::new("leave-after-join").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+    party.session.join(&invite).await.expect("joined");
+
+    // A resume of the same party is a no-op, and must leave the party it
+    // found running exactly as it was.
+    party
+        .session
+        .join(&invite)
+        .await
+        .expect("the same party again");
+
+    assert!(party.session.watch_state().is_some());
+    assert_eq!(party.launcher.launched().len(), 1);
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn watching_the_hosted_party_leaves_a_guest_party_on_purpose() {
+    let party = Party::new("host-leaves-guest").await;
+    party
+        .session
+        .join(&party.invite("Elsewhere", PASSWORD))
+        .await
+        .expect("joined as a guest");
+    assert!(party.remembered().is_some());
+    party.hosting(true).await;
+
+    party.session.join_as_host().await.expect("watching");
+
+    let state = party.session.watch_state().expect("a watch");
+    assert_eq!(state.role, WatchRole::Host);
+    assert_eq!(party.dialer.closes(), 1, "the guest's route is closed");
+    assert_eq!(
+        party.remembered(),
+        None,
+        "a party left to watch one's own is not reopened on the next launch"
+    );
+    party.session.stop_watching().await.expect("stop");
+}
+
+#[tokio::test]
+async fn starting_a_party_that_is_already_up_leaves_it_running() {
+    let party = Party::new("start-twice").await;
+    party.hosting(true).await;
+    party.session.join_as_host().await.expect("watching");
+
+    let error = party
+        .session
+        .start_hosting()
+        .await
+        .expect_err("already hosting");
+
+    assert_eq!(error.kind(), "server_already_running");
+    assert!(matches!(
+        party.session.state().await,
+        SessionState::Hosting(_)
+    ));
+    assert_eq!(party.server.stops(), 0, "the running party was not touched");
+    assert!(
+        party.session.watch_state().is_some(),
+        "nor the host's own player"
+    );
+    party.session.stop_watching().await.expect("stop");
+}
+
+#[tokio::test]
+async fn reopening_the_player_starts_the_mpv_located_since() {
+    let before = Arc::new(FakeLauncher::new());
+    let after = Arc::new(FakeLauncher::new());
+    let located = Arc::new(AtomicBool::new(false));
+    let players: PlayerSource = {
+        let (before, after, located) = (
+            Arc::clone(&before),
+            Arc::clone(&after),
+            Arc::clone(&located),
+        );
+        Arc::new(move |_: &ConfigStore| {
+            let launcher = if located.load(Ordering::SeqCst) {
+                Arc::clone(&after)
+            } else {
+                Arc::clone(&before)
+            };
+            Ok(launcher as Arc<dyn PlayerLauncher>)
+        })
+    };
+    let party = Party::with_players("reopen-relocated", Some(players)).await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+
+    before.last().expect("launched").user_closes();
+    party
+        .until_watching(|state| state.player == crate::core::watch::PlayerStatus::Closed)
+        .await;
+    located.store(true, Ordering::SeqCst);
+    party.session.reopen_player().await.expect("reopened");
+
+    assert_eq!(before.launched().len(), 1);
+    assert_eq!(
+        after.launched().len(),
+        1,
+        "the player located after the first launch is the one reopened"
+    );
+    party.session.leave().await.expect("leave");
+}
+
+/// A server whose start waits until it is let go, so a stop can arrive while
+/// a party is still coming up.
+#[derive(Default)]
+struct GatedServer {
+    starts: AtomicUsize,
+    stops: AtomicUsize,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ServerController for GatedServer {
+    async fn start(&self, _config: &ServerConfig) -> Result<()> {
+        self.release.notified().await;
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn state(&self) -> ServerState {
+        ServerState::Stopped
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_party_that_is_still_starting_calls_it_off() {
+    let (settings, secrets) = stores("stop-while-starting");
+    let bus = Arc::new(RecordingEventBus::default());
+    let server = Arc::new(GatedServer::default());
+    let session = PartySession::new(
+        settings,
+        Arc::clone(&secrets),
+        Arc::clone(&server) as Arc<dyn ServerController>,
+        Arc::new(DiscordNotifier::new(secrets)),
+        Arc::clone(&bus) as Arc<dyn EventBus>,
+        Arc::new(NullControl),
+        players_from(&Arc::new(FakeLauncher::new())),
+    );
+
+    let starting = async {
+        tokio::time::timeout(Duration::from_secs(40), session.start_hosting())
+            .await
+            .expect("the start never finished")
+    };
+    let stopping = async {
+        while !matches!(session.state().await, SessionState::Starting { .. }) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let stopped = session.stop_hosting();
+        tokio::pin!(stopped);
+        // Wherever the start is — waiting for the network, or for the server
+        // — it has to hear the stop rather than carry on.
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut stopped).await;
+        server.release.notify_one();
+        match early {
+            Ok(stopped) => stopped,
+            Err(_) => stopped.await,
+        }
+    };
+    let (started, stopped) = tokio::join!(starting, stopping);
+
+    stopped.expect("the stop succeeds");
+    let error = started.expect_err("the start was called off");
+    if error.kind().starts_with("endpoint_") {
+        // No network here: the endpoint failed before the stop arrived, and
+        // the race this is about never happened.
+        eprintln!("skipped: {error}");
+        return;
+    }
+    assert_eq!(error.kind(), "cancelled", "{error}");
+    assert!(matches!(session.state().await, SessionState::Idle));
+    assert!(
+        !bus.events().iter().any(|event| matches!(
+            event,
+            AppEvent::SessionChanged {
+                state: SessionState::Hosting(_)
+            }
+        )),
+        "the party never went live"
+    );
+    assert!(
+        server.stops.load(Ordering::SeqCst) >= server.starts.load(Ordering::SeqCst),
+        "nothing is left running"
+    );
+}

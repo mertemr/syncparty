@@ -210,13 +210,14 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reportFailure = useCallback((error: unknown) => {
-    setFailure({
-      kind:
-        typeof error === "object" && error !== null && "kind" in error
-          ? String((error as { kind: unknown }).kind)
-          : "other",
-      message: errorMessage(error),
-    });
+    const kind =
+      typeof error === "object" && error !== null && "kind" in error
+        ? String((error as { kind: unknown }).kind)
+        : "other";
+    // Something the user called off themselves — a party stopped while it
+    // was starting, a join left before it finished — did not fail.
+    if (kind === "cancelled") return;
+    setFailure({ kind, message: errorMessage(error) });
   }, []);
 
   const value = useMemo<AppStateValue>(

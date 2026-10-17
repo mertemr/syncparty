@@ -79,6 +79,12 @@ pub enum SyncPartyError {
     #[error("nothing is being watched on this machine")]
     NotWatching,
 
+    /// The user called the operation off before it finished — stopped a
+    /// party that was still starting, or left one that was still being
+    /// joined. Not a failure, so the UI says nothing about it.
+    #[error("called off before it finished")]
+    Cancelled,
+
     #[error("{command} exited with status {status}: {stderr}")]
     CommandFailed {
         command: String,
@@ -124,6 +130,7 @@ impl SyncPartyError {
             Self::SyncRejected(_) => "sync_rejected",
             Self::SyncFailed(_) => "sync_failed",
             Self::NotWatching => "not_watching",
+            Self::Cancelled => "cancelled",
             Self::CommandFailed { .. } => "command_failed",
             Self::Config(_) => "config",
             Self::Secret(_) => "secret",

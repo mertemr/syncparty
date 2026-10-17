@@ -87,7 +87,7 @@ export const en = {
   "host.joining": "Opening the player…",
   "host.guestParty.title": "Still in someone else's party",
   "host.guestParty.detail":
-    "You joined it as a guest. Its player stays open and in step with that party until you leave it.",
+    "You joined it as a guest. Starting your own party, or watching it here, leaves that one.",
   "host.watch.stop": "Stop watching here",
   "host.invite.title": "Invite",
   "host.invite.link": "Join link",
@@ -434,7 +434,7 @@ export const tr: Messages = {
   "host.joining": "Oynatıcı açılıyor…",
   "host.guestParty.title": "Hâlâ başka birinin film gecesindesin",
   "host.guestParty.detail":
-    "Ona misafir olarak katıldın. Sen ayrılana kadar oynatıcısı açık kalır ve o odayla senkron oynamaya devam eder.",
+    "Ona misafir olarak katıldın. Kendi film geceni başlatırsan ya da burada izlersen ondan ayrılırsın.",
   "host.watch.stop": "Burada izlemeyi bırak",
   "host.invite.title": "Davet",
   "host.invite.link": "Katılma bağlantısı",

@@ -5,11 +5,13 @@ export function Toggle({
   onChange,
   label,
   hint,
+  disabled = false,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
   label: string;
   hint?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-4">
@@ -22,9 +24,11 @@ export function Toggle({
         role="switch"
         aria-checked={checked}
         aria-label={label}
+        disabled={disabled}
         onClick={() => onChange(!checked)}
         className={cx(
           "relative mt-0.5 h-7 w-12 shrink-0 rounded-full transition-colors",
+          "disabled:cursor-not-allowed disabled:opacity-45",
           checked ? "bg-accent" : "bg-surface-raised border border-line",
         )}
       >

@@ -26,10 +26,13 @@ import type { MovieVoteSnapshot } from "@/shared/types/MovieVoteSnapshot";
 import type { RoomSnapshot } from "@/shared/types/RoomSnapshot";
 import type { SessionState } from "@/shared/types/SessionState";
 import type { SettingsPatch } from "@/shared/types/SettingsPatch";
+import type { WatchState } from "@/shared/types/WatchState";
 
 import { hydrateUserMovies } from "@/features/movie/userMovies";
+import { watchToastMessage } from "@/features/watch/watchState";
 
 import { movieVoteToastMessage } from "./movieVoteToast";
+import { roomAfterWatchChange } from "./roomPublisher";
 
 /** How many server log lines to keep. Enough to diagnose a failed start. */
 const LOG_LIMIT = 300;
@@ -53,6 +56,13 @@ interface AppStateValue {
   room: RoomSnapshot | null;
   serverLog: string[];
 
+  /**
+   * What this machine is watching, host or guest — `null` when nothing is.
+   * The backend holds it, so a screen that remounts finds the party it left
+   * rather than joining it again.
+   */
+  watch: WatchState | null;
+
   /** The active movie vote, if any — pushed by the backend, never polled. */
   movieVote: MovieVoteSnapshot | null;
 
@@ -75,6 +85,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<SessionState>({ phase: "idle" });
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [serverLog, setServerLog] = useState<string[]>([]);
+  const [watch, setWatch] = useState<WatchState | null>(null);
   const [movieVote, setMovieVote] = useState<MovieVoteSnapshot | null>(null);
   const [installs, setInstalls] = useState<
     Partial<Record<DependencyId, InstallProgress>>
@@ -85,6 +96,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   // Held in a ref so the event handler never needs to be re-registered when
   // an unrelated piece of state changes.
   const handleEvent = useRef<(event: AppEvent) => void>(() => {});
+  // Set by the first `watchChanged`. An answer to the mount-time hydrate that
+  // lands after it is older than what the event said, so it is dropped.
+  const watchHeardFrom = useRef(false);
 
   // A standalone translator rather than `useTranslate()`: `AppStateProvider`
   // sits outside `TranslationProvider` in the tree (it has to — the chosen
@@ -108,6 +122,17 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       case "roomUpdated":
         setRoom(event.snapshot);
         break;
+
+      case "watchChanged": {
+        watchHeardFrom.current = true;
+        const toast = watchToastMessage(watch, event.state, translate);
+        if (toast) pushToast(toast);
+        setWatch(event.state);
+        // The rule for when a room outlives the client that published it
+        // lives in `roomPublisher.ts`, where it is tested.
+        setRoom((current) => roomAfterWatchChange(current, event.state, session));
+        break;
+      }
 
       case "movieVoteChanged": {
         const toast = movieVoteToastMessage(movieVote, event.snapshot, translate);
@@ -159,6 +184,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
     void ipc.getSettings().then(setSettings).catch(reportInitialFailure);
     void ipc.sessionState().then(setSession).catch(reportInitialFailure);
+    void ipc
+      .watchState()
+      .then((state) => {
+        if (!watchHeardFrom.current) setWatch(state);
+      })
+      .catch(reportInitialFailure);
     void ipc.getMovieVote().then(setMovieVote).catch(reportInitialFailure);
     // Loads favourites and watched marks into memory so every poster card
     // can ask about them synchronously — see `userMovies.ts`.
@@ -195,6 +226,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       session,
       room,
       serverLog,
+      watch,
       movieVote,
       installs,
       pendingInvite,
@@ -209,6 +241,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       session,
       room,
       serverLog,
+      watch,
       movieVote,
       installs,
       pendingInvite,

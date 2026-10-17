@@ -5,10 +5,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppState } from "@/app/AppState";
 import { useTranslate, type Translate } from "@/shared/i18n";
 import { errorMessage, ipc } from "@/shared/ipc";
-import { Badge, Button, Choice, Dot, Rewind } from "@/shared/ui";
+import { Badge, Button, Dot, Rewind } from "@/shared/ui";
 import type { AppMode } from "@/shared/types/AppMode";
 import type { DependencyId } from "@/shared/types/DependencyId";
-import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightItem } from "@/shared/types/PreflightItem";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 
@@ -38,8 +37,6 @@ export function SystemStrip({
   const [locateErrors, setLocateErrors] = useState<
     Partial<Record<DependencyId, string>>
   >({});
-  // Not persisted: it decides what this click downloads and nothing else.
-  const [playerChoice, setPlayerChoice] = useState<PlayerChoice>("mpv");
 
   const check = useCallback(async () => {
     setChecking(true);
@@ -65,7 +62,7 @@ export function SystemStrip({
   async function install(id: DependencyId) {
     setInstalling(id);
     try {
-      await ipc.installDependency(id, id === "mpv" ? playerChoice : undefined);
+      await ipc.installDependency(id);
     } catch (error) {
       reportFailure(error);
     } finally {
@@ -145,8 +142,6 @@ export function SystemStrip({
                     progress={installs[item.id]?.stage}
                     disabled={installing !== null}
                     locateError={locateErrors[item.id] ?? null}
-                    playerChoice={item.id === "mpv" ? playerChoice : null}
-                    onPlayerChoice={setPlayerChoice}
                     onInstall={() => void install(item.id)}
                     onLocate={() => void locate(item.id, item.displayName)}
                     onForgetPath={() => void applyPath(item.id, null)}
@@ -165,8 +160,6 @@ function DependencyRow({
   busy,
   progress,
   disabled,
-  playerChoice,
-  onPlayerChoice,
   onInstall,
   onLocate,
   onForgetPath,
@@ -176,8 +169,6 @@ function DependencyRow({
   busy: boolean;
   progress: string | undefined;
   disabled: boolean;
-  playerChoice: PlayerChoice | null;
-  onPlayerChoice: (choice: PlayerChoice) => void;
   onInstall: () => void;
   onLocate: () => void;
   onForgetPath: () => void;
@@ -208,19 +199,6 @@ function DependencyRow({
         ) : (
           <div className="flex items-center gap-2">
             {unusable && <Badge tone="bad">{t("preflight.unusable")}</Badge>}
-
-            {playerChoice && item.canAutoInstall && (
-              <Choice
-                ariaLabel={t("preflight.player")}
-                value={playerChoice}
-                options={[
-                  { value: "mpv", label: "mpv" },
-                  { value: "vlc", label: "VLC" },
-                ]}
-                onChange={(choice) => onPlayerChoice(choice as PlayerChoice)}
-                disabled={disabled}
-              />
-            )}
 
             {/* Offered alongside installing, not instead of it: a portable
                 build already on disk is quicker than a download, and the

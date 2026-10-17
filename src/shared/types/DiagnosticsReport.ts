@@ -2,6 +2,7 @@
 import type { PreflightReport } from "./PreflightReport";
 import type { SessionState } from "./SessionState";
 import type { TransportReport } from "./TransportReport";
+import type { WatchState } from "./WatchState";
 
 export type DiagnosticsReport = { appVersion: string, operatingSystem: string, 
 /**
@@ -19,7 +20,7 @@ secretStorage: string, dependencies: PreflightReport,
  * identity. Included because it is the one value that identifies a
  * machine when comparing notes about a party that would not connect.
  */
-endpoint: string | null, session: SessionState, 
+endpoint: string | null, session: SessionState, watch: WatchState | null, 
 /**
  * How this machine sits on the network, measured live.
  *

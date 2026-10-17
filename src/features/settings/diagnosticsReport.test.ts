@@ -31,6 +31,7 @@ describe("safeToShare", () => {
       },
       endpoint: "k7yvcfvw3wm2gqbkbmzsvwmnl6yxu4h3fbtjgnfhpcowcprivate",
       session: { phase: "idle" },
+      watch: null,
       transport: {
         endpointId: "k7yvcfvw3wm2gqbkbmzsvwmnl6yxu4h3fbtjgnfhpcowcprivate",
         addresses: ["192.168.1.42:11204", "203.0.113.7:11204"],
@@ -78,6 +79,7 @@ describe("safeToShare", () => {
       dependencies: { mode: "guest", items: [] },
       endpoint: null,
       session: { phase: "failed", message: "secret detail" },
+      watch: null,
       transport: null,
       transportError: "could not reach relay-private.example: timed out",
     } satisfies DiagnosticsReport;
@@ -91,5 +93,89 @@ describe("safeToShare", () => {
     expect(shared.transportFailed).toBe(true);
     expect(JSON.stringify(shared)).not.toContain("private");
     expect(JSON.stringify(shared)).not.toContain("secret detail");
+  });
+
+  it("says whether a file is open without saying which, or who is watching it", () => {
+    const report = {
+      appVersion: "0.9.0",
+      operatingSystem: "linux",
+      secretStorage: "keychain",
+      dependencies: { mode: "guest", items: [] },
+      endpoint: null,
+      session: { phase: "idle" },
+      watch: {
+        role: "guest",
+        room: "taha-birthday-private",
+        username: "mert-private",
+        connection: { state: "connected" },
+        player: {
+          state: "loaded",
+          file: { name: "Home.Video.2024.private.mkv", durationSeconds: 3600 },
+          paused: true,
+        },
+        ready: true,
+      },
+      transport: null,
+      transportError: null,
+    } satisfies DiagnosticsReport;
+
+    const shared = safeToShare(report);
+
+    expect(shared.watch).toEqual({
+      role: "guest",
+      connection: "connected",
+      player: "loaded",
+      hasFile: true,
+      ready: true,
+    });
+    expect(JSON.stringify(shared)).not.toContain("private");
+  });
+
+  // A rejection or a player failure can quote anything — a path, a room
+  // name — so only the state survives, never its message.
+  it("keeps watch failures to their state", () => {
+    const report = {
+      appVersion: "0.9.0",
+      operatingSystem: "linux",
+      secretStorage: "keychain",
+      dependencies: { mode: "guest", items: [] },
+      endpoint: null,
+      session: { phase: "idle" },
+      watch: {
+        role: "host",
+        room: "movie-night",
+        username: null,
+        connection: { state: "rejected", message: "room private-room is closed" },
+        player: { state: "failed", message: "/home/private/mpv crashed" },
+        ready: false,
+      },
+      transport: null,
+      transportError: null,
+    } satisfies DiagnosticsReport;
+
+    const shared = safeToShare(report);
+
+    expect(shared.watch).toMatchObject({
+      connection: "rejected",
+      player: "failed",
+      hasFile: false,
+    });
+    expect(JSON.stringify(shared)).not.toContain("private");
+  });
+
+  it("reports nothing being watched as no watch at all", () => {
+    const report = {
+      appVersion: "0.9.0",
+      operatingSystem: "linux",
+      secretStorage: "keychain",
+      dependencies: { mode: "host", items: [] },
+      endpoint: null,
+      session: { phase: "idle" },
+      watch: null,
+      transport: null,
+      transportError: null,
+    } satisfies DiagnosticsReport;
+
+    expect(safeToShare(report).watch).toBeNull();
   });
 });

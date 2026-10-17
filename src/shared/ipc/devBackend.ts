@@ -7,21 +7,29 @@
  * poor trade during design work.
  *
  * This stands in for the Rust side well enough to drive every screen: it holds
- * settings, runs a scripted start-up, and pushes room snapshots. It is not a
- * simulator — nothing here is a claim about how the real backend behaves, and
- * nothing may depend on it outside development.
+ * settings, runs a scripted start-up, watches a party with a pretend mpv, and
+ * pushes room snapshots. It is not a simulator — nothing here is a claim about
+ * how the real backend behaves, and nothing may depend on it outside
+ * development.
  *
  * Scenarios are chosen with a query parameter, so a screenshot of any state is
  * one URL away:
  *
- *   ?dev=missing    a dependency is not installed
- *   ?dev=unusable   Syncplay is installed and will not start
- *   ?dev=mismatch   the room is watching different files
- *   ?dev=guest      start as a guest rather than a host
+ *   ?dev=missing       mpv is not installed
+ *   ?dev=unusable      the mpv location points at something that is not mpv
+ *   ?dev=mismatch      the room is watching different files
+ *   ?dev=guest         start as a guest rather than a host
+ *   ?dev=watching      a guest already in a party, playing, with the room
+ *   ?dev=reconnecting  a guest whose connection dropped and keeps retrying
+ *   ?dev=playerClosed  a guest who closed mpv; "Reopen player" brings it back
+ *   ?dev=rejected      a guest the party turned away (wrong password); joining
+ *                      again is refused the same way
  */
 import type { AppEvent } from "@/shared/types/AppEvent";
 import type { AppSettings } from "@/shared/types/AppSettings";
+import type { DependencyId } from "@/shared/types/DependencyId";
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
+import type { FileCompatibility } from "@/shared/types/FileCompatibility";
 import type { Genre } from "@/shared/types/Genre";
 import type { HostingInfo } from "@/shared/types/HostingInfo";
 import type { Invite } from "@/shared/types/Invite";
@@ -39,10 +47,18 @@ import type { PartyLogEntry } from "@/shared/types/PartyLogEntry";
 import type { UpdatePolicy } from "@/shared/types/UpdatePolicy";
 import type { UserMovie } from "@/shared/types/UserMovie";
 import type { VoteParticipant } from "@/shared/types/VoteParticipant";
+import type { WatchedFile } from "@/shared/types/WatchedFile";
+import type { WatcherView } from "@/shared/types/WatcherView";
+import type { WatchState } from "@/shared/types/WatchState";
 
 const scenario = new URLSearchParams(globalThis.location?.search ?? "").get(
   "dev",
 );
+
+/** The scenarios that open on a guest who is already in a party. */
+const WATCH_SCENARIOS = ["watching", "reconnecting", "playerClosed", "rejected"];
+const inParty = WATCH_SCENARIOS.includes(scenario ?? "");
+const asGuest = scenario === "guest" || inParty;
 
 const ENDPOINT =
   "k57qxc3jrqvbnl2mzp4wt6yhd8fgs9auk3e7rvxm2cqbnjh4pldw";
@@ -60,10 +76,12 @@ function emit(event: AppEvent) {
 }
 
 let settings: AppSettings = {
-  mode: scenario === "guest" ? "guest" : null,
+  mode: asGuest ? "guest" : null,
   port: 8999,
   room: "movie-night",
-  nickname: "taha",
+  // The host in every fixture is taha, so a guest needs a name of its own —
+  // otherwise the room would list the same person twice.
+  nickname: asGuest ? "mert" : "taha",
   language: "en",
   monitorEnabled: true,
   skipSetupWhenReady: false,
@@ -77,42 +95,30 @@ const overrides: Record<string, string | null> = {};
 const missing = new Set(scenario === "missing" ? ["mpv"] : []);
 
 /**
- * The Syncplay client is installed and refuses to run — what Ubuntu 24.04
- * gives you, where the packaged 1.7.0 imports a name Python 3.12 removed.
- * Installing it again would hand back the same copy, so the row offers the
- * download instead.
+ * The mpv location the user once chose now holds VLC — what a machine
+ * upgraded from a build that supported both is left with. Detection runs it,
+ * sees it is something else, and the row offers to forget the location.
  */
-const unusableClient = scenario === "unusable";
+const notMpv = scenario === "unusable";
+if (notMpv) overrides.mpv = "/usr/bin/vlc";
 
 function preflight(): PreflightReport {
   return {
     mode: settings.mode ?? "host",
     items: [
       {
-        id: "syncplayClient",
-        displayName: "Syncplay",
-        status: unusableClient
-          ? {
-              state: "unusable",
-              path: "/usr/bin/syncplay",
-              reason:
-                "ImportError: cannot import name 'SafeConfigParser' from 'configparser'",
-            }
-          : missing.has("syncplayClient")
-            ? { state: "missing" }
-            : { state: "installed", version: "1.7.2", path: "C:/syncplay" },
-        canAutoInstall: true,
-        needsElevation: false,
-        manualUrl: "https://syncplay.pl/download/",
-        supportsManualPath: true,
-        overridePath: overrides.syncplayClient ?? null,
-      },
-      {
         id: "mpv",
         displayName: "mpv",
-        status: missing.has("mpv")
-          ? { state: "missing" }
-          : { state: "installed", version: "0.38.0", path: "C:/mpv" },
+        status:
+          notMpv && overrides.mpv
+            ? {
+                state: "unusable",
+                path: overrides.mpv,
+                reason: "VLC media player 3.0.21 Vetinari (revision 3.0.21-0-gdd8bfdbabe8)",
+              }
+            : missing.has("mpv")
+              ? { state: "missing" }
+              : { state: "installed", version: "0.41.0", path: "C:/mpv/mpv.exe" },
         canAutoInstall: true,
         needsElevation: false,
         manualUrl: "https://mpv.io/installation/",
@@ -124,66 +130,189 @@ function preflight(): PreflightReport {
 }
 
 function hosting(): HostingInfo {
+  const code = `SP2.${ENDPOINT.slice(0, 24)}`;
   return {
     invite: INVITE,
-    inviteCode: `SP1-${ENDPOINT.slice(0, 24)}`,
-    deepLink: `syncparty://join/${ENDPOINT.slice(0, 24)}`,
+    inviteCode: code,
+    deepLink: `syncparty://join/${code}`,
     serverAddress: "127.0.0.1:8999",
     server: { state: "running", port: 8999 },
-    monitorAttached: true,
+    monitorAttached: settings.monitorEnabled,
   };
 }
 
-function room(): RoomSnapshot {
+const STALKER_4K: WatchedFile = { name: "Stalker.1979.2160p.mkv", durationSeconds: 9660 };
+const STALKER: WatchedFile = { name: "Stalker.1979.1080p.BluRay.x264.mkv", durationSeconds: 9661 };
+const SOLARIS: WatchedFile = { name: "Solaris.1972.1080p.mkv", durationSeconds: 9420 };
+
+/** What is being watched on this machine. `null` when nothing is. */
+let watch: WatchState | null = inParty ? initialWatch() : null;
+/** The party the watch session belongs to, for telling a rejoin from a switch. */
+let watchedInvite: Invite | null = inParty ? INVITE : null;
+/** Kept so "Reopen player" can load it again — the real one keeps it in memory too. */
+let lastFile: WatchedFile | null = inParty ? STALKER : null;
+let lastInvite: Invite | null = inParty ? INVITE : null;
+/**
+ * Bumped whenever a watch session ends, so a scripted sequence still sleeping
+ * between steps knows it has been overtaken and stops instead of bringing a
+ * left party back to life.
+ */
+let generation = 0;
+
+function initialWatch(): WatchState {
+  const base: WatchState = {
+    role: "guest",
+    room: INVITE.room,
+    username: settings.nickname,
+    connection: { state: "connected" },
+    player: { state: "loaded", file: STALKER, paused: false },
+    ready: true,
+  };
+
+  switch (scenario) {
+    case "reconnecting":
+      return { ...base, connection: { state: "reconnecting", attempt: 1 } };
+    case "playerClosed":
+      return { ...base, player: { state: "closed" }, ready: false };
+    case "rejected":
+      return {
+        ...base,
+        connection: { state: "rejected", message: "the room password is wrong" },
+        player: { state: "idle" },
+        ready: false,
+      };
+    default:
+      return base;
+  }
+}
+
+// A host that has gone away: the client keeps trying, with the attempt count
+// climbing, for as long as the scenario is left open.
+if (scenario === "reconnecting") {
+  setInterval(() => {
+    if (watch?.connection.state !== "reconnecting") return;
+    setWatch({
+      ...watch,
+      connection: { state: "reconnecting", attempt: watch.connection.attempt + 1 },
+    });
+  }, 1600);
+}
+
+function setWatch(next: WatchState | null) {
+  watch = next;
+  emit({ kind: "watchChanged", state: next });
+  publishRoom();
+}
+
+function patchWatch(patch: Partial<WatchState>) {
+  if (watch) setWatch({ ...watch, ...patch });
+}
+
+/**
+ * The room as this machine's publisher sees it, with this machine's own entry
+ * taken from what it is watching. Everyone else is a fixture.
+ */
+function roomSnapshot(): RoomSnapshot {
+  const monitor = session.phase === "hosting" && session.monitorAttached;
+  // Without the monitor the room comes from this machine's own client, which
+  // reports a disconnected room until it is connected and has a `List` again.
+  if (!monitor && watch?.connection.state !== "connected") {
+    return { connected: false, rooms: [] };
+  }
+
   const mismatched = scenario === "mismatch";
+  const ada: WatcherView = {
+    name: "ada",
+    // Mixed release names with the same runtime, so the healthy scenario
+    // shows the "different names, same length" case rather than the plain one.
+    file:
+      scenario === "watching" || mismatched
+        ? { name: "Stalker (1979) [1080p].mp4", durationSeconds: 9660.4 }
+        : null,
+    isReady: scenario === "watching",
+    isController: false,
+  };
+  const others: WatcherView[] =
+    watch?.role === "guest"
+      ? [{ name: "taha", file: STALKER_4K, isReady: true, isController: true }, ada]
+      : [
+          {
+            name: "mert",
+            file: mismatched ? SOLARIS : STALKER,
+            isReady: true,
+            isController: false,
+          },
+          ada,
+        ];
+
+  const self: WatcherView[] =
+    watch && watch.username && watch.connection.state === "connected"
+      ? [
+          {
+            name: watch.username,
+            file: watch.player.state === "loaded" ? watch.player.file : null,
+            isReady: watch.ready,
+            isController: watch.role === "host",
+          },
+        ]
+      : [];
+
+  const watchers = [...self, ...others].sort((a, b) => a.name.localeCompare(b.name));
+  const fileCompatibility = compatibility(watchers);
 
   return {
     connected: true,
     rooms: [
       {
-        name: "movie-night",
-        everyoneOnTheSameFile: !mismatched,
-        fileCompatibility: mismatched ? "mismatch" : "exact",
-        watchers: [
-          {
-            name: "taha",
-            file: { name: "Stalker.1979.2160p.mkv", durationSeconds: 9660 },
-            isReady: true,
-            isController: true,
-          },
-          {
-            name: "mert",
-            file: {
-              name: mismatched
-                ? "Solaris.1972.1080p.mkv"
-                : "Stalker.1979.1080p.mkv",
-              durationSeconds: mismatched ? 9420 : 9661,
-            },
-            isReady: true,
-            isController: false,
-          },
-          {
-            name: "ada",
-            file: null,
-            isReady: false,
-            isController: false,
-          },
-        ],
+        name: INVITE.room,
+        watchers,
+        everyoneOnTheSameFile: fileCompatibility !== "mismatch",
+        fileCompatibility,
       },
     ],
   };
 }
 
+/** The same rule as `file_compatibility` on the Rust side, near enough. */
+function compatibility(watchers: WatcherView[]): FileCompatibility {
+  const files = watchers.map((watcher) => watcher.file);
+  if (files.length === 0 || files.some((file) => file === null)) return "waiting";
+
+  const known = files as WatchedFile[];
+  const first = known[0].name.toLowerCase();
+  if (known.every((file) => file.name.toLowerCase() === first)) return "exact";
+
+  const durations = known.map((file) => file.durationSeconds);
+  if (durations.some((duration) => duration === null)) return "mismatch";
+
+  const spread = Math.max(...(durations as number[])) - Math.min(...(durations as number[]));
+  return spread <= 2 ? "durationMatch" : "mismatch";
+}
+
+/**
+ * Pushes the room, from whichever single writer the real backend would use:
+ * the monitor while it is attached, otherwise this machine's own client.
+ */
+function publishRoom() {
+  const monitor = session.phase === "hosting" && session.monitorAttached;
+  const ownClient = watch !== null && (watch.role === "guest" || !monitor);
+  if (!monitor && !ownClient) return;
+
+  emit({ kind: "roomUpdated", snapshot: roomSnapshot() });
+}
+
 const STARTUP: StartupStep[] = [
   "joiningNetwork",
-  "openingTunnel",
   "startingServer",
+  "openingTunnel",
   "attachingMonitor",
 ];
 
 /** Walks the start-up steps, then goes live and starts pushing the room. */
 async function startHosting(): Promise<HostingInfo> {
   for (const step of STARTUP) {
+    if (step === "attachingMonitor" && !settings.monitorEnabled) continue;
+
     session = { phase: "starting", step };
     emit({ kind: "sessionChanged", state: session });
     emit({
@@ -196,9 +325,70 @@ async function startHosting(): Promise<HostingInfo> {
 
   session = { phase: "hosting", ...hosting() };
   emit({ kind: "sessionChanged", state: session });
-  emit({ kind: "roomUpdated", snapshot: room() });
+  publishRoom();
 
   return hosting();
+}
+
+/**
+ * The guest's join, in the order the real one goes: connect through the
+ * tunnel, be let in (or not), then open the player.
+ */
+async function joinParty(invite: Invite): Promise<void> {
+  if (watch && watchedInvite && sameInvite(watchedInvite, invite)) return;
+  if (watch) stopWatch();
+
+  const mine = ++generation;
+  watchedInvite = invite;
+  setWatch({
+    role: "guest",
+    room: invite.room,
+    username: null,
+    connection: { state: "connecting" },
+    player: { state: "starting" },
+    ready: false,
+  });
+  await sleep(1200);
+  if (mine !== generation) return;
+
+  if (scenario === "rejected") {
+    stopWatch();
+    fail(
+      "sync_rejected",
+      "the party did not let this machine in: the room password is wrong",
+    );
+  }
+
+  await openPlayer(mine, settings.nickname);
+  lastInvite = invite;
+}
+
+/** Greeted by the server, then mpv comes up empty. Shared by host and guest. */
+async function openPlayer(mine: number, username: string) {
+  patchWatch({ username, connection: { state: "connected" } });
+  await sleep(800);
+  if (mine !== generation) return;
+  patchWatch({ player: { state: "idle" } });
+}
+
+function stopWatch() {
+  generation++;
+  watchedInvite = null;
+  setWatch(null);
+}
+
+function requireWatch(): WatchState {
+  if (!watch) fail("not_watching", "nothing is being watched on this machine");
+  return watch!;
+}
+
+function sameInvite(a: Invite, b: Invite) {
+  return a.endpoint === b.endpoint && a.room === b.room && a.password === b.password;
+}
+
+/** What the fake file dialog hands back. */
+export function devPickFile(): Promise<string | null> {
+  return Promise.resolve("C:/Users/mert/Videos/Stalker.1979.1080p.BluRay.x264.mkv");
 }
 
 function sleep(ms: number) {
@@ -412,7 +602,7 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
   },
 
   install_dependency: async ({ id }) => {
-    const dependency = id as "mpv";
+    const dependency = id as DependencyId;
     for (const [index, stage] of ["Downloading", "Extracting", "Verifying"].entries()) {
       emit({
         kind: "installProgress",
@@ -435,25 +625,92 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
 
   start_hosting: () => startHosting(),
 
+  // The host's own player goes first, as in the real teardown order.
   stop_hosting: () => {
+    if (watch?.role === "host") stopWatch();
     session = { phase: "idle" };
     emit({ kind: "sessionChanged", state: session });
   },
 
   session_state: () => session,
 
+  // Finds the token anywhere in the text, the way the real decoder does, so
+  // pasting a whole chat message works here too.
   decode_invite: ({ text }) => {
-    if (!String(text).trim().toUpperCase().startsWith("SP1-")) {
+    if (!/SP2\./i.test(String(text))) {
       fail("invalid_invite", "That does not look like a syncparty invite.");
     }
     return INVITE;
   },
 
-  join_party: () => undefined,
-  leave_party: () => undefined,
-  resume_last_session: () => null,
-  clear_last_session: () => undefined,
-  join_hosted_party: () => undefined,
+  join_party: ({ invite }) => joinParty(invite as Invite),
+
+  leave_party: () => {
+    if (watch?.role === "guest") stopWatch();
+  },
+
+  resume_last_session: async () => {
+    if (!lastInvite) return null;
+    const invite = lastInvite;
+    await joinParty(invite);
+    return invite;
+  },
+
+  clear_last_session: () => {
+    lastInvite = null;
+  },
+
+  join_hosted_party: async () => {
+    if (session.phase !== "hosting") fail("server_not_running", "the sync server is not running");
+    if (watch?.role === "host") return;
+    if (watch) stopWatch();
+
+    const mine = ++generation;
+    setWatch({
+      role: "host",
+      room: INVITE.room,
+      username: null,
+      connection: { state: "connecting" },
+      player: { state: "starting" },
+      ready: false,
+    });
+    // Loopback to its own server: no tunnel, so it is in almost at once.
+    await sleep(300);
+    if (mine !== generation) return;
+    await openPlayer(mine, settings.nickname);
+  },
+
+  watch_state: () => watch,
+
+  open_watch_file: ({ path }) => {
+    requireWatch();
+    const name = String(path).split(/[\\/]/).pop() ?? String(path);
+    lastFile = { name, durationSeconds: name.includes("Solaris") ? 9420 : 9661 };
+    // A joiner never moves the room: the file opens paused, wherever the
+    // room is, and waits for someone to press play.
+    patchWatch({ player: { state: "loaded", file: lastFile, paused: true } });
+  },
+
+  reopen_player: async () => {
+    requireWatch();
+    const mine = generation;
+    patchWatch({ player: { state: "starting" } });
+    await sleep(900);
+    if (mine !== generation) return;
+    patchWatch({
+      player: lastFile ? { state: "loaded", file: lastFile, paused: true } : { state: "idle" },
+    });
+  },
+
+  set_ready: ({ ready }) => {
+    requireWatch();
+    patchWatch({ ready: Boolean(ready) });
+  },
+
+  stop_watching: () => {
+    if (watch?.role !== "host") fail("not_watching", "nothing is being watched on this machine");
+    stopWatch();
+  },
 
   run_diagnostics: (): DiagnosticsReport => ({
     appVersion: "0.5.3-dev",
@@ -462,6 +719,7 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
     dependencies: preflight(),
     endpoint: ENDPOINT,
     session,
+    watch,
     transport: {
       endpointId: ENDPOINT,
       addresses: ["192.168.1.24:52311", "81.214.9.7:52311"],
@@ -672,6 +930,10 @@ export function devInvoke<T>(command: string, args?: Args): Promise<T> {
 
 export function devListen(handler: (event: AppEvent) => void) {
   listeners.add(handler);
+  // A party that was already being watched when the page loaded has a room
+  // nobody has asked for yet — the real client publishes it on its next
+  // refresh, which here is now.
+  setTimeout(publishRoom, 50);
   return Promise.resolve(() => {
     listeners.delete(handler);
   });

@@ -35,6 +35,15 @@ const ALWAYS: &[&str] = &[
     "--loop-file=no",
     "--loop-playlist=no",
     "--speed=1",
+    // A file only ever opens itself. Without this a playlist — any file
+    // starting "#EXTM3U", whatever it is called — makes mpv open what it
+    // lists, URLs included, within the same millisecond; and a user's
+    // `autocreate-playlist` turns every film into a playlist of its folder,
+    // so the load syncparty asked for never comes back as its own. Both were
+    // seen on mpv 0.41; with this, both fail or play as the one file. The
+    // cost is ordered chapters and files inside archives, which a party
+    // whose members each open their own copy is better off without anyway.
+    "--access-references=no",
 ];
 
 /// The arguments for one mpv listening on `endpoint`.
@@ -134,6 +143,7 @@ mod tests {
             "--resume-playback=no",
             "--loop-file=no",
             "--loop-playlist=no",
+            "--access-references=no",
         ] {
             assert!(
                 arguments.iter().any(|a| a == expected),
@@ -159,6 +169,7 @@ mod tests {
             "--keep-open=always",
             "--keep-open-pause=yes",
             "--pause",
+            "--access-references=no",
         ] {
             assert!(
                 arguments.iter().any(|a| a == expected),

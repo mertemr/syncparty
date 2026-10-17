@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::UnixStream;
+use tokio::net::{TcpListener, UnixStream};
 
 use super::{MpvLauncher, MpvPlayer};
 use crate::core::player::{
@@ -424,4 +424,51 @@ async fn real_mpv_quits_when_asked_and_leaves_no_socket_behind() {
 
     quit_and_check_closed(&player, &mut events).await;
     assert!(!socket.exists());
+}
+
+#[tokio::test]
+#[ignore = "needs mpv"]
+async fn real_mpv_refuses_a_playlist_at_once_without_opening_what_it_lists() {
+    let fixture = Fixture::make("playlist");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+    let url = format!(
+        "http://{}/film.mkv",
+        listener.local_addr().expect("address")
+    );
+
+    let local = fixture.dir.join("local.m3u");
+    std::fs::write(&local, format!("{}\n", fixture.film.display())).expect("playlist");
+    let remote = fixture.dir.join("remote.m3u");
+    std::fs::write(&remote, format!("{url}\n")).expect("playlist");
+    // A playlist by its contents, whatever its name says.
+    let disguised = fixture.dir.join("disguised.mkv");
+    std::fs::write(&disguised, format!("#EXTM3U\n{url}\n")).expect("playlist");
+
+    let (player, mut events) = headless().await;
+    for list in [&local, &remote, &disguised] {
+        let started = Instant::now();
+        let error = player.load(list).await.expect_err("not a film");
+        assert!(
+            started.elapsed() < SOON,
+            "{list:?}: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(error.kind(), "player_failed");
+        assert!(player.snapshot().file.is_none());
+    }
+
+    let reached = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+    assert!(reached.is_err(), "mpv went to {url}");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            matches!(event, PlayerEvent::FileFailed { .. }),
+            "only failures: {event:?}"
+        );
+    }
+
+    // And a film still opens afterwards.
+    player.load(&fixture.film).await.expect("loaded");
+    quit_and_check_closed(&player, &mut events).await;
 }

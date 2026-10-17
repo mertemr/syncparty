@@ -136,6 +136,44 @@ impl Route for LoopbackRoute {
     }
 }
 
+/// The real server, noting at each stop whether the host's player was still
+/// open — the one thing that must have gone before it.
+struct OrderedServer {
+    inner: NativeServer,
+    launcher: Arc<FakeLauncher>,
+    player_open_at_stop: std::sync::Mutex<Vec<bool>>,
+}
+
+impl OrderedServer {
+    fn player_open_at_stop(&self) -> Vec<bool> {
+        self.player_open_at_stop.lock().expect("stops").clone()
+    }
+
+    fn stops(&self) -> usize {
+        self.player_open_at_stop.lock().expect("stops").len()
+    }
+}
+
+#[async_trait]
+impl ServerController for OrderedServer {
+    async fn start(&self, config: &ServerConfig) -> Result<()> {
+        self.inner.start(config).await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let open = self
+            .launcher
+            .last()
+            .is_some_and(|player| !player.is_closed());
+        self.player_open_at_stop.lock().expect("stops").push(open);
+        self.inner.stop().await
+    }
+
+    async fn state(&self) -> ServerState {
+        self.inner.state().await
+    }
+}
+
 /// Each test gets its own directory: they run in parallel, and a shared one
 /// means whichever test wipes it first breaks the others.
 fn stores(label: &str) -> (Arc<ConfigStore>, Arc<SecretStore>) {
@@ -188,7 +226,7 @@ struct Party {
     secrets: Arc<SecretStore>,
     launcher: Arc<FakeLauncher>,
     dialer: Arc<LoopbackDialer>,
-    server: Arc<NativeServer>,
+    server: Arc<OrderedServer>,
     config: ServerConfig,
 }
 
@@ -213,7 +251,11 @@ impl Party {
                 ..ServerTiming::default()
             },
         };
-        let server = Arc::new(NativeServer::new(Arc::new(NullEventBus)));
+        let server = Arc::new(OrderedServer {
+            inner: NativeServer::new(Arc::new(NullEventBus)),
+            launcher: Arc::clone(&launcher),
+            player_open_at_stop: std::sync::Mutex::new(Vec::new()),
+        });
         server.start(&config).await.expect("the server starts");
         let dialer = Arc::new(LoopbackDialer::new(config.local_address()));
 
@@ -621,10 +663,60 @@ async fn stopping_the_party_closes_the_hosts_player_first() {
 
     party.session.stop_hosting().await.expect("stopped");
 
-    assert!(party.player().is_closed());
+    assert_eq!(
+        party.server.player_open_at_stop(),
+        vec![false],
+        "the player was closed before the server went"
+    );
     assert_eq!(party.session.watch_state(), None);
     assert!(matches!(party.session.state().await, SessionState::Idle));
     assert_eq!(party.server.state().await, ServerState::Stopped);
+}
+
+#[tokio::test]
+async fn discord_hears_the_party_ended_last_and_cannot_hold_it_up() {
+    let party = Party::new("host-stop-discord").await;
+    party
+        .session
+        .settings
+        .update(|settings| settings.discord_enabled = true)
+        .expect("enable discord");
+
+    // A webhook that takes the request and never answers it.
+    let webhook = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    party
+        .secrets
+        .set(
+            SecretKey::DiscordWebhook,
+            &format!("http://{}/webhook", webhook.local_addr().expect("address")),
+        )
+        .expect("webhook");
+    let (heard, server_stopped) = tokio::sync::oneshot::channel();
+    let server = Arc::clone(&party.server);
+    let swallowing = tokio::spawn(async move {
+        let (_held, _) = webhook.accept().await.expect("the post arrives");
+        let _ = heard.send(server.stops() > 0);
+        std::future::pending::<()>().await;
+    });
+    party.hosting(true).await;
+
+    tokio::time::timeout(
+        ANNOUNCE_TIMEOUT + Duration::from_secs(2),
+        party.session.stop_hosting(),
+    )
+    .await
+    .expect("stopping the party waited on Discord")
+    .expect("stopped");
+
+    assert_eq!(
+        server_stopped.await,
+        Ok(true),
+        "the party was down before Discord was told"
+    );
+    assert!(matches!(party.session.state().await, SessionState::Idle));
+    swallowing.abort();
 }
 
 #[tokio::test]

@@ -50,6 +50,12 @@ pub type PlayerSource = Arc<dyn Fn(&ConfigStore) -> Result<Arc<dyn PlayerLaunche
 /// for mpv to be asked to quit and, failing that, killed.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How long telling Discord the party is over may take. The webhook client
+/// has no timeout of its own, and a network that swallows the request would
+/// otherwise hold stopping the party — or the app's exit — for as long as it
+/// liked.
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Length of the generated server password. Long enough that guessing is
 /// hopeless, short enough to read aloud if the link ever fails.
 const PASSWORD_LENGTH: usize = 18;
@@ -483,7 +489,8 @@ impl PartySession {
     /// tunnel goes before the server so no guest is mid-forward into a server
     /// that is about to disappear, and the endpoint is closed rather than
     /// dropped so guests are told the party ended instead of waiting out a
-    /// timeout.
+    /// timeout. Discord hears about it last, once everyone in the room
+    /// already has.
     pub async fn stop_hosting(&self) -> Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
         self.stop_hosting_locked().await
@@ -493,13 +500,8 @@ impl PartySession {
         self.stop_watch(Some(WatchRole::Host)).await;
 
         let settings = self.settings.get();
-
-        if settings.discord_enabled && matches!(self.state().await, SessionState::Hosting(_)) {
-            let _ = self
-                .discord
-                .send(&notify::party_stopped(&settings.language))
-                .await;
-        }
+        let announce =
+            settings.discord_enabled && matches!(self.state().await, SessionState::Hosting(_));
 
         self.close_log().await;
 
@@ -511,9 +513,29 @@ impl PartySession {
             network.endpoint.close().await;
         }
 
-        self.server.stop().await?;
-        self.transition(SessionState::Idle).await;
-        Ok(())
+        let stopped = self.server.stop().await;
+        if stopped.is_ok() {
+            self.transition(SessionState::Idle).await;
+        }
+
+        // After the party is down rather than before, so a slow webhook can
+        // only delay the message, never the guests being told; and bounded,
+        // so it cannot use up the time the app has to exit.
+        if announce {
+            let sent = tokio::time::timeout(
+                ANNOUNCE_TIMEOUT,
+                self.discord
+                    .send(&notify::party_stopped(&settings.language)),
+            )
+            .await;
+            match sent {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "could not tell Discord the party ended"),
+                Err(_) => tracing::warn!("gave up telling Discord the party ended"),
+            }
+        }
+
+        stopped
     }
 
     /// Joins a party as a guest: opens a route to the host, connects the sync

@@ -608,10 +608,12 @@ impl Session {
                 );
             }
 
-            registry.move_to(&username, &wanted, now);
+            // The position they were seeded with, not a second sample: with
+            // them in the room, that could follow them and name them as
+            // having set it, and a client ignores a seek it made itself.
+            let position = registry.move_to(&username, &wanted, now);
 
-            if let Some(room) = registry.room_mut(&wanted) {
-                let position = room.sample(now);
+            if let (Some(position), Some(room)) = (position, registry.room_mut(&wanted)) {
                 let state = Playstate::of(room.playback(), position, true);
                 let file = room
                     .users()
@@ -1652,6 +1654,36 @@ mod tests {
 
         let list = parse(&read_until(&mut ahmet, r#""List""#).await);
         assert!(list["List"]["OtherRoom"]["ayse"].is_object(), "got {list}");
+    }
+
+    /// The room being joined holds somebody with nothing open, as the host's
+    /// room always does: the room monitor never opens a file. Once the mover
+    /// is in, they are its only candidate, and a State rendered from a second
+    /// sample would name them — and a client ignores a seek it is told it made
+    /// itself, so they would stay on the old film's position.
+    #[tokio::test]
+    async fn a_room_switch_never_names_the_mover_as_who_set_the_room() {
+        let registry = Registry::shared();
+        let _monitor = arrive(&registry, "monitor", "OtherRoom").await;
+
+        let mut ahmet = arrive(&registry, "ahmet", "MovieNight").await;
+        write_line(&mut ahmet, OPEN_FILM).await;
+        write_line(&mut ahmet, &state_line(3000.0, false)).await;
+        let _ = read_until(&mut ahmet, r#""server":1"#).await;
+        write_line(&mut ahmet, &acked_state_line(3000.0, false, 1)).await;
+
+        // Long enough that the room he moves to is due a fresh sample.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        write_line(&mut ahmet, r#"{"Set":{"room":{"name":"OtherRoom"}}}"#).await;
+
+        let forced = state_of(&read_until(&mut ahmet, r#""doSeek":true"#).await);
+        let playstate = &forced["playstate"];
+        assert_ne!(
+            playstate["setBy"], "ahmet",
+            "he would ignore the seek: {forced}"
+        );
+        assert_eq!(playstate["position"], 0.0, "got {forced}");
+        assert_eq!(playstate["paused"], true, "got {forced}");
     }
 
     /// The privilege escalation: an operator of one controlled room switching

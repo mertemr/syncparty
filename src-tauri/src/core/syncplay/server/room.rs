@@ -425,28 +425,39 @@ impl Room {
     ///
     /// In a controlled room only controllers are followed: anybody else being
     /// behind is theirs to fix, not the room's.
+    ///
+    /// A stale room with nobody to follow still counts as sampled: it writes
+    /// down where its own reading puts it and starts the second again, as
+    /// upstream's `getPosition` does. Left stale, the next call would sample
+    /// whoever has just become a candidate — a mover arriving with a file, say,
+    /// who would then be named as having set the room they were only told
+    /// about.
     pub fn sample(&mut self, now: Instant) -> f64 {
         let stale = now.saturating_duration_since(self.last_update) > SAMPLE_AFTER;
-
-        if stale {
-            let playing = !self.playback.paused;
-            let slowest = self
-                .users
-                .values()
-                .filter(|user| !self.is_controlled() || user.is_controller)
-                .filter_map(|user| Some((user, user.position_now(playing, now)?)))
-                .min_by(|(_, a), (_, b)| a.total_cmp(b))
-                .map(|(user, position)| (user.name.clone(), position));
-
-            if let Some((name, position)) = slowest {
-                self.playback.position = position;
-                self.playback.set_by = Some(name);
-                self.last_update = now;
-                return position;
-            }
+        if !stale {
+            return self.advanced(now);
         }
 
-        self.advanced(now)
+        let playing = !self.playback.paused;
+        let slowest = self
+            .users
+            .values()
+            .filter(|user| !self.is_controlled() || user.is_controller)
+            .filter_map(|user| Some((user, user.position_now(playing, now)?)))
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(user, position)| (user.name.clone(), position));
+
+        let position = match slowest {
+            Some((name, position)) => {
+                self.playback.set_by = Some(name);
+                position
+            }
+            None => self.advanced(now),
+        };
+        self.playback.position = position;
+        self.last_update = now;
+
+        position
     }
 
     /// Folds one client's report into the room and says what to send.
@@ -538,6 +549,13 @@ impl Room {
     /// across without losing their file, readiness or connection.
     pub fn remove(&mut self, name: &str) -> Option<User> {
         let user = self.users.remove(name);
+
+        // Nobody here set the room any more. Kept, the name would outlive them,
+        // and if they came back the State that tells them where the room is
+        // would say they had put it there, which a client ignores.
+        if self.playback.set_by.as_deref() == Some(name) {
+            self.playback.set_by = None;
+        }
 
         // An empty room forgets where it was. The next party in a room of the
         // same name starts from the beginning rather than halfway through
@@ -866,6 +884,62 @@ mod tests {
         let mut room = playing_room_with(start, &[]);
 
         assert!(close(room.sample(after(start, 5.0)), 5.0));
+    }
+
+    /// Upstream starts the second again whether or not it found anybody to
+    /// follow. Without that, a stale room samples again at once, and whoever
+    /// has just arrived with a file becomes the room — and is named as having
+    /// set it.
+    #[test]
+    fn a_stale_room_with_nobody_to_follow_still_starts_its_second_again() {
+        let start = origin();
+        let mut room = playing_room_with(start, &[]);
+        room.add("monitor", sender());
+        assert!(close(room.sample(after(start, 2.0)), 2.0));
+
+        room.add("ahmet", sender());
+        room.set_file("ahmet", Some(watched_file()));
+        room.set_position("ahmet", 0.0, after(start, 2.0));
+
+        assert!(
+            close(room.sample(after(start, 2.5)), 2.5),
+            "the room's own reading is half a second old, not stale"
+        );
+        assert_eq!(room.playback().set_by, None);
+
+        assert!(
+            close(room.sample(after(start, 3.5)), 1.5),
+            "a second after that it follows him as it would anybody"
+        );
+        assert_eq!(room.playback().set_by.as_deref(), Some("ahmet"));
+    }
+
+    #[test]
+    fn a_watcher_who_leaves_is_no_longer_named_as_who_set_the_room() {
+        let mut room = Room::new("MovieNight");
+        for name in ["ahmet", "mehmet", "monitor"] {
+            room.add(name, sender());
+        }
+        room.force_playback(PlaybackState {
+            position: 300.0,
+            paused: true,
+            set_by: Some("ahmet".to_owned()),
+        });
+
+        room.remove("mehmet");
+        assert_eq!(
+            room.playback().set_by.as_deref(),
+            Some("ahmet"),
+            "somebody else leaving changes nothing"
+        );
+
+        room.remove("ahmet");
+        assert_eq!(
+            room.playback().set_by,
+            None,
+            "were he to come back, he would be told he had set it himself"
+        );
+        assert_eq!(room.playback().position, 300.0, "only the name goes");
     }
 
     #[test]

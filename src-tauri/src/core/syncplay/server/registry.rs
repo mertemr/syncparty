@@ -84,19 +84,25 @@ impl Registry {
     /// start from wherever this room is — sampled before they arrive, so
     /// their old position cannot become this room's — or, in a room nobody is
     /// in yet, from no position at all.
-    pub fn move_to(&mut self, user: &str, room: &str, now: Instant) {
-        let Some(mut carried) = self.detach(user) else {
-            return;
-        };
+    ///
+    /// Returns that sample, the room's position at `now`, or `None` when
+    /// `user` was not anywhere. It is the one reading the mover is told
+    /// about: sampling again once they are in would find them a candidate and
+    /// could name them as having set the room.
+    pub fn move_to(&mut self, user: &str, room: &str, now: Instant) -> Option<f64> {
+        let mut carried = self.detach(user)?;
 
         let destination = self.room_or_create(room);
+        let position = destination.sample(now);
         carried.is_controller = false;
-        carried.position = (!destination.is_empty()).then(|| destination.sample(now));
+        carried.position = (!destination.is_empty()).then_some(position);
         carried.reported_at = now;
         carried.last_seen = now;
 
         destination.insert(carried);
         self.where_is.insert(user.to_owned(), room.to_owned());
+
+        Some(position)
     }
 
     pub fn leave(&mut self, user: &str) {
@@ -283,7 +289,7 @@ mod tests {
             room.set_position(name, position, start);
         }
 
-        registry.move_to("ahmet", "OtherRoom", start + Duration::from_secs(2));
+        let told = registry.move_to("ahmet", "OtherRoom", start + Duration::from_secs(2));
 
         let moved = &registry.room("OtherRoom").expect("room").users()["ahmet"];
         assert_eq!(
@@ -291,6 +297,33 @@ mod tests {
             Some(40.0),
             "the old film's position must not become a sample in the new room"
         );
+        assert_eq!(told, Some(40.0), "and that is where he is told it is");
+    }
+
+    /// The room being joined holds only somebody with nothing open, as the
+    /// host's room does: the room monitor never opens a file. The mover is
+    /// the first candidate it has ever had.
+    #[test]
+    fn a_mover_is_not_named_as_who_set_the_room_they_join() {
+        let mut registry = Registry::default();
+        let start = Instant::now();
+        registry.join("monitor", "OtherRoom", sender());
+        registry.join("ahmet", "MovieNight", sender());
+        let room = registry.room_mut("MovieNight").expect("room");
+        room.set_file("ahmet", Some(open_file("Film.mkv")));
+        room.set_position("ahmet", 3000.0, start);
+
+        let later = start + Duration::from_secs(2);
+        let told = registry.move_to("ahmet", "OtherRoom", later);
+
+        assert_eq!(told, Some(0.0));
+        let room = registry.room_mut("OtherRoom").expect("room");
+        assert_eq!(
+            room.sample(later),
+            0.0,
+            "in the same instant, the room is where he was told it is"
+        );
+        assert_ne!(room.playback().set_by.as_deref(), Some("ahmet"));
     }
 
     #[test]
@@ -330,9 +363,10 @@ mod tests {
         let mut registry = Registry::default();
 
         registry.leave("nobody");
-        registry.move_to("nobody", "OtherRoom", Instant::now());
+        let told = registry.move_to("nobody", "OtherRoom", Instant::now());
 
         assert!(registry.room("OtherRoom").is_none());
+        assert_eq!(told, None, "nobody moved, so nobody is told anything");
     }
 
     #[test]

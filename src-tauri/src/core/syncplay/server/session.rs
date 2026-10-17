@@ -276,6 +276,11 @@ impl Session {
                         }),
                     ),
                 );
+                // Before the `Hello`, as upstream sends it. A Syncplay client
+                // answers its greeting with the readiness it has stored, so
+                // this is what puts a reconnecting guest back to
+                // `readyAtStart` instead of keeping what it was last time.
+                announce_readiness(joined, &username);
                 joined.send_to(
                     &username,
                     &ServerToClient::Hello {
@@ -285,7 +290,6 @@ impl Session {
                         features: ServerFeatures::supported(),
                     },
                 );
-                announce_readiness(joined, &username);
             }
 
             deliver_list(&mut registry, &username);
@@ -1065,8 +1069,8 @@ mod tests {
         let mut client = connect(Registry::shared());
         write_line(&mut client, &hello_line("ahmet", "MovieNight", "swordfish")).await;
 
-        let greeting = read_line(&mut client).await;
-        assert!(greeting.contains(r#""Hello""#), "got {greeting}");
+        let greeting = read_until(&mut client, r#""Hello""#).await;
+        assert!(greeting.contains("MovieNight"), "got {greeting}");
 
         let list = read_until(&mut client, r#""List""#).await;
         assert!(
@@ -1196,7 +1200,7 @@ mod tests {
         let mut second = connect(Arc::clone(&registry));
         write_line(&mut second, &hello_line("ahmet", "MovieNight", "swordfish")).await;
 
-        let greeting = read_line(&mut second).await;
+        let greeting = read_until(&mut second, r#""Hello""#).await;
         assert!(
             greeting.contains(r#""username":"ahmet_""#),
             "the newcomer is renamed rather than allowed to collide, got {greeting}"
@@ -1447,6 +1451,12 @@ mod tests {
     /// Upstream starts everybody at "unknown" and says so to the whole room,
     /// the newcomer included: a client that remembers being ready from an
     /// earlier connection hears that the room does not.
+    ///
+    /// The newcomer hears it *before* its `Hello`. A Syncplay client answers
+    /// the greeting with its stored readiness, or `readyAtStart` when it has
+    /// none, so this is what puts a reconnecting guest back to not ready.
+    /// Arriving after, it is overwritten by the readiness the client just
+    /// reported from its previous connection.
     #[tokio::test]
     async fn an_arrival_is_announced_as_not_yet_known_to_be_ready() {
         let registry = Registry::shared();
@@ -1466,9 +1476,12 @@ mod tests {
         assert!(ready["isReady"].is_null(), "got {ready}");
         assert_eq!(ready["manuallyInitiated"], false, "got {ready}");
 
-        let _ = read_until(&mut mehmet, "Hello").await;
-        let own = parse(&read_until(&mut mehmet, r#""ready""#).await);
-        assert_eq!(own["Set"]["ready"]["username"], "mehmet");
+        let own = parse(&read_line(&mut mehmet).await);
+        let own = &own["Set"]["ready"];
+        assert_eq!(own["username"], "mehmet", "the first thing he hears: {own}");
+        assert!(own["isReady"].is_null(), "got {own}");
+        let greeting = read_line(&mut mehmet).await;
+        assert!(greeting.contains(r#""Hello""#), "and then: {greeting}");
 
         let list = parse(&read_until(&mut mehmet, r#""List""#).await);
         for name in ["ahmet", "mehmet"] {

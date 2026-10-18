@@ -63,8 +63,9 @@ run the tests that need a real player. They want mpv on PATH and no display:
 
 ```bash
 cd src-tauri
-cargo test --test native_watch_e2e -- --ignored
+cargo test --test native_watch_e2e -- --ignored --test-threads=1
 cargo test --lib player::mpv -- --ignored
+cargo test --lib deps::mpv -- --ignored
 ```
 
 Check that each one reports at least one test passed. A filter that matches

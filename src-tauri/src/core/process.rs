@@ -36,8 +36,11 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 ///
 /// All three streams are null rather than piped: nobody reads a pipe here,
 /// and a child that writes enough into an unread one blocks once the pipe is
-/// full. The process is killed if its handle is dropped, so a syncparty that
-/// goes away mid-film does not leave behind a player nothing controls.
+/// full. The process is killed if its handle is dropped, so a player whose
+/// session ends without stopping it is not left behind. That covers syncparty
+/// winding down; a syncparty that is killed outright never drops anything,
+/// and its mpv lives on — which is why the app stops the player itself on
+/// exit rather than leaving it to this.
 pub fn quiet(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     command

@@ -10,7 +10,7 @@ needs already in place.
 
 | | Version |
 |---|---|
-| Rust | stable, 1.77 or newer |
+| Rust | stable, 1.91 or newer |
 | Node.js | 22 or newer |
 | pnpm | 10 (`corepack enable pnpm`) |
 
@@ -105,16 +105,20 @@ it, lets that client drive a headless mpv, and asserts that playback state
 really crosses the server. It makes its own test clip with `mpv --o`, so mpv is
 all it needs. It is the only test that runs the whole path, from one player's
 state to the server and back into a player, so run it if you have mpv
-installed — together with the mpv driver's own ignored tests:
+installed — together with the mpv driver's own ignored tests and the check
+that recognises a real mpv. The end-to-end test runs its films one at a time,
+because two parties starting players side by side on a busy machine test the
+machine rather than syncparty:
 
 ```bash
 cd src-tauri
-cargo test --test native_watch_e2e -- --ignored
+cargo test --test native_watch_e2e -- --ignored --test-threads=1
 cargo test --lib player::mpv -- --ignored
+cargo test --lib deps::mpv -- --ignored
 ```
 
 They need no display — mpv runs with `--vo=null --ao=null` — so they work over
-SSH and in CI, where the `Backend (native client + mpv)` job runs both.
+SSH and in CI, where the `Backend (native client + mpv)` job runs all three.
 
 The Rust tests regenerate `src/shared/types/*.ts` through ts-rs. If `git
 status` shows changes there after a run, commit them — new files included —

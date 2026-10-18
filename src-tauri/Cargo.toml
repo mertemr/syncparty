@@ -4,6 +4,9 @@ version = "0.8.0"
 description = "Synchronised movie nights, peer to peer"
 authors = ["Taha Çeken", "Mert Emir <48881002+mertemr@users.noreply.github.com>"]
 edition = "2021"
+# What the locked dependencies need — iroh 1.0 asks for 1.91 — so an older
+# distribution toolchain is told so up front rather than deep in a build.
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/mertemr/syncparty"
 

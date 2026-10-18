@@ -192,8 +192,13 @@ A few decisions worth knowing about:
 - **The invite is the only thing guarding a party.** There is no network
   membership to check any more, so anyone holding the code can join. That was
   already most of the story — the code carried the server password — but the
-  tailnet used to be a second door. Treat a code like a door key and start a
-  new party if one leaks. A `syncparty://` link is the same code, so it
+  tailnet used to be a second door. Treat a code like a door key — one that
+  does not change. The endpoint key and the password are generated once and
+  kept, which is what lets last week's code work tonight, so starting a new
+  party does not retire a code that leaked. Removing syncparty's
+  `endpoint-key` and `server-password` entries from the system keychain (or
+  from the fallback secrets file) does, and the next party hands out a new
+  one. A `syncparty://` link is the same code, so it
   carries the password too, and on Windows and Linux the system hands a
   clicked link to syncparty as a command-line argument — briefly if the app is
   already open, and for as long as it runs if the link is what started it.

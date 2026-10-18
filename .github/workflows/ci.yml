@@ -186,7 +186,7 @@ jobs:
         id: e2e
         working-directory: src-tauri
         run: |
-          cargo test --test native_watch_e2e -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          cargo test --test native_watch_e2e -- --ignored --test-threads=1 --color never 2>&1 | tee "$RUNNER_TEMP/e2e.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/e2e.log" ||
             { echo "::error::cargo test --test native_watch_e2e -- --ignored ran no tests"; exit 1; }
 
@@ -200,6 +200,16 @@ jobs:
           cargo test --lib player::mpv -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/driver.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/driver.log" ||
             { echo "::error::cargo test --lib player::mpv -- --ignored ran no tests"; exit 1; }
+
+      # The check that decides whether a guest can join at all: is what is
+      # installed really mpv, and new enough.
+      - name: A real mpv is recognised as one
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
+        working-directory: src-tauri
+        run: |
+          cargo test --lib deps::mpv -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/deps.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/deps.log" ||
+            { echo "::error::cargo test --lib deps::mpv -- --ignored ran no tests"; exit 1; }
 
   frontend:
     name: Frontend

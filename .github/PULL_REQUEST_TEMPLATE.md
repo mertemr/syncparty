@@ -18,8 +18,9 @@
       [Syncplay source](https://github.com/Syncplay/syncplay), not inferred —
       both ends are ours now, so nothing else will notice a wrong field
 - [ ] If this touches the sync client, the mpv driver or the protocol,
-      `cargo test --test native_watch_e2e -- --ignored` and
-      `cargo test --lib player::mpv -- --ignored` pass with at least one test
+      `cargo test --test native_watch_e2e -- --ignored --test-threads=1`,
+      `cargo test --lib player::mpv -- --ignored` and
+      `cargo test --lib deps::mpv -- --ignored` pass with at least one test
       each (need mpv on PATH)
 - [ ] If this changes how mpv (or anything else) is started, the party
       password still never reaches its command line or environment, and the

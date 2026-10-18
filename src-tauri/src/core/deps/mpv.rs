@@ -11,6 +11,7 @@ use crate::core::deps::installer::{install_and_verify, PackageManagedInstall, Pa
 use crate::core::deps::{Dependency, DependencyId, DependencyStatus, ModeRequirement};
 use crate::core::error::Result;
 use crate::core::events::ProgressSink;
+use crate::core::player::mpv::version;
 use crate::core::player::{find_mpv, MPV_KEY};
 use crate::core::process;
 
@@ -93,8 +94,11 @@ impl Dependency for MpvDependency {
         MANUAL_URL
     }
 
+    /// winget's `shinchiro.mpv` installs for every user, under
+    /// `C:\Program Files`, which raises a UAC prompt. Homebrew installs into
+    /// a prefix the user owns.
     fn needs_elevation(&self) -> bool {
-        false
+        cfg!(windows)
     }
 
     async fn can_auto_install(&self) -> bool {
@@ -182,6 +186,19 @@ async fn identify(path: &Path, timeout: Duration) -> DependencyStatus {
     }
 
     match banner_in(&output.stdout).or_else(|| banner_in(&output.stderr)) {
+        // The driver refuses an mpv this old when it starts it. Saying so here
+        // puts it in the checklist, where Install and Locate are, instead of
+        // in a banner after somebody has already pressed Join.
+        Some(rest) if version::too_old(&format!("mpv {rest}")) => {
+            let (major, minor) = version::MINIMUM;
+            DependencyStatus::Unusable {
+                path: shown,
+                reason: format!(
+                    "mpv {} is too old: syncparty needs {major}.{minor} or newer",
+                    version_in(&rest).unwrap_or(rest)
+                ),
+            }
+        }
         Some(rest) => DependencyStatus::Installed {
             version: version_in(&rest),
             path: Some(shown),
@@ -201,7 +218,7 @@ fn is_mpv_net(path: &Path) -> bool {
 }
 
 /// `vlc` on Linux, `vlc.exe` on Windows, `VLC` inside VLC.app on macOS.
-fn is_vlc(path: &Path) -> bool {
+pub(crate) fn is_vlc(path: &Path) -> bool {
     has_stem(path, "vlc")
 }
 
@@ -455,6 +472,24 @@ mod tests {
                 DependencyStatus::Installed {
                     version: Some("0.41.0".to_owned()),
                     path: Some(shown(&player)),
+                }
+            );
+        }
+
+        /// The driver refuses this mpv at launch; the checklist says so first,
+        /// where Install and Locate are.
+        #[tokio::test]
+        async fn an_mpv_older_than_the_driver_accepts_is_unusable() {
+            let (player, dependency) = pointed_at(
+                "#!/bin/sh\n\
+                 echo 'mpv 0.32.0 Copyright © 2000-2020 mpv/MPlayer/mplayer2 projects'\n",
+            );
+
+            assert_eq!(
+                dependency.detect().await,
+                DependencyStatus::Unusable {
+                    path: shown(&player),
+                    reason: "mpv 0.32.0 is too old: syncparty needs 0.33 or newer".to_owned(),
                 }
             );
         }

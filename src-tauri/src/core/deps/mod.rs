@@ -16,6 +16,7 @@ use ts_rs::TS;
 use crate::core::config::{AppMode, ConfigStore};
 use crate::core::error::Result;
 use crate::core::events::ProgressSink;
+use crate::core::player::MPV_KEY;
 
 pub use installer::{PackageSpec, SystemPackageManager};
 pub use manager::DependencyManager;
@@ -47,18 +48,31 @@ const RETIRED_OVERRIDES: &[&str] = &["syncplayClient"];
 /// Left alone they would sit in the settings file forever. Returns whether
 /// anything was removed, and writes only then, so a launch with nothing to
 /// forget does not rewrite the settings file.
+///
+/// Also forgets an mpv location that is really VLC. Version 0.8.0 accepted
+/// either player under the same key; now that VLC is not one, keeping it would
+/// leave the row saying "not mpv" with no Install button until the user found
+/// "Forget this location" — and after installing, the saved VLC would still
+/// win over the mpv just installed.
 pub fn forget_retired_overrides(settings: &ConfigStore) -> Result<bool> {
-    let stale = RETIRED_OVERRIDES
+    let retired = RETIRED_OVERRIDES
         .iter()
         .any(|key| settings.executable_override(key).is_some());
+    let vlc_as_mpv = settings
+        .executable_override(MPV_KEY)
+        .and_then(|raw| crate::core::process::resolve_manual(&raw, "mpv"))
+        .is_some_and(|path| mpv::is_vlc(&path));
 
-    if !stale {
+    if !retired && !vlc_as_mpv {
         return Ok(false);
     }
 
     settings.update(|settings| {
         for key in RETIRED_OVERRIDES {
             settings.executable_overrides.remove(*key);
+        }
+        if vlc_as_mpv {
+            settings.executable_overrides.remove(MPV_KEY);
         }
     })?;
 
@@ -318,5 +332,38 @@ mod tests {
             !paths.settings_file().exists(),
             "this runs on every launch, so finding nothing must leave the disk alone"
         );
+    }
+
+    /// Version 0.8.0 accepted VLC under the mpv key. A real file is needed:
+    /// only something that is actually there resolves.
+    #[test]
+    fn a_vlc_saved_as_the_player_is_forgotten_but_a_real_mpv_is_kept() {
+        let (paths, settings) = fresh_settings();
+        let vlc = paths
+            .data_dir()
+            .join(if cfg!(windows) { "vlc.exe" } else { "vlc" });
+        std::fs::write(&vlc, b"").expect("a stand-in for VLC");
+        settings
+            .set_executable_override("mpv", Some(vlc.to_string_lossy().into_owned()))
+            .expect("seed");
+
+        assert!(forget_retired_overrides(&settings).expect("forget"));
+        assert_eq!(
+            ConfigStore::load(paths.clone())
+                .expect("reload")
+                .executable_override("mpv"),
+            None
+        );
+
+        let mpv = paths
+            .data_dir()
+            .join(if cfg!(windows) { "mpv.exe" } else { "mpv" });
+        std::fs::write(&mpv, b"").expect("a stand-in for mpv");
+        settings
+            .set_executable_override("mpv", Some(mpv.to_string_lossy().into_owned()))
+            .expect("seed");
+
+        assert!(!forget_retired_overrides(&settings).expect("forget"));
+        assert!(settings.executable_override("mpv").is_some());
     }
 }

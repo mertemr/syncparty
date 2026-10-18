@@ -637,7 +637,7 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
 
   set_dependency_path: ({ id, path }) => {
     if (typeof path === "string" && !path.trim()) {
-      fail("dependency_missing", "Nothing is installed at that path.");
+      fail("invalid_location", "mpv was not found at that location");
     }
     overrides[id as string] = (path as string | null) ?? null;
   },

@@ -15,7 +15,7 @@ mod connection;
 mod endpoint;
 mod tracker;
 mod transport;
-mod version;
+pub(crate) mod version;
 
 #[cfg(all(test, unix))]
 mod real_tests;

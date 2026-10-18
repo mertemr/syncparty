@@ -99,7 +99,7 @@ impl DependencyManager {
             // "Not found" would send them back to the picker to choose the
             // same path again, so the program's own words go here instead.
             DependencyStatus::Unusable { reason, .. } => format!(
-                "{} is there but will not start: {reason}",
+                "{} is there but cannot be used: {reason}",
                 dependency.display_name()
             ),
             DependencyStatus::Missing => format!(
@@ -110,7 +110,7 @@ impl DependencyManager {
 
         self.settings.set_executable_override(key, previous)?;
 
-        Err(SyncPartyError::DependencyMissing(complaint))
+        Err(SyncPartyError::InvalidLocation(complaint))
     }
 
     /// Installs one dependency, streaming progress onto the event bus.
@@ -139,6 +139,8 @@ mod tests {
     use crate::core::events::test_support::RecordingEventBus;
     use crate::core::events::AppEvent;
     use crate::core::paths::AppPaths;
+
+    const FAKE_NAME: &str = "fake";
 
     struct FakeDependency {
         id: DependencyId,
@@ -177,7 +179,7 @@ mod tests {
         }
 
         fn display_name(&self) -> &str {
-            "fake"
+            FAKE_NAME
         }
 
         fn required_for(&self) -> ModeRequirement {
@@ -328,7 +330,12 @@ mod tests {
             .await
             .expect_err("detection still fails, so the path is no good");
 
-        assert_eq!(error.kind(), "dependency_missing");
+        assert_eq!(error.kind(), "invalid_location");
+        assert_eq!(
+            error.to_string(),
+            format!("{FAKE_NAME} was not found at that location"),
+            "the reason is the whole message, not wrapped in another"
+        );
         assert_eq!(
             settings.executable_override("mpv"),
             None,
@@ -344,8 +351,8 @@ mod tests {
                 id: DependencyId::Mpv,
                 requirement: ModeRequirement::Both,
                 status: DependencyStatus::Unusable {
-                    path: "/usr/bin/mpv".to_owned(),
-                    reason: "ImportError: cannot import name 'SafeConfigParser'".to_owned(),
+                    path: "/usr/bin/vlc".to_owned(),
+                    reason: "not mpv: this is VLC".to_owned(),
                 },
                 manual_key: Some("mpv"),
             }) as Box<dyn Dependency>],
@@ -353,16 +360,15 @@ mod tests {
         );
 
         let error = manager
-            .set_manual_path(DependencyId::Mpv, Some("/usr/bin/mpv".to_owned()))
+            .set_manual_path(DependencyId::Mpv, Some("/usr/bin/vlc".to_owned()))
             .await
-            .expect_err("something that will not start is not a working path");
+            .expect_err("something that cannot be used is not a working path");
 
-        assert!(
-            error
-                .to_string()
-                .contains("ImportError: cannot import name 'SafeConfigParser'"),
-            "the file is where they said it was, so the message has to say what \
-             went wrong instead of sending them back to pick it again: {error}"
+        // The file is where they said it was, so the message has to say what
+        // is wrong with it instead of sending them back to pick it again.
+        assert_eq!(
+            error.to_string(),
+            format!("{FAKE_NAME} is there but cannot be used: not mpv: this is VLC")
         );
         assert_eq!(
             settings.executable_override("mpv"),

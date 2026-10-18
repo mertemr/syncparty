@@ -19,6 +19,14 @@ pub struct PackageSpec {
     pub brew_formula: Option<&'static str>,
 }
 
+/// Where Homebrew installs itself: `/opt/homebrew` on Apple silicon,
+/// `/usr/local` on Intel.
+///
+/// Looked in by name because an app started from Finder or the Dock gets
+/// launchd's `PATH`, which has neither. Without these the automatic install
+/// would only ever be offered to someone who started syncparty from a shell.
+const BREW_FALLBACKS: &[&str] = &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
+
 /// The package manager available on this machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemPackageManager {
@@ -34,7 +42,7 @@ impl SystemPackageManager {
         if cfg!(windows) {
             which::which("winget").ok().map(|_| Self::Winget)
         } else if cfg!(target_os = "macos") {
-            which::which("brew").ok().map(|_| Self::Homebrew)
+            process::locate("brew", BREW_FALLBACKS).map(|_| Self::Homebrew)
         } else {
             None
         }
@@ -47,10 +55,14 @@ impl SystemPackageManager {
         }
     }
 
-    fn program(self) -> &'static str {
+    /// What to run: the program found, by its full path when it was found
+    /// outside `PATH`.
+    fn program(self) -> std::path::PathBuf {
         match self {
-            Self::Winget => "winget",
-            Self::Homebrew => "brew",
+            Self::Winget => "winget".into(),
+            Self::Homebrew => {
+                process::locate("brew", BREW_FALLBACKS).unwrap_or_else(|| "brew".into())
+            }
         }
     }
 
@@ -115,7 +127,7 @@ impl PackageManagedInstall {
         progress.report(
             "installing",
             None,
-            Some(format!("{} {package}", manager.program())),
+            Some(format!("{} {package}", manager.program().display())),
         );
 
         process::capture(manager.program(), manager.args_for(package)).await?;
@@ -181,6 +193,14 @@ mod tests {
             !args.contains(&"--cask".to_owned()),
             "the mpv cask is disabled, so asking for it fails every install"
         );
+    }
+
+    /// A regression guard with a name, not a change detector: these are what
+    /// let an app started from Finder find Homebrew at all.
+    #[test]
+    fn homebrew_is_looked_for_where_it_installs_itself() {
+        assert!(BREW_FALLBACKS.contains(&"/opt/homebrew/bin/brew"));
+        assert!(BREW_FALLBACKS.contains(&"/usr/local/bin/brew"));
     }
 
     #[test]

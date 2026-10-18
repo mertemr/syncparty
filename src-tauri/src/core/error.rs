@@ -14,6 +14,11 @@ pub enum SyncPartyError {
     #[error("{0} is not installed")]
     DependencyMissing(String),
 
+    /// A location the user chose for a dependency that does not hold it, or
+    /// holds something that cannot be used. The message is the whole reason.
+    #[error("{0}")]
+    InvalidLocation(String),
+
     #[error("could not install {name}: {reason}")]
     InstallFailed { name: String, reason: String },
 
@@ -114,6 +119,7 @@ impl SyncPartyError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::DependencyMissing(_) => "dependency_missing",
+            Self::InvalidLocation(_) => "invalid_location",
             Self::InstallFailed { .. } => "install_failed",
             Self::InstallUnsupported { .. } => "install_unsupported",
             Self::EndpointBindFailed(_) => "endpoint_bind_failed",

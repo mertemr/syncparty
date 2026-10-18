@@ -9,12 +9,12 @@
 /// distributions still supported ship newer (Ubuntu 22.04 has 0.34, Debian
 /// 12 has 0.35). Older ones are refused with their version rather than left
 /// to fail at the first option or reply they do not understand.
-pub(super) const MINIMUM: (u32, u32) = (0, 33);
+pub(crate) const MINIMUM: (u32, u32) = (0, 33);
 
 /// The major and minor version in what `mpv-version` says — "mpv v0.41.0",
 /// "mpv 0.35.1-dirty", "mpv v0.38.0-575-g6d7f8b2c4" — or `None` for anything
 /// else, such as a git build named after a date.
-pub(super) fn parse(text: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse(text: &str) -> Option<(u32, u32)> {
     let rest = text.trim().strip_prefix("mpv")?.trim_start();
     let rest = rest.strip_prefix('v').unwrap_or(rest);
 
@@ -25,7 +25,7 @@ pub(super) fn parse(text: &str) -> Option<(u32, u32)> {
 
 /// Whether mpv says it is older than syncparty can drive. An unreadable
 /// version is not: refusing it would refuse an mpv that may well be new.
-pub(super) fn too_old(text: &str) -> bool {
+pub(crate) fn too_old(text: &str) -> bool {
     parse(text).is_some_and(|found| found < MINIMUM)
 }
 

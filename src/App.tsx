@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
@@ -8,6 +8,8 @@ import { guestJoinInFlight } from "@/features/guest/guestJoin";
 import { leaveGuestParty, useGuestJoin } from "@/features/guest/useGuestJoin";
 import { HostScreen } from "@/features/host/HostScreen";
 import { LaunchScreen } from "@/features/launch/LaunchScreen";
+import { SystemStrip } from "@/features/launch/SystemStrip";
+import type { StripState } from "@/features/launch/stripState";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import {
   TranslationProvider,
@@ -62,8 +64,16 @@ const LEAVE_PROMPTS = {
 
 function Shell() {
   const t = useTranslate();
-  const { settings, patchSettings, pendingInvite, reportFailure, session, watch } =
-    useAppState();
+  const {
+    settings,
+    patchSettings,
+    pendingInvite,
+    reportFailure,
+    session,
+    watch,
+    failure,
+    dismissFailure,
+  } = useAppState();
 
   const [showSettings, setShowSettings] = useState(false);
   const [confirmingLeave, setConfirmingLeave] = useState<LeaveReason | null>(null);
@@ -93,6 +103,27 @@ function Shell() {
   };
 
   const mode = atLaunch ? null : (settings?.mode ?? null);
+
+  // A party screen reached without the launch screen — a saved mode, an
+  // invite link — never ran the setup check. When joining or watching then
+  // fails for want of mpv, the check comes to the party screen instead, with
+  // its Install and Locate, and goes again once mpv is there.
+  const [settingUp, setSettingUp] = useState(false);
+  useEffect(() => {
+    if (failure?.kind === "dependency_missing" && mode !== null) {
+      setSettingUp(true);
+    }
+  }, [failure, mode]);
+  const missingPlayer = failure?.kind === "dependency_missing";
+  const handleSetupState = useCallback(
+    (state: StripState) => {
+      if (state !== "ready") return;
+      setSettingUp(false);
+      // The banner said mpv was missing; it is not any more.
+      if (missingPlayer) dismissFailure();
+    },
+    [missingPlayer, dismissFailure],
+  );
 
   const canGoBack = settings !== null && !showSettings && mode !== null;
 
@@ -157,6 +188,9 @@ function Shell() {
           reason has to be visible rather than hidden behind a spinner that
           never resolves. */}
       <FailureBanner />
+      {settingUp && mode !== null && !showSettings && (
+        <SystemStrip mode={mode} onStateChange={handleSetupState} />
+      )}
       <UpdateBanner />
 
       <main className="min-h-0 flex-1 overflow-y-auto scroll-smooth">

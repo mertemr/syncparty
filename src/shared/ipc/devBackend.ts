@@ -16,14 +16,23 @@
  * one URL away:
  *
  *   ?dev=missing       mpv is not installed
+ *   ?dev=missingGuest  a guest with a saved invite and no mpv — what somebody
+ *                      who installed syncparty and clicked a link meets; the
+ *                      resume fails for want of mpv and the setup strip comes
+ *                      to the guest screen
  *   ?dev=unusable      the mpv location points at something that is not mpv
  *   ?dev=mismatch      the room is watching different files
  *   ?dev=guest         start as a guest rather than a host
  *   ?dev=watching      a guest already in a party, playing, with the room
  *   ?dev=reconnecting  a guest whose connection dropped and keeps retrying
  *   ?dev=playerClosed  a guest who closed mpv; "Reopen player" brings it back
- *   ?dev=rejected      a guest the party turned away (wrong password); joining
- *                      again is refused the same way
+ *   ?dev=playerFailed  a guest whose mpv would not start; "Reopen player"
+ *                      tries again
+ *   ?dev=rejected      a guest whose saved invite the party turns away (wrong
+ *                      password): the resume fails with sync_rejected, the
+ *                      invite is forgotten, and joining again is refused the
+ *                      same way — with no watch shown, as the real backend has
+ *                      none to describe
  */
 import type { AppEvent } from "@/shared/types/AppEvent";
 import type { AppSettings } from "@/shared/types/AppSettings";
@@ -56,9 +65,10 @@ const scenario = new URLSearchParams(globalThis.location?.search ?? "").get(
 );
 
 /** The scenarios that open on a guest who is already in a party. */
-const WATCH_SCENARIOS = ["watching", "reconnecting", "playerClosed", "rejected"];
+const WATCH_SCENARIOS = ["watching", "reconnecting", "playerClosed", "playerFailed"];
 const inParty = WATCH_SCENARIOS.includes(scenario ?? "");
-const asGuest = scenario === "guest" || inParty;
+const asGuest =
+  scenario === "guest" || scenario === "rejected" || scenario === "missingGuest" || inParty;
 
 const ENDPOINT =
   "k57qxc3jrqvbnl2mzp4wt6yhd8fgs9auk3e7rvxm2cqbnjh4pldw";
@@ -92,7 +102,9 @@ let settings: AppSettings = {
 let session: SessionState = { phase: "idle" };
 const overrides: Record<string, string | null> = {};
 /** Dependencies the fake machine is missing. Installing one clears it. */
-const missing = new Set(scenario === "missing" ? ["mpv"] : []);
+const missing = new Set(
+  scenario === "missing" || scenario === "missingGuest" ? ["mpv"] : [],
+);
 
 /**
  * The mpv location the user once chose now holds VLC — what a machine
@@ -151,7 +163,8 @@ let watch: WatchState | null = inParty ? initialWatch() : null;
 let watchedInvite: Invite | null = inParty ? INVITE : null;
 /** Kept so "Reopen player" can load it again — the real one keeps it in memory too. */
 let lastFile: WatchedFile | null = inParty ? STALKER : null;
-let lastInvite: Invite | null = inParty ? INVITE : null;
+let lastInvite: Invite | null =
+  inParty || scenario === "rejected" || scenario === "missingGuest" ? INVITE : null;
 /**
  * Bumped whenever a watch session ends, so a scripted sequence still sleeping
  * between steps knows it has been overtaken and stops instead of bringing a
@@ -174,11 +187,14 @@ function initialWatch(): WatchState {
       return { ...base, connection: { state: "reconnecting", attempt: 1 } };
     case "playerClosed":
       return { ...base, player: { state: "closed" }, ready: false };
-    case "rejected":
+    case "playerFailed":
       return {
         ...base,
-        connection: { state: "rejected", message: "the room password is wrong" },
-        player: { state: "idle" },
+        player: {
+          state: "failed",
+          message:
+            "the player failed: could not start /usr/bin/mpv: No such file or directory (os error 2)",
+        },
         ready: false,
       };
     default:
@@ -355,6 +371,8 @@ function serialized<T>(step: () => Promise<T> | T): Promise<T> {
  */
 async function joinParty(invite: Invite): Promise<void> {
   if (watch && watchedInvite && sameInvite(watchedInvite, invite)) return;
+  // Before anything is dialled, as the real join resolves mpv first.
+  requirePlayer();
   if (watch) stopWatch();
 
   const mine = ++generation;
@@ -394,6 +412,10 @@ function stopWatch() {
   generation++;
   watchedInvite = null;
   setWatch(null);
+}
+
+function requirePlayer() {
+  if (missing.has("mpv")) fail("dependency_missing", "mpv is not installed");
 }
 
 function requireWatch(): WatchState {
@@ -673,7 +695,14 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
     serialized(async () => {
       if (!lastInvite) return null;
       const invite = lastInvite;
-      await joinParty(invite);
+      try {
+        await joinParty(invite);
+      } catch (error) {
+        // A saved invite the party refuses outright is refused on every start
+        // from now on, so the real backend forgets it.
+        if ((error as { kind?: string }).kind === "sync_rejected") lastInvite = null;
+        throw error;
+      }
       return invite;
     }),
 
@@ -685,6 +714,7 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
     serialized(async () => {
       if (session.phase !== "hosting") fail("server_not_running", "the sync server is not running");
       if (watch?.role === "host") return;
+      requirePlayer();
       if (watch) stopWatch();
 
       const mine = ++generation;

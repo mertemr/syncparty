@@ -47,7 +47,7 @@ export const en = {
 
   "preflight.installed": "Ready",
   "preflight.missing": "Not installed",
-  "preflight.unusable": "Will not start",
+  "preflight.unusable": "Can't be used",
   "preflight.install": "Install",
   "preflight.installing": "Installing…",
   "preflight.manual": "Download manually",
@@ -394,7 +394,7 @@ export const tr: Messages = {
 
   "preflight.installed": "Hazır",
   "preflight.missing": "Kurulu değil",
-  "preflight.unusable": "Açılmıyor",
+  "preflight.unusable": "Kullanılamıyor",
   "preflight.install": "Kur",
   "preflight.installing": "Kuruluyor…",
   "preflight.manual": "Elle indir",

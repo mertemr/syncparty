@@ -92,10 +92,15 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # `git status` rather than `git diff`: a type exported for the first time
+      # lands as an untracked file, which `git diff` does not see, so a PR that
+      # forgot to commit one would pass here with the frontend missing a type
+      # the backend now sends.
       - name: Generated types are up to date
         run: |
-          if ! git diff --quiet -- src/shared/types; then
+          if [ -n "$(git status --porcelain -- src/shared/types)" ]; then
             echo "::error::src/shared/types is stale — run 'cargo test' in src-tauri and commit the result."
+            git status --short -- src/shared/types
             git diff -- src/shared/types
             exit 1
           fi
@@ -128,12 +133,21 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
-  # The only job that talks to software we did not write. Everything else
-  # pins our own idea of the Syncplay protocol, which is worth nothing if that
-  # idea is wrong — and hosting no longer installs a Syncplay server, so
-  # nothing else would ever notice it drifting.
-  compatibility:
-    name: Backend (real Syncplay client)
+  # Our server, our client and a real mpv, end to end. Both ends of the
+  # protocol are ours now, so this cannot notice our idea of Syncplay drifting
+  # from upstream's — the captured-message tests in protocol.rs are what pin
+  # that. What it catches is everything those cannot: a real player behind a
+  # real IPC socket, and playback state actually crossing the server.
+  #
+  # The test makes its own clip with `mpv --o`, so mpv is the only thing it
+  # needs beyond what the crate needs to build. The second step runs the mpv
+  # driver's own ignored tests, which want a real player for the same reason.
+  #
+  # Its own job rather than steps in `backend-checks`, and not a required
+  # check, so a player that misbehaves on a runner image does not lock every
+  # merge while this is new.
+  native-e2e:
+    name: Backend (native client + mpv)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: github.event_name != 'workflow_dispatch' || inputs.backend
@@ -141,7 +155,9 @@ jobs:
     steps:
       - *checkout
 
-      - name: Install Tauri system dependencies
+      # mpv runs headless (`--vo=null --ao=null`), so there is no Xvfb here.
+      # The Tauri libraries are needed because the test links the whole crate.
+      - name: Install Tauri system dependencies and mpv
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
@@ -149,31 +165,9 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libxdo-dev
-
-      - name: Install a real Syncplay client
-        run: |
-          sudo apt-get install --no-install-recommends -y mpv python3-venv
-          # From the git tag, because neither of the obvious sources works.
-          # Syncplay is not published on PyPI, so a plain `pip install
-          # syncplay` resolves nothing. Ubuntu's package is 1.7.0, which
-          # cannot start on this runner at all: it imports
-          # `configparser.SafeConfigParser`, removed in Python 3.12. Upstream
-          # fixed that in 1.7.1.
-          #
-          # In its own environment rather than the system one: this is the
-          # dependency syncparty removed, and it has no business on PATH for
-          # any other job.
-          python3 -m venv "$RUNNER_TEMP/syncplay"
-          "$RUNNER_TEMP/syncplay/bin/pip" install --quiet \
-            "syncplay @ git+https://github.com/Syncplay/syncplay@v1.7.6"
-          # The import chain the client walks on startup. Without this a
-          # client that cannot start looks exactly like a server that does
-          # not answer: a 30-second timeout with nothing to read.
-          "$RUNNER_TEMP/syncplay/bin/python" -c \
-            "from syncplay.ui.ConfigurationGetter import ConfigurationGetter; \
-             import syncplay; print('syncplay', syncplay.version)"
-          echo "$RUNNER_TEMP/syncplay/bin" >> "$GITHUB_PATH"
+            libxdo-dev \
+            mpv
+          mpv --version
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -182,9 +176,40 @@ jobs:
 
       - run: mkdir -p dist && echo '<!doctype html>' > dist/index.html
 
-      - name: Prove a real client still works
+      # `--ignored` with a filter that matches nothing still exits 0 with
+      # "0 passed", so a renamed module or a test that lost its `#[ignore]`
+      # would leave these steps green with nothing exercised. Each step keeps
+      # the test output and fails unless at least one test passed. The shell
+      # runs with `pipefail`, so a failing test still fails the step through
+      # `tee`; `--color never` keeps the summary line plain for `grep`.
+      - name: Our server and client keep a real mpv in step
+        id: e2e
         working-directory: src-tauri
-        run: cargo test --test syncplay_compatibility -- --ignored
+        run: |
+          cargo test --test native_watch_e2e -- --ignored --test-threads=1 --color never 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/e2e.log" ||
+            { echo "::error::cargo test --test native_watch_e2e -- --ignored ran no tests"; exit 1; }
+
+      # Runs even when the end-to-end step failed, so a broken driver is
+      # reported as itself instead of hiding behind that failure. Skipped only
+      # when the setup above failed and the end-to-end step never ran.
+      - name: The mpv driver works against a real mpv
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
+        working-directory: src-tauri
+        run: |
+          cargo test --lib player::mpv -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/driver.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/driver.log" ||
+            { echo "::error::cargo test --lib player::mpv -- --ignored ran no tests"; exit 1; }
+
+      # The check that decides whether a guest can join at all: is what is
+      # installed really mpv, and new enough.
+      - name: A real mpv is recognised as one
+        if: ${{ !cancelled() && steps.e2e.outcome != 'skipped' }}
+        working-directory: src-tauri
+        run: |
+          cargo test --lib deps::mpv -- --ignored --color never 2>&1 | tee "$RUNNER_TEMP/deps.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/deps.log" ||
+            { echo "::error::cargo test --lib deps::mpv -- --ignored ran no tests"; exit 1; }
 
   frontend:
     name: Frontend

@@ -11,7 +11,8 @@ labels: bug
 ## Environment
 
 - syncparty version:
-- OS (Windows / macOS, version):
+- OS and version (Windows / macOS / Linux distribution):
+- mpv version (first line of `mpv --version`):
 - Host or guest:
 
 ## Logs

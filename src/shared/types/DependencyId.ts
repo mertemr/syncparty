@@ -2,5 +2,8 @@
 
 /**
  * Stable identifier for each dependency, shared with the frontend.
+ *
+ * One variant, and still an enum: the frontend keys installs and their
+ * progress events by it.
  */
-export type DependencyId = "syncplayClient" | "mpv";
+export type DependencyId = "mpv";

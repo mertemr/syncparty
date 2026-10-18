@@ -8,8 +8,8 @@ import type { HostingInfo } from "@/shared/types/HostingInfo";
  *
  * The link comes first and the raw details are secondary: pasting one URL is
  * the path that works, and the rest is there to compare notes with when it
- * does not — none of it can be typed into Syncplay by hand any more, since
- * guests reach the server through this machine rather than by dialling it.
+ * does not — none of it is enough to connect by hand, since guests reach the
+ * server through this machine rather than by dialling it.
  */
 export function InviteCard({ hosting }: { hosting: HostingInfo }) {
   const t = useTranslate();

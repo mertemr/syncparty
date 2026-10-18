@@ -1,10 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { AppStateProvider, useAppState } from "@/app/AppState";
+import { leaveReason, type LeaveReason } from "@/app/leaveReason";
 import { GuestScreen } from "@/features/guest/GuestScreen";
+import { guestJoinInFlight } from "@/features/guest/guestJoin";
+import { leaveGuestParty, useGuestJoin } from "@/features/guest/useGuestJoin";
 import { HostScreen } from "@/features/host/HostScreen";
 import { LaunchScreen } from "@/features/launch/LaunchScreen";
+import { SystemStrip } from "@/features/launch/SystemStrip";
+import type { StripState } from "@/features/launch/stripState";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
 import {
   TranslationProvider,
@@ -38,13 +43,44 @@ function Localised() {
   );
 }
 
+/** The ways stepping back can break something, each with its own words. */
+const LEAVE_PROMPTS = {
+  hosting: {
+    title: "nav.leaveHosting.title",
+    detail: "nav.leaveHosting.detail",
+    confirm: "nav.leaveHosting.confirm",
+  },
+  joining: {
+    title: "nav.leaveJoining.title",
+    detail: "nav.leaveJoining.detail",
+    confirm: "nav.leaveJoining.confirm",
+  },
+  watching: {
+    title: "nav.leaveWatching.title",
+    detail: "nav.leaveWatching.detail",
+    confirm: "nav.leaveWatching.confirm",
+  },
+} satisfies Record<LeaveReason, Record<"title" | "detail" | "confirm", MessageKey>>;
+
 function Shell() {
   const t = useTranslate();
-  const { settings, patchSettings, pendingInvite, reportFailure, session } =
-    useAppState();
+  const {
+    settings,
+    patchSettings,
+    pendingInvite,
+    reportFailure,
+    session,
+    watch,
+    failure,
+    dismissFailure,
+  } = useAppState();
 
   const [showSettings, setShowSettings] = useState(false);
-  const [confirmingLeave, setConfirmingLeave] = useState(false);
+  const [confirmingLeave, setConfirmingLeave] = useState<LeaveReason | null>(null);
+  // A leave sent mid-join waits for the join to land before undoing it, so
+  // the prompt can sit there a while; it must not take a second click.
+  const [leaving, setLeaving] = useState(false);
+  const guestJoin = useGuestJoin();
   // Set when the user steps back to the launch surface. The stored mode stays
   // as their last answer — `SettingsPatch` cannot clear it — but the slots
   // come back, so a mistaken pick is one click to undo.
@@ -68,35 +104,63 @@ function Shell() {
 
   const mode = atLaunch ? null : (settings?.mode ?? null);
 
-  const partyRunning =
-    session.phase === "starting" || session.phase === "hosting";
+  // A party screen reached without the launch screen — a saved mode, an
+  // invite link — never ran the setup check. When joining or watching then
+  // fails for want of mpv, the check comes to the party screen instead, with
+  // its Install and Locate, and goes again once mpv is there.
+  const [settingUp, setSettingUp] = useState(false);
+  useEffect(() => {
+    if (failure?.kind === "dependency_missing" && mode !== null) {
+      setSettingUp(true);
+    }
+  }, [failure, mode]);
+  const missingPlayer = failure?.kind === "dependency_missing";
+  const handleSetupState = useCallback(
+    (state: StripState) => {
+      if (state !== "ready") return;
+      setSettingUp(false);
+      // The banner said mpv was missing; it is not any more.
+      if (missingPlayer) dismissFailure();
+    },
+    [missingPlayer, dismissFailure],
+  );
+
   const canGoBack = settings !== null && !showSettings && mode !== null;
 
   function stepBack() {
-    setConfirmingLeave(false);
+    setConfirmingLeave(null);
     setAtLaunch(true);
   }
 
   /**
-   * Hosting is the one step back that breaks something: the server and
-   * everyone connected to it go down with it, so it asks first. Nothing on the
-   * guest side is torn down by walking back, so no guard there.
+   * A step back that would break something asks first — which ones, and
+   * why, is `leaveReason`'s to say. Confirming ends what it named, then
+   * steps back: said once, then done.
    */
   function goBack() {
-    if (mode === "host" && partyRunning) {
-      setConfirmingLeave(true);
-      return;
-    }
-    stepBack();
+    const reason = leaveReason({ mode, session, guestJoin, watch });
+    if (reason) setConfirmingLeave(reason);
+    else stepBack();
   }
 
-  async function stopAndGoBack() {
+  async function leaveAndGoBack(reason: LeaveReason) {
+    if (leaving) return;
+
+    setLeaving(true);
     try {
-      await ipc.stopHosting();
+      if (reason === "hosting") {
+        await ipc.stopHosting();
+      } else {
+        // The same as the watch card's Leave: a party left on purpose is not
+        // one to reopen on the next launch.
+        await leaveGuestParty();
+      }
     } catch (error) {
       reportFailure(error);
-      setConfirmingLeave(false);
+      setConfirmingLeave(null);
       return;
+    } finally {
+      setLeaving(false);
     }
     stepBack();
   }
@@ -112,9 +176,11 @@ function Shell() {
       />
 
       {confirmingLeave && (
-        <LeaveHostingPrompt
-          onConfirm={() => void stopAndGoBack()}
-          onCancel={() => setConfirmingLeave(false)}
+        <LeavePrompt
+          reason={confirmingLeave}
+          busy={leaving}
+          onConfirm={() => void leaveAndGoBack(confirmingLeave)}
+          onCancel={() => setConfirmingLeave(null)}
         />
       )}
 
@@ -122,6 +188,9 @@ function Shell() {
           reason has to be visible rather than hidden behind a spinner that
           never resolves. */}
       <FailureBanner />
+      {settingUp && mode !== null && !showSettings && (
+        <SystemStrip mode={mode} onStateChange={handleSetupState} />
+      )}
       <UpdateBanner />
 
       <main className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
@@ -146,38 +215,43 @@ function Shell() {
 }
 
 /**
- * The one confirmation in the app.
+ * The one confirmation in the app, worded for whichever step back asked.
  *
  * A strip rather than a modal: it matches the other two things that interrupt
  * from the top of the window, and a modal layer exists nowhere else here.
  */
-function LeaveHostingPrompt({
+function LeavePrompt({
+  reason,
+  busy,
   onConfirm,
   onCancel,
 }: {
+  reason: LeaveReason;
+  busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const t = useTranslate();
+  const words = LEAVE_PROMPTS[reason];
 
   return (
     <div className="shrink-0 border-b border-warn/40 bg-warn/10 px-5 py-3">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <p className="font-mono text-[11px] tracking-[0.16em] text-warn uppercase">
-            {t("nav.leaveHosting.title")}
+            {t(words.title)}
           </p>
           <p className="mt-0.5 text-xs text-ink-muted">
-            {t("nav.leaveHosting.detail")}
+            {t(words.detail)}
           </p>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="ghost" onClick={onCancel}>
+          <Button variant="ghost" disabled={busy} onClick={onCancel}>
             {t("common.cancel")}
           </Button>
-          <Button variant="danger" onClick={onConfirm}>
-            {t("nav.leaveHosting.confirm")}
+          <Button variant="danger" disabled={busy} onClick={onConfirm}>
+            {t(words.confirm)}
           </Button>
         </div>
       </div>
@@ -257,6 +331,10 @@ function FailureBanner() {
     dependency_missing: "error.dependency_missing",
     endpoint_offline: "error.endpoint_offline",
     party_unreachable: "error.party_unreachable",
+    player_failed: "error.player_failed",
+    sync_rejected: "error.sync_rejected",
+    sync_failed: "error.sync_failed",
+    not_watching: "error.not_watching",
   };
   const headline = knownKeys[failure.kind];
 
@@ -286,15 +364,18 @@ function FailureBanner() {
 /**
  * Tells the user a downloaded update is ready to install.
  *
- * The restart button is withheld while a party is running — installing
- * replaces the running binary and relaunches it, which would take the
- * Syncplay server down along with everyone still watching. Once hosting
- * stops (or on the guest side, where this never applies), the button appears
- * on its own; nothing needs to be re-triggered manually.
+ * The restart button is withheld while a party is running or being watched —
+ * installing replaces the running binary and relaunches it, which would take
+ * the server down along with everyone still watching, or close the player
+ * syncparty is keeping in step. A guest join still connecting counts as
+ * watching: it has no watch state yet, but it will open the player the
+ * moment the party answers. Once hosting and watching both stop, the button
+ * appears on its own; nothing needs to be re-triggered manually.
  */
 function UpdateBanner() {
   const t = useTranslate();
-  const { session } = useAppState();
+  const { session, watch } = useAppState();
+  const guestJoin = useGuestJoin();
   const { state, install } = useAppUpdate();
 
   if (state.status === "packageManaged") {
@@ -304,6 +385,12 @@ function UpdateBanner() {
   if (state.status !== "ready") return null;
 
   const hosting = session.phase === "hosting";
+  const watching = watch !== null || guestJoinInFlight(guestJoin);
+  const notice = hosting
+    ? t("update.hostingNotice")
+    : watching
+      ? t("update.watchingNotice")
+      : null;
 
   return (
     <div className="shrink-0 border-b border-accent/40 bg-accent/10 px-5 py-3">
@@ -312,14 +399,12 @@ function UpdateBanner() {
           <p className="font-mono text-[11px] tracking-[0.16em] text-accent uppercase">
             {t("update.title")} — v{state.version}
           </p>
-          {hosting && (
-            <p className="mt-0.5 text-xs text-ink-muted">
-              {t("update.hostingNotice")}
-            </p>
+          {notice && (
+            <p className="mt-0.5 text-xs text-ink-muted">{notice}</p>
           )}
         </div>
 
-        {!hosting && (
+        {!notice && (
           <Button variant="primary" onClick={() => void install()}>
             {t("update.restart")}
           </Button>

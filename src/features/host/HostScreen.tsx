@@ -10,7 +10,9 @@ import { FavoritesCard } from "@/features/movie/FavoritesCard";
 import { NowWatchingCard } from "@/features/movie/NowWatchingCard";
 import { PartyLogCard } from "@/features/movie/PartyLogCard";
 import { HostMoviePanel } from "@/features/movie-voting/HostMoviePanel";
+import { WatchCard } from "@/features/watch/WatchCard";
 
+import { GuestPartyNotice } from "./GuestPartyNotice";
 import { InviteCard } from "./InviteCard";
 import { LobbyPanel } from "./LobbyPanel";
 import { RoomPanel } from "./RoomPanel";
@@ -24,13 +26,13 @@ const STEP_LABELS: Record<StartupStep, MessageKey> = {
 
 export function HostScreen() {
   const t = useTranslate();
-  const { session, room, serverLog, reportFailure } = useAppState();
+  const { session, room, serverLog, reportFailure, watch } = useAppState();
+  // Only the host's own watching belongs on this screen.
+  const watching = watch?.role === "host" ? watch : null;
 
   const [busy, setBusy] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
-  const [joinState, setJoinState] = useState<"idle" | "opening" | "opened">(
-    "idle",
-  );
+  const [opening, setOpening] = useState(false);
   // When the party went live, for the counter. Taken from the transition the
   // frontend already sees rather than asking the backend for a start time.
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -54,19 +56,28 @@ export function HostScreen() {
   }
 
   /**
-   * The host watches too, so they need their own client. It connects on the
-   * bound address rather than the invite's — the backend handles that.
+   * The host watches too, with a client of its own. It connects to the server
+   * on loopback rather than through the invite — the backend handles that.
+   * From the first `watchChanged` on, the watch card takes over from this
+   * button.
    */
-  async function join() {
-    setJoinState("opening");
+  async function watchHere() {
+    if (opening) return;
+
+    setOpening(true);
     try {
       await ipc.joinHostedParty();
-      setJoinState("opened");
     } catch (error) {
-      setJoinState("idle");
       reportFailure(error);
+    } finally {
+      setOpening(false);
     }
   }
+
+  // The room has a publisher while the monitor is attached, or, without it,
+  // the host's own client while the host is watching; with neither, nothing
+  // arrives and the panel says why.
+  const roomPublished = hosting && (session.monitorAttached || watching !== null);
 
   const statusCard = (
     <Card>
@@ -110,22 +121,21 @@ export function HostScreen() {
 
         {hosting ? (
           <div className="flex w-full items-center gap-2 sm:w-auto">
-            <Button
-              variant="primary"
-              className="flex-1 sm:flex-none"
-              disabled={joinState === "opening"}
-              onClick={() => void join()}
-            >
-              {joinState === "opening" ? t("host.joining") : t("host.join")}
-            </Button>
+            {!watching && (
+              <Button
+                variant="primary"
+                className="flex-1 sm:flex-none"
+                disabled={opening}
+                onClick={() => void watchHere()}
+              >
+                {opening ? t("host.joining") : t("host.join")}
+              </Button>
+            )}
             <Button
               variant="danger"
               className="flex-1 sm:flex-none"
               disabled={busy}
-              onClick={() => {
-                setJoinState("idle");
-                void run(ipc.stopHosting);
-              }}
+              onClick={() => void run(ipc.stopHosting)}
             >
               {t("host.stop")}
             </Button>
@@ -175,6 +185,7 @@ export function HostScreen() {
     return (
       <div className="mx-auto max-w-2xl space-y-5 px-8 py-8">
         {statusCard}
+        <GuestPartyNotice />
         {logsCard}
       </div>
     );
@@ -197,11 +208,10 @@ export function HostScreen() {
           siblings down to whatever is left over. */}
       <div className="min-w-0 space-y-5 md:tall:sticky md:tall:top-4 md:tall:self-start">
         {statusCard}
+        <GuestPartyNotice />
 
-        {joinState === "opened" && (
-          <p className="rounded-panel border border-good/40 bg-good/10 px-4 py-3 text-sm text-good">
-            {t("host.joined")}
-          </p>
+        {watching && (
+          <WatchCard watch={watching} room={room} onLeave={ipc.stopWatching} />
         )}
         <InviteCard hosting={session} />
         <NowWatchingCard />
@@ -213,8 +223,8 @@ export function HostScreen() {
       </div>
 
       <div className="min-w-0 space-y-5 md:tall:sticky md:tall:top-4 md:tall:self-start">
-        {session.monitorAttached && <LobbyPanel snapshot={room} />}
-        <RoomPanel snapshot={room} monitorAttached={session.monitorAttached} />
+        {roomPublished && <LobbyPanel snapshot={room} />}
+        <RoomPanel snapshot={room} unavailable={!roomPublished} />
         <PartyLogCard />
         {logsCard}
       </div>

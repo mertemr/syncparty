@@ -7,12 +7,12 @@ import { getStripState, summariseReady } from "./stripState";
 
 function item(overrides: Partial<PreflightItem> = {}): PreflightItem {
   return {
-    id: "syncplayClient",
-    displayName: "Syncplay",
-    status: { state: "installed", version: "1.7.2", path: null },
+    id: "mpv",
+    displayName: "mpv",
+    status: { state: "installed", version: "0.41.0", path: null },
     canAutoInstall: true,
     needsElevation: false,
-    manualUrl: "https://syncplay.pl",
+    manualUrl: "https://mpv.io/installation/",
     supportsManualPath: true,
     overridePath: null,
     ...overrides,
@@ -33,23 +33,22 @@ describe("getStripState", () => {
   });
 
   it("is blocked when any item is missing", () => {
-    const state = getStripState(
-      report([item(), item({ id: "mpv", status: { state: "missing" } })]),
-    );
+    const state = getStripState(report([item({ status: { state: "missing" } })]));
     expect(state).toBe("blocked");
   });
 
-  // "Not missing" is not the same as "usable". A dependency that is on disk
-  // and will not start blocks a party just as completely as an absent one,
-  // and the strip is where the user finds that out.
-  it("is blocked when an item is installed but will not start", () => {
+  // "Not missing" is not the same as "usable". A location that holds some
+  // other program — VLC, left over from when either player would do — blocks
+  // a party just as completely as an absent mpv, and the strip is where the
+  // user finds that out.
+  it("is blocked when the chosen program runs but is not mpv", () => {
     const state = getStripState(
       report([
         item({
           status: {
             state: "unusable",
-            path: "/usr/bin/syncplay",
-            reason: "ImportError: cannot import name 'SafeConfigParser'",
+            path: "/usr/bin/vlc",
+            reason: "VLC media player 3.0.21 Vetinari",
           },
         }),
       ]),
@@ -65,24 +64,14 @@ describe("getStripState", () => {
 });
 
 describe("summariseReady", () => {
-  it("joins name and version for each item", () => {
-    const line = summariseReady(
-      report([
-        item(),
-        item({
-          id: "mpv",
-          displayName: "mpv",
-          status: { state: "installed", version: "0.38", path: null },
-        }),
-      ]),
-    );
-    expect(line).toBe("Syncplay 1.7.2 · mpv 0.38");
+  it("names the player with its version", () => {
+    expect(summariseReady(report([item()]))).toBe("mpv 0.41.0");
   });
 
   it("omits the version when the tool does not report one", () => {
     const line = summariseReady(
       report([item({ status: { state: "installed", version: null, path: null } })]),
     );
-    expect(line).toBe("Syncplay");
+    expect(line).toBe("mpv");
   });
 });

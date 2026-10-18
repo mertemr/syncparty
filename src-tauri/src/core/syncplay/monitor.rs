@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use ts_rs::TS;
 
 use crate::core::error::{Result, SyncPartyError};
+use crate::core::syncplay::ping::epoch_seconds;
 use crate::core::syncplay::protocol::{
     affects_room_view, ClientMessage, Hello, RoomList, ServerMessage,
 };
@@ -146,7 +147,9 @@ impl RoomView {
 
 const DURATION_TOLERANCE_SECONDS: f64 = 2.0;
 
-fn file_compatibility(watchers: &[WatcherView]) -> FileCompatibility {
+/// How well the files a set of watchers have open line up. Shared with the
+/// sync client, which warns on the player when the answer is a mismatch.
+pub(crate) fn file_compatibility(watchers: &[WatcherView]) -> FileCompatibility {
     if watchers.is_empty() || watchers.iter().any(|watcher| watcher.file.is_none()) {
         return FileCompatibility::Waiting;
     }
@@ -279,7 +282,7 @@ async fn session(config: &MonitorConfig, snapshot: &watch::Sender<RoomSnapshot>)
 
         match ServerMessage::from_line(&line)? {
             // The greeting means the password was accepted; ask who is here.
-            ServerMessage::Hello => {
+            ServerMessage::Hello(_) => {
                 send(&mut write_half, &ClientMessage::ListRequest).await?;
             }
 
@@ -294,16 +297,17 @@ async fn session(config: &MonitorConfig, snapshot: &watch::Sender<RoomSnapshot>)
                 send(&mut write_half, &ClientMessage::ListRequest).await?;
             }
 
-            ServerMessage::State {
-                latency_calculation,
-                server_ignoring_on_the_fly,
-            } => {
+            // The server sends one of these every second now, and drops a
+            // connection that stops answering. The answer never carries a
+            // playstate, so the monitor can keep the connection alive without
+            // ever being able to pause, unpause or seek the room.
+            ServerMessage::State(state) => {
                 send(
                     &mut write_half,
                     &ClientMessage::PingReply {
-                        latency_calculation,
-                        client_latency_calculation: unix_seconds(),
-                        server_ignoring_on_the_fly,
+                        latency_calculation: state.latency_calculation(),
+                        client_latency_calculation: epoch_seconds(),
+                        server_ignoring_on_the_fly: state.server_ignoring_on_the_fly(),
                     },
                 )
                 .await?;
@@ -325,13 +329,6 @@ async fn send(writer: &mut tokio::net::tcp::OwnedWriteHalf, message: &ClientMess
         .write_all(message.to_line()?.as_bytes())
         .await
         .map_err(|error| SyncPartyError::MonitorFailed(error.to_string()))
-}
-
-fn unix_seconds() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs_f64())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -490,6 +487,75 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ahmet", "zeynep"]
         );
+    }
+
+    async fn next_json(
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>>,
+    ) -> serde_json::Value {
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("the monitor answered")
+            .expect("read")
+            .expect("open");
+        serde_json::from_str(&line).expect("json")
+    }
+
+    /// The server now sends a state every second and drops a connection that
+    /// stops answering, so the monitor has to answer each one — and with
+    /// nothing that could move the room.
+    #[tokio::test]
+    async fn every_heartbeat_is_answered_with_a_ping_and_no_playstate() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let _monitor = RoomMonitor::start(MonitorConfig {
+            host: "127.0.0.1".to_owned(),
+            port,
+            password: String::new(),
+            room: "MovieNight".to_owned(),
+        });
+
+        let patience = Duration::from_secs(5);
+        let (stream, _) = tokio::time::timeout(patience, listener.accept())
+            .await
+            .expect("the monitor connected")
+            .expect("accept");
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+
+        assert!(next_json(&mut lines).await.get("Hello").is_some());
+        write
+            .write_all(b"{\"Hello\":{\"username\":\"syncparty-panel\",\"room\":{\"name\":\"MovieNight\"}}}\r\n")
+            .await
+            .expect("write");
+        assert!(next_json(&mut lines).await.get("List").is_some());
+
+        for (counter, stamp) in [(None, 1.5), (Some(4), 2.5), (None, 3.5)] {
+            let mut state = serde_json::json!({
+                "State": {
+                    "ping": { "latencyCalculation": stamp, "serverRtt": 0 },
+                    "playstate": { "position": 42.0, "paused": false, "doSeek": false, "setBy": "ahmet" },
+                }
+            });
+            if let Some(counter) = counter {
+                state["State"]["ignoringOnTheFly"] = serde_json::json!({ "server": counter });
+            }
+            write
+                .write_all(format!("{state}\r\n").as_bytes())
+                .await
+                .expect("write");
+
+            let reply = next_json(&mut lines).await;
+            let reply = reply.get("State").expect("a state for every state");
+            assert!(reply.get("playstate").is_none(), "{reply}");
+            assert_eq!(reply["ping"]["latencyCalculation"], stamp);
+            match counter {
+                Some(counter) => assert_eq!(reply["ignoringOnTheFly"]["server"], counter),
+                None => assert!(reply.get("ignoringOnTheFly").is_none(), "{reply}"),
+            }
+        }
     }
 
     #[test]

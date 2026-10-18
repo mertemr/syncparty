@@ -3,18 +3,21 @@
 //! Each one is a one-liner over `core`. If a handler grows a branch, that
 //! branch belongs in `core` where it can be tested.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use tauri::State;
 use ts_rs::TS;
 
 use crate::core::config::{AppMode, AppSettings};
-use crate::core::deps::{DependencyId, PlayerChoice, PreflightReport};
+use crate::core::deps::{DependencyId, PreflightReport};
 use crate::core::diagnostics::{self, DiagnosticsReport};
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::invite::Invite;
 use crate::core::notify;
 use crate::core::session::{HostingInfo, SessionState};
 use crate::core::update::UpdatePolicy;
+use crate::core::watch::WatchState;
 use crate::ipc::AppState;
 
 /// A partial settings update. Absent fields are left alone, so the UI can send
@@ -99,15 +102,8 @@ pub async fn run_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticsRe
 
 /// Installs one dependency. Progress arrives as events while this runs.
 #[tauri::command]
-pub async fn install_dependency(
-    state: State<'_, AppState>,
-    id: DependencyId,
-    choice: Option<PlayerChoice>,
-) -> Result<()> {
-    state
-        .dependencies
-        .install(id, choice, state.bus.as_ref())
-        .await
+pub async fn install_dependency(state: State<'_, AppState>, id: DependencyId) -> Result<()> {
+    state.dependencies.install(id, state.bus.as_ref()).await
 }
 
 /// Points a dependency at a program the user chose, for portable builds that
@@ -143,12 +139,14 @@ pub fn decode_invite(text: String) -> Result<Invite> {
     Invite::decode(&text)
 }
 
+/// Joins a party and opens the player. Resolves once the party has let this
+/// machine in; joining the party already joined does nothing.
 #[tauri::command]
 pub async fn join_party(state: State<'_, AppState>, invite: Invite) -> Result<()> {
     state.session.join(&invite).await
 }
 
-/// Closes the tunnel a guest is connected through.
+/// Leaves the party a guest is in: closes the player, then the tunnel.
 ///
 /// Needed now that syncparty carries the connection rather than standing
 /// beside it: without this the only way to leave a party would be to quit the
@@ -158,7 +156,7 @@ pub async fn leave_party(state: State<'_, AppState>) -> Result<()> {
     state.session.leave().await
 }
 
-/// Opens the host's own Syncplay client on the party they are running.
+/// Starts watching the party this machine is hosting.
 ///
 /// Separate from `join_party` because the host has to connect on the address
 /// the server is bound to, not the one handed out to guests.
@@ -170,6 +168,35 @@ pub async fn join_hosted_party(state: State<'_, AppState>) -> Result<()> {
 #[tauri::command]
 pub async fn resume_last_session(state: State<'_, AppState>) -> Result<Option<Invite>> {
     state.session.resume_last_session().await
+}
+
+/// What this machine is watching, for a screen that has just mounted.
+#[tauri::command]
+pub fn watch_state(state: State<'_, AppState>) -> Option<WatchState> {
+    state.session.watch_state()
+}
+
+/// Opens a file the user chose in the player.
+#[tauri::command]
+pub async fn open_watch_file(state: State<'_, AppState>, path: PathBuf) -> Result<()> {
+    state.session.open_watch_file(&path).await
+}
+
+/// Starts the player again after the user closed it.
+#[tauri::command]
+pub async fn reopen_player(state: State<'_, AppState>) -> Result<()> {
+    state.session.reopen_player().await
+}
+
+#[tauri::command]
+pub fn set_ready(state: State<'_, AppState>, ready: bool) -> Result<()> {
+    state.session.set_ready(ready)
+}
+
+/// Closes the host's own player, leaving the party running.
+#[tauri::command]
+pub async fn stop_watching(state: State<'_, AppState>) -> Result<()> {
+    state.session.stop_watching().await
 }
 
 #[tauri::command]

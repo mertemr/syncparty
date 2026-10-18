@@ -1,10 +1,10 @@
 //! syncparty — synchronised movie nights over a peer-to-peer connection.
 //!
-//! Two halves in one binary. A host brings up a Syncplay server on loopback,
+//! Two halves in one binary. A host brings up a sync server on loopback,
 //! opens a peer-to-peer endpoint in front of it and hands out an invite; a
-//! guest opens that invite and is dropped straight into the room. Both share
-//! the same dependency checks, protocol code and settings, which is why they
-//! are not two apps.
+//! guest opens that invite and is dropped straight into the room, with mpv
+//! kept in step by syncparty's own client. Both share the same dependency
+//! checks, protocol code and settings, which is why they are not two apps.
 
 pub mod core;
 pub mod ipc;
@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
+use crate::core::config::ConfigStore;
+use crate::core::deps;
 use crate::core::events::{AppEvent, EventBus};
 use crate::core::invite::Invite;
 use crate::core::paths::AppPaths;
@@ -54,9 +56,10 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = AppState::build(&handle)?;
             let bus = Arc::clone(&state.bus);
-            app.manage(state);
 
             reclaim_the_old_server_runtime();
+            forget_retired_locations(&state.settings);
+            app.manage(state);
             register_deep_links(&handle, bus);
             Ok(())
         })
@@ -77,6 +80,11 @@ pub fn run() {
             commands::join_hosted_party,
             commands::resume_last_session,
             commands::clear_last_session,
+            commands::watch_state,
+            commands::open_watch_file,
+            commands::reopen_player,
+            commands::set_ready,
+            commands::stop_watching,
             commands::discord_status,
             commands::set_discord_webhook,
             commands::clear_discord_webhook,
@@ -109,8 +117,18 @@ pub fn run() {
             movie_commands::get_party_log,
             movie_commands::set_now_watching,
         ])
-        .run(tauri::generate_context!())
-        .expect("syncparty failed to start");
+        .build(tauri::generate_context!())
+        .expect("syncparty failed to start")
+        .run(|app, event| {
+            // The player is a process of its own. Left running, it would go
+            // on playing with nothing keeping it in step, so it is closed
+            // before the app goes.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    tauri::async_runtime::block_on(state.session.shutdown());
+                }
+            }
+        });
 }
 
 /// Listens for `syncparty://` links and republishes valid ones as events.
@@ -142,6 +160,18 @@ fn publish_first_invite(urls: &[url::Url], bus: &dyn EventBus) {
 
     if let Some(invite) = invite {
         bus.publish(AppEvent::InviteReceived { invite });
+    }
+}
+
+/// Forgets where the user once pointed syncparty at programs it no longer
+/// uses — the Syncplay client, above all. Nothing in the UI can clear those
+/// any more, since the dependency they belonged to is gone. Like the cleanup
+/// above, a failure is logged and nothing else.
+fn forget_retired_locations(settings: &ConfigStore) {
+    match deps::forget_retired_overrides(settings) {
+        Ok(true) => tracing::info!("forgot the location of a program syncparty no longer uses"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "could not forget a retired program location"),
     }
 }
 

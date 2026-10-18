@@ -7,8 +7,9 @@
  */
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
+import { open as tauriOpen } from "@tauri-apps/plugin-dialog";
 
-import { devInvoke, devListen } from "./devBackend";
+import { devInvoke, devListen, devPickFile } from "./devBackend";
 import type { AppEvent } from "@/shared/types/AppEvent";
 import type { AppMode } from "@/shared/types/AppMode";
 import type { AppSettings } from "@/shared/types/AppSettings";
@@ -24,7 +25,6 @@ import type { MovieSummary } from "@/shared/types/MovieSummary";
 import type { MovieVoteSnapshot } from "@/shared/types/MovieVoteSnapshot";
 import type { PartyLogEntry } from "@/shared/types/PartyLogEntry";
 import type { ParticipationStatus } from "@/shared/types/ParticipationStatus";
-import type { PlayerChoice } from "@/shared/types/PlayerChoice";
 import type { PreflightReport } from "@/shared/types/PreflightReport";
 import type { SessionHistoryEntry } from "@/shared/types/SessionHistoryEntry";
 import type { SessionState } from "@/shared/types/SessionState";
@@ -32,6 +32,7 @@ import type { SettingsPatch } from "@/shared/types/SettingsPatch";
 import type { UpdatePolicy } from "@/shared/types/UpdatePolicy";
 import type { UserMovie } from "@/shared/types/UserMovie";
 import type { WatchedMovie } from "@/shared/types/WatchedMovie";
+import type { WatchState } from "@/shared/types/WatchState";
 
 /** Must match `ipc::EVENT_CHANNEL`. */
 const EVENT_CHANNEL = "syncparty://event";
@@ -122,8 +123,8 @@ export const ipc = {
   runDiagnostics: () => invoke<DiagnosticsReport>("run_diagnostics"),
 
   /** Progress arrives as `installProgress` events while this is in flight. */
-  installDependency: (id: DependencyId, choice?: PlayerChoice) =>
-    invoke<void>("install_dependency", { id, choice }),
+  installDependency: (id: DependencyId) =>
+    invoke<void>("install_dependency", { id }),
 
   /**
    * Points a dependency at a program the user chose, for portable builds
@@ -142,10 +143,21 @@ export const ipc = {
 
   /** Accepts a bare code, a deep link, or a whole chat message. */
   decodeInvite: (text: string) => invoke<Invite>("decode_invite", { text }),
+
+  /**
+   * Joins a party and starts watching it on this machine: a tunnel to the
+   * host, syncparty's own sync client through it, and mpv for the client to
+   * drive.
+   *
+   * Resolves once the party has let this machine in, so a wrong password
+   * comes back from this call as `sync_rejected` rather than as a card that
+   * never connects. Joining the party already being watched is a no-op;
+   * joining a different one leaves the first.
+   */
   joinParty: (invite: Invite) => invoke<void>("join_party", { invite }),
 
   /**
-   * Closes the tunnel this guest is connected through.
+   * Stops watching and leaves: mpv closes, then the tunnel does.
    *
    * syncparty carries the connection rather than standing beside it, so a
    * guest that has finished with a party has to say so — otherwise the tunnel
@@ -153,16 +165,47 @@ export const ipc = {
    */
   leaveParty: () => invoke<void>("leave_party"),
 
+  /**
+   * Rejoins the party this machine was last in, if any, and says which.
+   * Already watching it counts as rejoined, so a second call does nothing.
+   */
   resumeLastSession: () => invoke<Invite | null>("resume_last_session"),
   clearLastSession: () => invoke<void>("clear_last_session"),
 
   /**
-   * Opens the host's own Syncplay client on the party they are running.
+   * Starts watching the party this machine is hosting.
    *
-   * Not the same as `joinParty` with the shared invite: the host connects
-   * straight to its own server on loopback, with no tunnel in between.
+   * Not the same as `joinParty` with the shared invite: the host's client
+   * connects straight to its own server on loopback, with no tunnel in
+   * between. Calling it again while already watching does nothing.
    */
   joinHostedParty: () => invoke<void>("join_hosted_party"),
+
+  /**
+   * What is being watched on this machine, or `null` when nothing is.
+   *
+   * Only for hydrating: from then on every change arrives as a
+   * `watchChanged` event.
+   */
+  watchState: () => invoke<WatchState | null>("watch_state"),
+
+  /** Loads a file the user picked into the player and tells the room. */
+  openWatchFile: (path: string) => invoke<void>("open_watch_file", { path }),
+
+  /**
+   * Opens mpv again after the user closed it, with the file it last had,
+   * at the point the room has reached.
+   */
+  reopenPlayer: () => invoke<void>("reopen_player"),
+
+  /** This user's own readiness, as the rest of the room sees it. */
+  setReady: (ready: boolean) => invoke<void>("set_ready", { ready }),
+
+  /**
+   * The host closes its own player and leaves the room, while the party
+   * carries on for everyone else.
+   */
+  stopWatching: () => invoke<void>("stop_watching"),
 
   discordStatus: () => invoke<boolean>("discord_status"),
   setDiscordWebhook: (url: string) =>
@@ -219,6 +262,24 @@ export const ipc = {
   setUserMovie: (movie: MovieSummary, favorite: boolean, watched: boolean) =>
     invoke<void>("set_user_movie", { movie, favorite, watched }),
 };
+
+/**
+ * Asks the user for one file with the system's own dialog, or `null` when
+ * they cancel.
+ *
+ * Here rather than at the call site because a plain browser has no dialog to
+ * open: under `pnpm dev` the fake backend answers with a sample path, which
+ * keeps every state of the watch card reachable without a desktop build.
+ */
+export async function pickFile(options: {
+  title: string;
+  filters?: { name: string; extensions: string[] }[];
+}): Promise<string | null> {
+  if (useDevBackend) return devPickFile();
+
+  const chosen = await tauriOpen({ ...options, multiple: false, directory: false });
+  return typeof chosen === "string" ? chosen : null;
+}
 
 /**
  * Subscribes to backend events.

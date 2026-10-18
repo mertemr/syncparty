@@ -1,6 +1,9 @@
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
 
-/** Removes local paths and this machine's address from copied reports. */
+/**
+ * Removes local paths, this machine's address and what it is watching from
+ * copied reports.
+ */
 export function safeToShare(report: DiagnosticsReport) {
   return {
     appVersion: report.appVersion,
@@ -19,6 +22,17 @@ export function safeToShare(report: DiagnosticsReport) {
     // it is names the machine, and an invite naming it may still be live.
     hasEndpoint: report.endpoint != null,
     session: { phase: report.session.phase },
+    // Which film is open, in which room, under which name, says what this
+    // person is watching and who they are — none of it helps with a party
+    // that will not stay in sync. Whether a file is open at all does, and so
+    // does every state, so only the shape crosses.
+    watch: report.watch && {
+      role: report.watch.role,
+      connection: report.watch.connection.state,
+      player: report.watch.player.state,
+      hasFile: report.watch.player.state === "loaded",
+      ready: report.watch.ready,
+    },
     transport: report.transport && {
       // Which addresses were discovered names this machine and its network.
       // How many there are, and whether any of them was carrier-grade, is the

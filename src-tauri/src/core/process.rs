@@ -1,7 +1,7 @@
 //! Running external programs without flashing console windows at the user.
 //!
-//! Every subprocess syncparty starts — `winget`, the Syncplay client — goes
-//! through here. On Windows a bare
+//! Every subprocess syncparty starts — `winget`, `brew`, mpv — goes through
+//! here. On Windows a bare
 //! [`tokio::process::Command`] pops a console window for a fraction of a
 //! second, which looks broken in a GUI app; `CREATE_NO_WINDOW` suppresses it.
 
@@ -31,10 +31,28 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
-/// Builds a [`Command`] for a process syncparty keeps running and reads from
-/// line by line, rather than waiting on to completion.
-pub fn spawnable(program: impl AsRef<OsStr>) -> Command {
-    command(program)
+/// Builds a [`Command`] for a long-lived program syncparty talks to some
+/// other way than through its output — mpv, which is driven over a socket.
+///
+/// All three streams are null rather than piped: nobody reads a pipe here,
+/// and a child that writes enough into an unread one blocks once the pipe is
+/// full. The process is killed if its handle is dropped, so a player whose
+/// session ends without stopping it is not left behind. That covers syncparty
+/// winding down; a syncparty that is killed outright never drops anything,
+/// and its mpv lives on — which is why the app stops the player itself on
+/// exit rather than leaving it to this.
+pub fn quiet(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
 }
 
 pub struct CapturedOutput {
@@ -44,9 +62,6 @@ pub struct CapturedOutput {
 
 /// Runs a program to completion and returns its output, failing on a non-zero
 /// exit status.
-///
-/// Use [`try_capture`] when a non-zero status is an expected answer rather
-/// than an error — probing for an uninstalled tool, for instance.
 pub async fn capture<I, S>(program: impl AsRef<OsStr>, args: I) -> Result<CapturedOutput>
 where
     I: IntoIterator<Item = S>,
@@ -79,21 +94,12 @@ where
     Ok(captured)
 }
 
-/// Like [`capture`], but a failed run yields `None` instead of an error.
-pub async fn try_capture<I, S>(program: impl AsRef<OsStr>, args: I) -> Option<CapturedOutput>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    capture(program, args).await.ok()
-}
-
 /// Resolves an executable, preferring `PATH` and falling back to a list of
 /// well-known install locations.
 ///
-/// mpv and Syncplay both install somewhere predictable but do not
-/// reliably add themselves to `PATH`, so looking in both places is what makes
-/// detection work on a stock machine.
+/// mpv installs somewhere predictable but does not reliably add itself to
+/// `PATH`, so looking in both places is what makes detection work on a stock
+/// machine.
 pub fn locate(binary: &str, fallbacks: &[&str]) -> Option<std::path::PathBuf> {
     if let Ok(found) = which::which(binary) {
         return Some(found);
@@ -139,23 +145,6 @@ pub fn resolve_manual(raw: &str, binary: &str) -> Option<std::path::PathBuf> {
     }
 
     None
-}
-
-/// Asks a program for its version, returning `None` if it will not say.
-///
-/// Only ever used to decorate a "found it" message, so every failure mode —
-/// the flag is unsupported, the tool hangs on stdin, the output is empty —
-/// collapses to `None` rather than an error.
-pub async fn probe_version(executable: &Path, args: &[&str]) -> Option<String> {
-    let output = try_capture(executable, args).await?;
-
-    output
-        .stdout
-        .lines()
-        .chain(output.stderr.lines())
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned)
 }
 
 /// Picks the most useful line to show the user when a command fails. Some

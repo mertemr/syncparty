@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use crate::core::config::{AppMode, ConfigStore};
 use crate::core::deps::{
-    Dependency, DependencyId, DependencyStatus, MpvDependency, PlayerChoice, PreflightItem,
-    PreflightReport, SyncplayClientDependency,
+    Dependency, DependencyId, DependencyStatus, MpvDependency, PreflightItem, PreflightReport,
 };
 use crate::core::error::{Result, SyncPartyError};
 use crate::core::events::{DependencyProgress, EventBus, ProgressSink};
@@ -20,11 +19,7 @@ impl DependencyManager {
     /// The set syncparty ships with.
     pub fn standard(settings: Arc<ConfigStore>) -> Self {
         Self::with(
-            vec![
-                Box::new(SyncplayClientDependency::new(Arc::clone(&settings)))
-                    as Box<dyn Dependency>,
-                Box::new(MpvDependency::new(Arc::clone(&settings))),
-            ],
+            vec![Box::new(MpvDependency::new(Arc::clone(&settings))) as Box<dyn Dependency>],
             settings,
         )
     }
@@ -104,7 +99,7 @@ impl DependencyManager {
             // "Not found" would send them back to the picker to choose the
             // same path again, so the program's own words go here instead.
             DependencyStatus::Unusable { reason, .. } => format!(
-                "{} is there but will not start: {reason}",
+                "{} is there but cannot be used: {reason}",
                 dependency.display_name()
             ),
             DependencyStatus::Missing => format!(
@@ -115,31 +110,21 @@ impl DependencyManager {
 
         self.settings.set_executable_override(key, previous)?;
 
-        Err(SyncPartyError::DependencyMissing(complaint))
+        Err(SyncPartyError::InvalidLocation(complaint))
     }
 
     /// Installs one dependency, streaming progress onto the event bus.
-    pub async fn install(
-        &self,
-        id: DependencyId,
-        choice: Option<PlayerChoice>,
-        bus: &dyn EventBus,
-    ) -> Result<()> {
+    pub async fn install(&self, id: DependencyId, bus: &dyn EventBus) -> Result<()> {
         let progress = DependencyProgress::new(bus, id);
-        self.install_with(id, choice, &progress).await
+        self.install_with(id, &progress).await
     }
 
-    pub async fn install_with(
-        &self,
-        id: DependencyId,
-        choice: Option<PlayerChoice>,
-        progress: &dyn ProgressSink,
-    ) -> Result<()> {
+    pub async fn install_with(&self, id: DependencyId, progress: &dyn ProgressSink) -> Result<()> {
         let dependency = self
             .find(id)
             .ok_or_else(|| SyncPartyError::Other(format!("unknown dependency: {id:?}")))?;
 
-        dependency.install(progress, choice).await
+        dependency.install(progress).await
     }
 }
 
@@ -154,6 +139,8 @@ mod tests {
     use crate::core::events::test_support::RecordingEventBus;
     use crate::core::events::AppEvent;
     use crate::core::paths::AppPaths;
+
+    const FAKE_NAME: &str = "fake";
 
     struct FakeDependency {
         id: DependencyId,
@@ -192,7 +179,7 @@ mod tests {
         }
 
         fn display_name(&self) -> &str {
-            "fake"
+            FAKE_NAME
         }
 
         fn required_for(&self) -> ModeRequirement {
@@ -203,11 +190,7 @@ mod tests {
             self.status.clone()
         }
 
-        async fn install(
-            &self,
-            progress: &dyn ProgressSink,
-            _choice: Option<PlayerChoice>,
-        ) -> Result<()> {
+        async fn install(&self, progress: &dyn ProgressSink) -> Result<()> {
             progress.report("installing", Some(50), None);
             Ok(())
         }
@@ -248,26 +231,17 @@ mod tests {
         Arc::new(ConfigStore::load(AppPaths::rooted_at(dir)).expect("settings"))
     }
 
+    /// A manager holding one missing dependency that only hosts need.
+    ///
+    /// Host-only here purely to exercise the filter; what the real player is
+    /// required for is `mpv.rs`'s business, not this module's.
     fn manager() -> DependencyManager {
-        manager_with(settings("default"))
-    }
-
-    fn manager_with(settings: Arc<ConfigStore>) -> DependencyManager {
         DependencyManager::with(
-            vec![
-                Box::new(FakeDependency::installed(
-                    DependencyId::SyncplayClient,
-                    ModeRequirement::Both,
-                )) as Box<dyn Dependency>,
-                // Host-only here purely to exercise the filter; what the real
-                // player is required for is `mpv.rs`'s business, not this
-                // module's.
-                Box::new(FakeDependency::missing(
-                    DependencyId::Mpv,
-                    ModeRequirement::HostOnly,
-                )),
-            ],
-            settings,
+            vec![Box::new(FakeDependency::missing(
+                DependencyId::Mpv,
+                ModeRequirement::HostOnly,
+            )) as Box<dyn Dependency>],
+            settings("default"),
         )
     }
 
@@ -275,8 +249,7 @@ mod tests {
     async fn a_guest_is_not_asked_for_a_host_only_dependency() {
         let report = manager().preflight(AppMode::Guest).await;
 
-        assert_eq!(report.items.len(), 1);
-        assert_eq!(report.items[0].id, DependencyId::SyncplayClient);
+        assert!(report.items.is_empty());
         assert!(report.is_satisfied());
     }
 
@@ -284,7 +257,7 @@ mod tests {
     async fn a_host_sees_what_it_is_missing() {
         let report = manager().preflight(AppMode::Host).await;
 
-        assert_eq!(report.items.len(), 2);
+        assert_eq!(report.items.len(), 1);
         assert!(!report.is_satisfied());
         assert_eq!(
             report.missing().map(|item| item.id).collect::<Vec<_>>(),
@@ -293,11 +266,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_installed_dependency_satisfies_the_preflight() {
+        let manager = DependencyManager::with(
+            vec![Box::new(FakeDependency::installed(
+                DependencyId::Mpv,
+                ModeRequirement::Both,
+            )) as Box<dyn Dependency>],
+            settings("installed"),
+        );
+
+        let report = manager.preflight(AppMode::Guest).await;
+
+        assert_eq!(report.items.len(), 1);
+        assert!(report.is_satisfied());
+    }
+
+    #[tokio::test]
     async fn installing_publishes_progress_for_that_dependency() {
         let bus = RecordingEventBus::default();
 
         manager()
-            .install(DependencyId::SyncplayClient, None, &bus)
+            .install(DependencyId::Mpv, &bus)
             .await
             .expect("install");
 
@@ -306,7 +295,7 @@ mod tests {
         assert!(matches!(
             &events[0],
             AppEvent::InstallProgress {
-                dependency: DependencyId::SyncplayClient,
+                dependency: DependencyId::Mpv,
                 percent: Some(50),
                 ..
             }
@@ -341,7 +330,12 @@ mod tests {
             .await
             .expect_err("detection still fails, so the path is no good");
 
-        assert_eq!(error.kind(), "dependency_missing");
+        assert_eq!(error.kind(), "invalid_location");
+        assert_eq!(
+            error.to_string(),
+            format!("{FAKE_NAME} was not found at that location"),
+            "the reason is the whole message, not wrapped in another"
+        );
         assert_eq!(
             settings.executable_override("mpv"),
             None,
@@ -357,8 +351,8 @@ mod tests {
                 id: DependencyId::Mpv,
                 requirement: ModeRequirement::Both,
                 status: DependencyStatus::Unusable {
-                    path: "/usr/bin/mpv".to_owned(),
-                    reason: "ImportError: cannot import name 'SafeConfigParser'".to_owned(),
+                    path: "/usr/bin/vlc".to_owned(),
+                    reason: "not mpv: this is VLC".to_owned(),
                 },
                 manual_key: Some("mpv"),
             }) as Box<dyn Dependency>],
@@ -366,16 +360,15 @@ mod tests {
         );
 
         let error = manager
-            .set_manual_path(DependencyId::Mpv, Some("/usr/bin/mpv".to_owned()))
+            .set_manual_path(DependencyId::Mpv, Some("/usr/bin/vlc".to_owned()))
             .await
-            .expect_err("something that will not start is not a working path");
+            .expect_err("something that cannot be used is not a working path");
 
-        assert!(
-            error
-                .to_string()
-                .contains("ImportError: cannot import name 'SafeConfigParser'"),
-            "the file is where they said it was, so the message has to say what \
-             went wrong instead of sending them back to pick it again: {error}"
+        // The file is where they said it was, so the message has to say what
+        // is wrong with it instead of sending them back to pick it again.
+        assert_eq!(
+            error.to_string(),
+            format!("{FAKE_NAME} is there but cannot be used: not mpv: this is VLC")
         );
         assert_eq!(
             settings.executable_override("mpv"),
@@ -425,35 +418,34 @@ mod tests {
         let bus = RecordingEventBus::default();
         // A manager that has never heard of the player, so asking it to
         // install one is a question it cannot answer.
-        let manager = DependencyManager::with(
-            vec![Box::new(FakeDependency::installed(
-                DependencyId::SyncplayClient,
-                ModeRequirement::Both,
-            )) as Box<dyn Dependency>],
-            settings("default"),
-        );
+        let manager = DependencyManager::with(Vec::new(), settings("default"));
 
         let error = manager
-            .install(DependencyId::Mpv, None, &bus)
+            .install(DependencyId::Mpv, &bus)
             .await
             .expect_err("unknown dependency");
 
         assert_eq!(error.kind(), "other");
+        assert!(
+            bus.events().is_empty(),
+            "nothing was installed, so nothing to report"
+        );
     }
 
-    /// The set a real host is asked for. Nothing about a party requires Python
-    /// any more, and a preflight that still demanded it would block hosts on a
-    /// runtime the server no longer uses.
+    /// The set a real party is asked for, by hosts and guests alike. syncparty
+    /// is its own Syncplay client now, so a preflight that still demanded the
+    /// desktop client would block everyone on a program nothing launches.
     #[tokio::test]
-    async fn a_host_needs_only_the_client_and_a_player() {
+    async fn everyone_needs_only_mpv() {
         let paths = AppPaths::rooted_at(std::env::temp_dir().join("syncparty-deps-test"));
         let settings = Arc::new(ConfigStore::load(paths).expect("settings"));
+        let manager = DependencyManager::standard(settings);
 
-        let report = DependencyManager::standard(settings)
-            .preflight(AppMode::Host)
-            .await;
-        let ids: Vec<_> = report.items.iter().map(|item| item.id).collect();
+        for mode in [AppMode::Host, AppMode::Guest] {
+            let report = manager.preflight(mode).await;
+            let ids: Vec<_> = report.items.iter().map(|item| item.id).collect();
 
-        assert_eq!(ids, vec![DependencyId::SyncplayClient, DependencyId::Mpv]);
+            assert_eq!(ids, vec![DependencyId::Mpv], "{mode:?}");
+        }
     }
 }

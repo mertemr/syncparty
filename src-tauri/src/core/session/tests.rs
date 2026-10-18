@@ -1,0 +1,1402 @@
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use async_trait::async_trait;
+
+use super::*;
+use crate::core::config::AppMode;
+use crate::core::events::test_support::RecordingEventBus;
+use crate::core::events::NullEventBus;
+use crate::core::paths::AppPaths;
+use crate::core::player::fake::{Command, FakeLauncher, FakePlayer};
+use crate::core::player::{Player, PlayerEvents};
+use crate::core::syncplay::{NativeServer, ServerTiming};
+
+/// Discards whatever arrives on the control channel — these tests are not
+/// exercising movie voting.
+struct NullControl;
+impl ControlChannel for NullControl {
+    fn on_message(self: Arc<Self>, _peer: iroh::EndpointId, _bytes: Vec<u8>) {}
+}
+
+/// A server that records what it was asked to do and runs nothing.
+#[derive(Default)]
+struct FakeServer {
+    started: Mutex<Vec<ServerConfig>>,
+    stops: Mutex<usize>,
+    fail_on_start: bool,
+}
+
+#[async_trait]
+impl ServerController for FakeServer {
+    async fn start(&self, config: &ServerConfig) -> Result<()> {
+        if self.fail_on_start {
+            return Err(SyncPartyError::ServerStartFailed("nope".to_owned()));
+        }
+        self.started.lock().await.push(config.clone());
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        *self.stops.lock().await += 1;
+        Ok(())
+    }
+
+    async fn state(&self) -> ServerState {
+        ServerState::Stopped
+    }
+}
+
+/// Stands a server on this machine in for the host: every invite leads
+/// straight to it, with no endpoint and no tunnel.
+struct LoopbackDialer {
+    address: std::sync::Mutex<SocketAddr>,
+    dials: AtomicUsize,
+    closes: Arc<AtomicUsize>,
+    /// Whether the route handed out last still reaches the host.
+    alive: std::sync::Mutex<Arc<AtomicBool>>,
+}
+
+impl LoopbackDialer {
+    fn new(address: SocketAddr) -> Self {
+        Self {
+            address: std::sync::Mutex::new(address),
+            dials: AtomicUsize::new(0),
+            closes: Arc::new(AtomicUsize::new(0)),
+            alive: std::sync::Mutex::new(Arc::new(AtomicBool::new(true))),
+        }
+    }
+
+    fn dials(&self) -> usize {
+        self.dials.load(Ordering::SeqCst)
+    }
+
+    fn closes(&self) -> usize {
+        self.closes.load(Ordering::SeqCst)
+    }
+
+    /// Sends every route from now on somewhere else.
+    fn redirect(&self, address: SocketAddr) {
+        *self.address.lock().expect("address") = address;
+    }
+
+    /// What the host stopping its party does to the route a guest holds: it
+    /// stays open at this end and reaches nothing.
+    fn cut(&self) {
+        self.alive
+            .lock()
+            .expect("alive")
+            .store(false, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Dialer for LoopbackDialer {
+    async fn dial(
+        &self,
+        _invite: &Invite,
+        _control: Arc<dyn ControlChannel>,
+    ) -> Result<Box<dyn Route>> {
+        self.dials.fetch_add(1, Ordering::SeqCst);
+        let alive = Arc::new(AtomicBool::new(true));
+        *self.alive.lock().expect("alive") = Arc::clone(&alive);
+        Ok(Box::new(LoopbackRoute {
+            address: *self.address.lock().expect("address"),
+            closes: Arc::clone(&self.closes),
+            alive,
+        }))
+    }
+}
+
+struct LoopbackRoute {
+    address: SocketAddr,
+    closes: Arc<AtomicUsize>,
+    alive: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl Route for LoopbackRoute {
+    fn local_addr(&self) -> SocketAddr {
+        self.address
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    fn report(&self) -> TransportReport {
+        TransportReport {
+            endpoint_id: "loopback".to_owned(),
+            addresses: Vec::new(),
+            behind_carrier_nat: None,
+            relays: Vec::new(),
+            peers: Vec::new(),
+        }
+    }
+
+    async fn send_control(&self, _bytes: &[u8]) -> Result<()> {
+        Ok(())
+    }
+
+    async fn close(self: Box<Self>) {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The real server, noting at each stop whether the host's player was still
+/// open — the one thing that must have gone before it.
+struct OrderedServer {
+    inner: NativeServer,
+    launcher: Arc<FakeLauncher>,
+    player_open_at_stop: std::sync::Mutex<Vec<bool>>,
+}
+
+impl OrderedServer {
+    fn player_open_at_stop(&self) -> Vec<bool> {
+        self.player_open_at_stop.lock().expect("stops").clone()
+    }
+
+    fn stops(&self) -> usize {
+        self.player_open_at_stop.lock().expect("stops").len()
+    }
+}
+
+#[async_trait]
+impl ServerController for OrderedServer {
+    async fn start(&self, config: &ServerConfig) -> Result<()> {
+        self.inner.start(config).await
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let open = self
+            .launcher
+            .last()
+            .is_some_and(|player| !player.is_closed());
+        self.player_open_at_stop.lock().expect("stops").push(open);
+        self.inner.stop().await
+    }
+
+    async fn state(&self) -> ServerState {
+        self.inner.state().await
+    }
+}
+
+/// Each test gets its own directory: they run in parallel, and a shared one
+/// means whichever test wipes it first breaks the others.
+fn stores(label: &str) -> (Arc<ConfigStore>, Arc<SecretStore>) {
+    let dir =
+        std::env::temp_dir().join(format!("syncparty-session-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let paths = AppPaths::rooted_at(dir);
+    let settings = Arc::new(ConfigStore::load(paths.clone()).expect("settings"));
+    settings
+        .update(|s| {
+            s.mode = Some(AppMode::Host);
+            s.nickname = "alice".to_owned();
+        })
+        .expect("update");
+
+    (settings, Arc::new(SecretStore::in_file(paths)))
+}
+
+fn players_from(launcher: &Arc<FakeLauncher>) -> PlayerSource {
+    let launcher = Arc::clone(launcher);
+    Arc::new(move |_: &ConfigStore| Ok(Arc::clone(&launcher) as Arc<dyn PlayerLauncher>))
+}
+
+fn session_with(label: &str, server: Arc<FakeServer>) -> (PartySession, Arc<RecordingEventBus>) {
+    let (settings, secrets) = stores(label);
+    let bus = Arc::new(RecordingEventBus::default());
+
+    let session = PartySession::new(
+        settings,
+        Arc::clone(&secrets),
+        server,
+        Arc::new(DiscordNotifier::new(secrets)),
+        Arc::clone(&bus) as Arc<dyn EventBus>,
+        Arc::new(NullControl),
+        players_from(&Arc::new(FakeLauncher::new())),
+    );
+
+    (session, bus)
+}
+
+const PASSWORD: &str = "swordfish";
+
+/// A session wired to a real server on loopback and to fake players, so a
+/// party can be joined, hosted and left with nothing leaving this machine.
+struct Party {
+    session: PartySession,
+    bus: Arc<RecordingEventBus>,
+    secrets: Arc<SecretStore>,
+    launcher: Arc<FakeLauncher>,
+    dialer: Arc<LoopbackDialer>,
+    server: Arc<OrderedServer>,
+    config: ServerConfig,
+}
+
+impl Party {
+    async fn new(label: &str) -> Self {
+        Self::with_players(label, None).await
+    }
+
+    /// `players` stands in for how mpv is found; `None` finds the fakes.
+    async fn with_players(label: &str, players: Option<PlayerSource>) -> Self {
+        let (settings, secrets) = stores(label);
+        let bus = Arc::new(RecordingEventBus::default());
+        let launcher = Arc::new(FakeLauncher::new());
+
+        let config = ServerConfig {
+            port: free_port(),
+            password: PASSWORD.to_owned(),
+            salt: "PEPPER".to_owned(),
+            timing: ServerTiming {
+                first_state_delay: Duration::from_millis(10),
+                state_interval: Duration::from_millis(200),
+                ..ServerTiming::default()
+            },
+        };
+        let server = Arc::new(OrderedServer {
+            inner: NativeServer::new(Arc::new(NullEventBus)),
+            launcher: Arc::clone(&launcher),
+            player_open_at_stop: std::sync::Mutex::new(Vec::new()),
+        });
+        server.start(&config).await.expect("the server starts");
+        let dialer = Arc::new(LoopbackDialer::new(config.local_address()));
+
+        let session = PartySession::new(
+            settings,
+            Arc::clone(&secrets),
+            Arc::clone(&server) as Arc<dyn ServerController>,
+            Arc::new(DiscordNotifier::new(Arc::clone(&secrets))),
+            Arc::clone(&bus) as Arc<dyn EventBus>,
+            Arc::new(NullControl),
+            players.unwrap_or_else(|| players_from(&launcher)),
+        )
+        .with_dialer(Arc::clone(&dialer) as Arc<dyn Dialer>);
+
+        Self {
+            session,
+            bus,
+            secrets,
+            launcher,
+            dialer,
+            server,
+            config,
+        }
+    }
+
+    fn invite(&self, room: &str, password: &str) -> Invite {
+        Invite {
+            endpoint: iroh::SecretKey::generate().public().to_string(),
+            password: password.to_owned(),
+            room: room.to_owned(),
+        }
+    }
+
+    /// Puts the session where `start_hosting` leaves it, without the
+    /// endpoint that would need the internet.
+    async fn hosting(&self, monitor_attached: bool) {
+        let info = HostingInfo {
+            invite: self.invite("MovieNight", PASSWORD),
+            invite_code: String::new(),
+            deep_link: String::new(),
+            server_address: self.config.local_address().to_string(),
+            server: self.server.state().await,
+            monitor_attached,
+        };
+        *self.session.state.lock().await = SessionState::Hosting(Box::new(info));
+    }
+
+    fn player(&self) -> Arc<FakePlayer> {
+        self.launcher.last().expect("a player was launched")
+    }
+
+    fn remembered(&self) -> Option<Invite> {
+        self.secrets
+            .get(SecretKey::LastInvite)
+            .expect("read")
+            .and_then(|raw| parse_last_invite(&raw))
+    }
+
+    fn rooms_published(&self) -> usize {
+        self.bus
+            .events()
+            .iter()
+            .filter(|event| matches!(event, AppEvent::RoomUpdated { .. }))
+            .count()
+    }
+
+    async fn until_watching(&self, wanted: impl Fn(&WatchState) -> bool) -> WatchState {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(state) = self.session.watch_state().filter(|state| wanted(state)) {
+                return state;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never got there: {:?}",
+                self.session.watch_state()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a free port")
+        .local_addr()
+        .expect("address")
+        .port()
+}
+
+/// A file to open, in a folder of its own.
+fn film(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("syncparty-film-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("Film.mkv");
+    std::fs::write(&path, b"not really a film").expect("film");
+    (dir, path)
+}
+
+#[tokio::test]
+async fn a_new_session_is_idle() {
+    let (session, _) = session_with("idle", Arc::new(FakeServer::default()));
+
+    assert!(matches!(session.state().await, SessionState::Idle));
+    assert_eq!(session.watch_state(), None);
+}
+
+#[tokio::test]
+async fn stopping_an_idle_session_still_stops_the_server_and_returns_to_idle() {
+    let server = Arc::new(FakeServer::default());
+    let (session, bus) = session_with("stop", Arc::clone(&server));
+
+    session.stop_hosting().await.expect("stop");
+
+    assert_eq!(*server.stops.lock().await, 1);
+    assert!(matches!(session.state().await, SessionState::Idle));
+    assert!(bus
+        .events()
+        .iter()
+        .any(|event| matches!(event, AppEvent::SessionChanged { .. })));
+}
+
+#[tokio::test]
+async fn leaving_without_having_joined_is_not_an_error() {
+    let (session, _) = session_with("leave-idle", Arc::new(FakeServer::default()));
+
+    assert!(session.leave().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_failed_start_leaves_no_server_running() {
+    let server = Arc::new(FakeServer {
+        fail_on_start: true,
+        ..FakeServer::default()
+    });
+    let (session, _) = session_with("failed-start", Arc::clone(&server));
+
+    // On a machine with no network the endpoint step fails first; on one
+    // with network the fake server fails instead. Either way the cleanup
+    // path is what this is checking.
+    let _ = session.start_hosting().await;
+
+    assert!(
+        *server.stops.lock().await >= 1,
+        "a failed start must stop whatever it started"
+    );
+    assert!(matches!(
+        session.state().await,
+        SessionState::Idle | SessionState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn joining_opens_the_player_and_remembers_the_party() {
+    let party = Party::new("join").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    party.session.join(&invite).await.expect("joined");
+
+    let state = party.session.watch_state().expect("watching");
+    assert_eq!(state.role, WatchRole::Guest);
+    assert_eq!(
+        state.connection,
+        crate::core::watch::WatchConnection::Connected
+    );
+    assert_eq!(state.username.as_deref(), Some("alice"));
+    assert_eq!(party.launcher.launched().len(), 1);
+    assert_eq!(party.remembered(), Some(invite));
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn joining_the_party_already_joined_does_nothing() {
+    let party = Party::new("join-twice").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    party.session.join(&invite).await.expect("joined");
+    party.session.join(&invite).await.expect("joined again");
+    let resumed = party.session.resume_last_session().await.expect("resumed");
+
+    assert_eq!(resumed, Some(invite));
+    assert_eq!(party.launcher.launched().len(), 1, "one player, not three");
+    assert_eq!(party.dialer.dials(), 1);
+    assert!(!party.player().is_closed());
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn joining_a_different_party_leaves_the_first() {
+    let party = Party::new("join-other").await;
+    let first = party.invite("MovieNight", PASSWORD);
+    let second = party.invite("Matinee", PASSWORD);
+
+    party.session.join(&first).await.expect("first");
+    let first_player = party.player();
+    party.session.join(&second).await.expect("second");
+
+    assert!(
+        first_player.is_closed(),
+        "the first party's player is closed"
+    );
+    assert_eq!(party.dialer.closes(), 1);
+    assert_eq!(party.launcher.launched().len(), 2);
+    assert_eq!(
+        party.session.watch_state().map(|state| state.room),
+        Some("Matinee".to_owned())
+    );
+    assert_eq!(party.remembered(), Some(second));
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn joining_the_same_party_over_a_dead_route_dials_it_again() {
+    let party = Party::new("join-dead-route").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+    party.session.join(&invite).await.expect("joined");
+    let first_player = party.player();
+
+    // The host stopped its party and started it again: the invite is as good
+    // as ever, but the route this guest holds leads nowhere.
+    party.dialer.cut();
+    party.session.join(&invite).await.expect("joined again");
+
+    assert_eq!(party.dialer.dials(), 2, "a new route to the host");
+    assert_eq!(party.dialer.closes(), 1, "the dead one is closed");
+    assert!(first_player.is_closed());
+    assert_eq!(party.launcher.launched().len(), 2);
+    assert!(!party.player().is_closed());
+    assert_eq!(
+        party.session.watch_state().map(|state| state.connection),
+        Some(crate::core::watch::WatchConnection::Connected)
+    );
+    assert_eq!(party.remembered(), Some(invite.clone()));
+
+    party.session.resume_last_session().await.expect("resumed");
+    assert_eq!(party.dialer.dials(), 2, "a working route is kept");
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn joining_the_same_party_after_it_turned_this_machine_away_asks_again() {
+    let party = Party::new("join-after-refusal").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+    party.session.join(&invite).await.expect("joined");
+
+    // The host's password changed under a guest already in the room: the
+    // client is dropped, reconnects, and is refused.
+    party.server.stop().await.expect("server stops");
+    party
+        .server
+        .start(&ServerConfig {
+            password: "a new password".to_owned(),
+            ..party.config.clone()
+        })
+        .await
+        .expect("server restarts");
+    party
+        .until_watching(|state| {
+            matches!(
+                state.connection,
+                crate::core::watch::WatchConnection::Rejected { .. }
+            )
+        })
+        .await;
+
+    let error = party
+        .session
+        .join(&invite)
+        .await
+        .expect_err("refused again, and said so");
+
+    assert_eq!(error.kind(), "sync_rejected");
+    assert_eq!(party.dialer.dials(), 2);
+    assert_eq!(party.session.watch_state(), None);
+}
+
+#[tokio::test]
+async fn a_refused_password_is_sync_rejected_and_not_remembered() {
+    let party = Party::new("refused").await;
+
+    let error = party
+        .session
+        .join(&party.invite("MovieNight", "an old password"))
+        .await
+        .expect_err("refused");
+
+    assert_eq!(error.kind(), "sync_rejected");
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.session.watch_state(), None);
+    assert!(party.launcher.launched().is_empty());
+    assert_eq!(party.dialer.closes(), 1, "the route is closed again");
+}
+
+#[tokio::test]
+async fn a_saved_party_that_refuses_the_password_is_forgotten() {
+    let party = Party::new("refused-resume").await;
+    let stale = party.invite("MovieNight", "an old password");
+    party
+        .secrets
+        .set(
+            SecretKey::LastInvite,
+            &encode_last_invite(&stale).expect("encode"),
+        )
+        .expect("seed");
+
+    let error = party
+        .session
+        .resume_last_session()
+        .await
+        .expect_err("refused");
+
+    assert_eq!(error.kind(), "sync_rejected");
+    assert_eq!(party.remembered(), None);
+}
+
+#[tokio::test]
+async fn a_missing_player_fails_before_the_host_is_dialled() {
+    let missing: PlayerSource =
+        Arc::new(|_: &ConfigStore| Err(SyncPartyError::DependencyMissing("mpv".to_owned())));
+    let party = Party::with_players("no-mpv", Some(missing)).await;
+
+    let error = party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect_err("no player");
+
+    assert_eq!(error.kind(), "dependency_missing");
+    assert_eq!(party.dialer.dials(), 0);
+    assert_eq!(party.remembered(), None);
+}
+
+#[tokio::test]
+async fn leaving_closes_the_player_and_the_route() {
+    let party = Party::new("leave").await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+
+    party.session.leave().await.expect("left");
+
+    assert!(party.player().is_closed());
+    assert_eq!(party.dialer.closes(), 1);
+    assert_eq!(party.session.watch_state(), None);
+    assert!(matches!(
+        party.bus.events().last(),
+        Some(AppEvent::WatchChanged { state: None })
+    ));
+}
+
+#[tokio::test]
+async fn a_guest_gets_the_room_from_its_own_client() {
+    let party = Party::new("guest-room").await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while party.rooms_published() == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "no room published");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn watching_the_hosted_party_twice_opens_one_player() {
+    let party = Party::new("host-twice").await;
+    party.hosting(true).await;
+
+    party.session.join_as_host().await.expect("watching");
+    party.session.join_as_host().await.expect("still watching");
+
+    assert_eq!(party.launcher.launched().len(), 1);
+    let state = party.session.watch_state().expect("watching");
+    assert_eq!(state.role, WatchRole::Host);
+    assert_eq!(
+        party.remembered(),
+        None,
+        "the host's own party is not what a restart resumes"
+    );
+    party.session.stop_hosting().await.expect("stop");
+}
+
+#[tokio::test]
+async fn watching_needs_a_party_to_be_running() {
+    let party = Party::new("host-idle").await;
+
+    let error = party.session.join_as_host().await.expect_err("no party");
+
+    assert_eq!(error.kind(), "server_not_running");
+    assert!(party.launcher.launched().is_empty());
+}
+
+#[tokio::test]
+async fn stopping_the_party_closes_the_hosts_player_first() {
+    let party = Party::new("host-stop").await;
+    party.hosting(true).await;
+    party.session.join_as_host().await.expect("watching");
+
+    party.session.stop_hosting().await.expect("stopped");
+
+    assert_eq!(
+        party.server.player_open_at_stop(),
+        vec![false],
+        "the player was closed before the server went"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert!(matches!(party.session.state().await, SessionState::Idle));
+    assert_eq!(party.server.state().await, ServerState::Stopped);
+}
+
+#[tokio::test]
+async fn discord_hears_the_party_ended_last_and_cannot_hold_it_up() {
+    let party = Party::new("host-stop-discord").await;
+    party
+        .session
+        .settings
+        .update(|settings| settings.discord_enabled = true)
+        .expect("enable discord");
+
+    // A webhook that takes the request and never answers it.
+    let webhook = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    party
+        .secrets
+        .set(
+            SecretKey::DiscordWebhook,
+            &format!("http://{}/webhook", webhook.local_addr().expect("address")),
+        )
+        .expect("webhook");
+    let (heard, server_stopped) = tokio::sync::oneshot::channel();
+    let server = Arc::clone(&party.server);
+    let swallowing = tokio::spawn(async move {
+        let (_held, _) = webhook.accept().await.expect("the post arrives");
+        let _ = heard.send(server.stops() > 0);
+        std::future::pending::<()>().await;
+    });
+    party.hosting(true).await;
+
+    tokio::time::timeout(
+        ANNOUNCE_TIMEOUT + Duration::from_secs(2),
+        party.session.stop_hosting(),
+    )
+    .await
+    .expect("stopping the party waited on Discord")
+    .expect("stopped");
+
+    assert_eq!(
+        server_stopped.await,
+        Ok(true),
+        "the party was down before Discord was told"
+    );
+    assert!(matches!(party.session.state().await, SessionState::Idle));
+    swallowing.abort();
+}
+
+#[tokio::test]
+async fn the_host_can_stop_watching_and_keep_the_party_running() {
+    let party = Party::new("host-stop-watching").await;
+    party.hosting(true).await;
+    party.session.join_as_host().await.expect("watching");
+
+    party
+        .session
+        .stop_watching()
+        .await
+        .expect("stopped watching");
+
+    assert!(party.player().is_closed());
+    assert_eq!(party.session.watch_state(), None);
+    assert!(matches!(
+        party.session.state().await,
+        SessionState::Hosting(_)
+    ));
+
+    party.session.join_as_host().await.expect("watching again");
+    assert_eq!(party.launcher.launched().len(), 2);
+    party.session.stop_hosting().await.expect("stop");
+}
+
+#[tokio::test]
+async fn stopping_watching_leaves_a_guest_in_the_party() {
+    let party = Party::new("guest-stop-watching").await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+
+    party.session.stop_watching().await.expect("a no-op");
+
+    assert!(!party.player().is_closed());
+    assert!(party.session.watch_state().is_some());
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn a_host_with_the_monitor_off_gets_the_room_from_its_own_client() {
+    let party = Party::new("host-room").await;
+    party.hosting(false).await;
+
+    party.session.join_as_host().await.expect("watching");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while party.rooms_published() == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "no room published");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    party.session.stop_hosting().await.expect("stop");
+}
+
+#[tokio::test]
+async fn a_host_with_the_monitor_on_leaves_the_room_to_it() {
+    let party = Party::new("host-monitor").await;
+    party.hosting(true).await;
+
+    party.session.join_as_host().await.expect("watching");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    party.session.stop_watching().await.expect("stop watching");
+
+    assert_eq!(party.rooms_published(), 0);
+    party.session.stop_hosting().await.expect("stop");
+}
+
+#[tokio::test]
+async fn nothing_watched_means_nothing_to_open_ready_or_reopen() {
+    let party = Party::new("not-watching").await;
+    let (_dir, path) = film("not-watching");
+
+    let opened = party.session.open_watch_file(&path).await;
+    let reopened = party.session.reopen_player().await;
+    let ready = party.session.set_ready(true);
+
+    for outcome in [opened, reopened, ready] {
+        assert_eq!(
+            outcome.err().map(|error| error.kind()),
+            Some("not_watching")
+        );
+    }
+}
+
+#[tokio::test]
+async fn only_a_file_on_disk_is_handed_to_the_player() {
+    let party = Party::new("open-file").await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+    let (dir, path) = film("open-file");
+
+    let folder = party.session.open_watch_file(&dir).await;
+    let missing = party
+        .session
+        .open_watch_file(&dir.join("nothing-here.mkv"))
+        .await;
+    party
+        .session
+        .open_watch_file(&path)
+        .await
+        .expect("a real file opens");
+
+    assert_eq!(folder.err().map(|e| e.kind()), Some("player_failed"));
+    assert_eq!(missing.err().map(|e| e.kind()), Some("player_failed"));
+    let loads: Vec<Command> = party
+        .player()
+        .commands()
+        .into_iter()
+        .filter(|command| matches!(command, Command::Load(_)))
+        .collect();
+    assert_eq!(loads, vec![Command::Load(path)]);
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn reopening_the_player_opens_the_last_file_again() {
+    let party = Party::new("reopen").await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+    let (_dir, path) = film("reopen");
+    party.session.open_watch_file(&path).await.expect("opened");
+
+    party.player().user_closes();
+    party
+        .until_watching(|state| state.player == crate::core::watch::PlayerStatus::Closed)
+        .await;
+    party.session.reopen_player().await.expect("reopened");
+
+    assert_eq!(party.launcher.launched().len(), 2);
+    assert!(party.player().commands().contains(&Command::Load(path)));
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn shutting_down_closes_the_hosts_player_and_stops_the_party() {
+    let party = Party::new("shutdown-host").await;
+    party.hosting(true).await;
+    party.session.join_as_host().await.expect("watching");
+
+    party.session.shutdown().await;
+
+    assert!(party.player().is_closed());
+    assert_eq!(party.session.watch_state(), None);
+    assert!(matches!(party.session.state().await, SessionState::Idle));
+    assert_eq!(party.server.state().await, ServerState::Stopped);
+}
+
+#[tokio::test]
+async fn shutting_down_leaves_the_party_a_guest_is_in() {
+    let party = Party::new("shutdown-guest").await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+
+    party.session.shutdown().await;
+
+    assert!(party.player().is_closed());
+    assert_eq!(party.dialer.closes(), 1);
+    assert_eq!(party.session.watch_state(), None);
+    assert!(
+        party.remembered().is_some(),
+        "quitting the app is not leaving: the party is resumed next time"
+    );
+}
+
+/// A server that takes connections and never says a word, so a join waits
+/// on it for as long as it is allowed to.
+struct Silent {
+    address: SocketAddr,
+    accepted: Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Silent {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let accepted = Arc::clone(&accepted);
+            async move {
+                let mut held = Vec::new();
+                while let Ok((stream, _)) = listener.accept().await {
+                    held.push(stream);
+                    accepted.notify_one();
+                }
+            }
+        });
+        Self {
+            address,
+            accepted,
+            task,
+        }
+    }
+}
+
+impl Drop for Silent {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A player that never finishes starting, and says when it was given up on —
+/// which, for mpv, is when it is killed.
+#[derive(Default)]
+struct StuckLauncher {
+    entered: tokio::sync::Notify,
+    abandoned: AtomicBool,
+}
+
+#[async_trait]
+impl PlayerLauncher for StuckLauncher {
+    async fn launch(&self) -> Result<(Arc<dyn Player>, PlayerEvents)> {
+        struct Abandoned<'a>(&'a AtomicBool);
+        impl Drop for Abandoned<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let _abandoned = Abandoned(&self.abandoned);
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// A player that starts at the very instant the app begins exiting.
+#[derive(Default)]
+struct LastMomentLauncher {
+    fake: FakeLauncher,
+    exiting: std::sync::OnceLock<CancellationToken>,
+}
+
+#[async_trait]
+impl PlayerLauncher for LastMomentLauncher {
+    async fn launch(&self) -> Result<(Arc<dyn Player>, PlayerEvents)> {
+        let launched = self.fake.launch().await;
+        self.exiting.get().expect("wired to the session").cancel();
+        launched
+    }
+}
+
+fn players_of<L: PlayerLauncher + 'static>(launcher: &Arc<L>) -> PlayerSource {
+    let launcher = Arc::clone(launcher);
+    Arc::new(move |_: &ConfigStore| Ok(Arc::clone(&launcher) as Arc<dyn PlayerLauncher>))
+}
+
+/// Well inside both the time a join may wait for the host and the time the
+/// app gives itself to exit: a shutdown slower than this waited for the join.
+const PROMPTLY: Duration = Duration::from_secs(3);
+
+/// Runs a join and an exit side by side. Bounded, so a join that does not hear
+/// the exit fails the test instead of hanging it.
+async fn racing<T>(join: impl Future<Output = T>, exit: impl Future<Output = ()>) -> T {
+    let (joined, ()) =
+        tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(join, exit) })
+            .await
+            .expect("the join never heard the app was exiting");
+    joined
+}
+
+#[tokio::test]
+async fn shutting_down_calls_off_a_join_the_host_has_not_answered() {
+    let party = Party::new("shutdown-connecting").await;
+    let silent = Silent::start().await;
+    party.dialer.redirect(silent.address);
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        silent.accepted.notified().await;
+        party.session.shutdown().await;
+    })
+    .await;
+
+    assert!(joined.is_err());
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        party.launcher.launched().is_empty(),
+        "no player was started"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn shutting_down_abandons_a_player_that_is_still_starting() {
+    let stuck = Arc::new(StuckLauncher::default());
+    let party = Party::with_players("shutdown-launching", Some(players_of(&stuck))).await;
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        stuck.entered.notified().await;
+        party.session.shutdown().await;
+    })
+    .await;
+
+    assert!(joined.is_err());
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        stuck.abandoned.load(Ordering::SeqCst),
+        "the launch was dropped"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn shutting_down_abandons_the_hosts_player_that_is_still_starting() {
+    let stuck = Arc::new(StuckLauncher::default());
+    let party = Party::with_players("shutdown-host-launching", Some(players_of(&stuck))).await;
+    party.hosting(true).await;
+
+    let started = tokio::time::Instant::now();
+    let watching = racing(party.session.join_as_host(), async {
+        stuck.entered.notified().await;
+        party.session.shutdown().await;
+    })
+    .await;
+
+    assert!(watching.is_err());
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        stuck.abandoned.load(Ordering::SeqCst),
+        "the launch was dropped"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert!(matches!(party.session.state().await, SessionState::Idle));
+}
+
+#[tokio::test]
+async fn a_player_that_starts_as_the_app_exits_is_closed_again() {
+    let late = Arc::new(LastMomentLauncher::default());
+    let party = Party::with_players("exit-as-started", Some(players_of(&late))).await;
+    let _ = late.exiting.set(party.session.closing.clone());
+
+    let error = party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect_err("the app is exiting");
+
+    assert_eq!(error.kind(), "sync_failed");
+    assert!(late.fake.last().expect("it started").is_closed());
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn the_hosts_player_that_starts_as_the_app_exits_is_closed_again() {
+    let late = Arc::new(LastMomentLauncher::default());
+    let party = Party::with_players("host-exit-as-started", Some(players_of(&late))).await;
+    let _ = late.exiting.set(party.session.closing.clone());
+    party.hosting(true).await;
+
+    let error = party
+        .session
+        .join_as_host()
+        .await
+        .expect_err("the app is exiting");
+
+    assert_eq!(error.kind(), "sync_failed");
+    assert!(late.fake.last().expect("it started").is_closed());
+    assert_eq!(party.session.watch_state(), None);
+}
+
+#[tokio::test]
+async fn nothing_is_joined_once_the_app_has_shut_down() {
+    let party = Party::new("join-after-shutdown").await;
+    party.session.shutdown().await;
+
+    let joined = party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await;
+
+    assert!(joined.is_err());
+    assert_eq!(party.dialer.dials(), 0);
+    assert!(party.launcher.launched().is_empty());
+}
+
+#[test]
+fn ignores_a_corrupt_saved_invite() {
+    assert!(parse_last_invite("not an invite").is_none());
+}
+
+#[test]
+fn saved_invites_round_trip() {
+    let invite = Invite {
+        endpoint: iroh::SecretKey::generate().public().to_string(),
+        password: "swordfish".to_owned(),
+        room: "MovieNight".to_owned(),
+    };
+
+    assert_eq!(
+        parse_last_invite(&encode_last_invite(&invite).expect("encode")),
+        Some(invite)
+    );
+}
+
+#[test]
+fn a_saved_invite_from_the_tailscale_era_is_discarded_rather_than_resumed() {
+    // The old shape, as it would still be sitting in the keychain after an
+    // upgrade. It has no endpoint, so there is nothing to dial; being
+    // rejected here is what makes the app clear it and start clean.
+    let legacy = r#"{"host":"100.127.167.56","alternateHosts":[],"port":8999,
+                     "password":"swordfish","room":"MovieNight"}"#;
+
+    assert!(parse_last_invite(legacy).is_none());
+}
+
+#[tokio::test]
+async fn leaving_calls_off_a_join_the_host_has_not_answered() {
+    let party = Party::new("leave-connecting").await;
+    let silent = Silent::start().await;
+    party.dialer.redirect(silent.address);
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        silent.accepted.notified().await;
+        party.session.leave().await.expect("leave");
+    })
+    .await;
+
+    let error = joined.expect_err("the join was called off");
+    assert_eq!(error.kind(), "cancelled", "{error}");
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        party.launcher.launched().is_empty(),
+        "no player was started"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+    assert_eq!(party.dialer.closes(), 1);
+}
+
+#[tokio::test]
+async fn leaving_abandons_a_player_that_is_still_starting() {
+    let stuck = Arc::new(StuckLauncher::default());
+    let party = Party::with_players("leave-launching", Some(players_of(&stuck))).await;
+    let invite = party.invite("MovieNight", PASSWORD);
+
+    let started = tokio::time::Instant::now();
+    let joined = racing(party.session.join(&invite), async {
+        stuck.entered.notified().await;
+        party.session.leave().await.expect("leave");
+    })
+    .await;
+
+    assert_eq!(joined.expect_err("called off").kind(), "cancelled");
+    assert!(started.elapsed() < PROMPTLY, "took {:?}", started.elapsed());
+    assert!(
+        stuck.abandoned.load(Ordering::SeqCst),
+        "the launch was dropped"
+    );
+    assert_eq!(party.session.watch_state(), None);
+    assert_eq!(party.remembered(), None);
+}
+
+#[tokio::test]
+async fn a_join_that_finished_is_not_called_off_by_the_next_one() {
+    let party = Party::new("leave-after-join").await;
+    let invite = party.invite("MovieNight", PASSWORD);
+    party.session.join(&invite).await.expect("joined");
+
+    // A resume of the same party is a no-op, and must leave the party it
+    // found running exactly as it was.
+    party
+        .session
+        .join(&invite)
+        .await
+        .expect("the same party again");
+
+    assert!(party.session.watch_state().is_some());
+    assert_eq!(party.launcher.launched().len(), 1);
+    party.session.leave().await.expect("leave");
+}
+
+#[tokio::test]
+async fn watching_the_hosted_party_leaves_a_guest_party_on_purpose() {
+    let party = Party::new("host-leaves-guest").await;
+    party
+        .session
+        .join(&party.invite("Elsewhere", PASSWORD))
+        .await
+        .expect("joined as a guest");
+    assert!(party.remembered().is_some());
+    party.hosting(true).await;
+
+    party.session.join_as_host().await.expect("watching");
+
+    let state = party.session.watch_state().expect("a watch");
+    assert_eq!(state.role, WatchRole::Host);
+    assert_eq!(party.dialer.closes(), 1, "the guest's route is closed");
+    assert_eq!(
+        party.remembered(),
+        None,
+        "a party left to watch one's own is not reopened on the next launch"
+    );
+    party.session.stop_watching().await.expect("stop");
+}
+
+#[tokio::test]
+async fn starting_a_party_that_is_already_up_leaves_it_running() {
+    let party = Party::new("start-twice").await;
+    party.hosting(true).await;
+    party.session.join_as_host().await.expect("watching");
+
+    let error = party
+        .session
+        .start_hosting()
+        .await
+        .expect_err("already hosting");
+
+    assert_eq!(error.kind(), "server_already_running");
+    assert!(matches!(
+        party.session.state().await,
+        SessionState::Hosting(_)
+    ));
+    assert_eq!(party.server.stops(), 0, "the running party was not touched");
+    assert!(
+        party.session.watch_state().is_some(),
+        "nor the host's own player"
+    );
+    party.session.stop_watching().await.expect("stop");
+}
+
+#[tokio::test]
+async fn reopening_the_player_starts_the_mpv_located_since() {
+    let before = Arc::new(FakeLauncher::new());
+    let after = Arc::new(FakeLauncher::new());
+    let located = Arc::new(AtomicBool::new(false));
+    let players: PlayerSource = {
+        let (before, after, located) = (
+            Arc::clone(&before),
+            Arc::clone(&after),
+            Arc::clone(&located),
+        );
+        Arc::new(move |_: &ConfigStore| {
+            let launcher = if located.load(Ordering::SeqCst) {
+                Arc::clone(&after)
+            } else {
+                Arc::clone(&before)
+            };
+            Ok(launcher as Arc<dyn PlayerLauncher>)
+        })
+    };
+    let party = Party::with_players("reopen-relocated", Some(players)).await;
+    party
+        .session
+        .join(&party.invite("MovieNight", PASSWORD))
+        .await
+        .expect("joined");
+
+    before.last().expect("launched").user_closes();
+    party
+        .until_watching(|state| state.player == crate::core::watch::PlayerStatus::Closed)
+        .await;
+    located.store(true, Ordering::SeqCst);
+    party.session.reopen_player().await.expect("reopened");
+
+    assert_eq!(before.launched().len(), 1);
+    assert_eq!(
+        after.launched().len(),
+        1,
+        "the player located after the first launch is the one reopened"
+    );
+    party.session.leave().await.expect("leave");
+}
+
+/// A server whose start waits until it is let go, so a stop can arrive while
+/// a party is still coming up.
+#[derive(Default)]
+struct GatedServer {
+    starts: AtomicUsize,
+    stops: AtomicUsize,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ServerController for GatedServer {
+    async fn start(&self, _config: &ServerConfig) -> Result<()> {
+        self.release.notified().await;
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn state(&self) -> ServerState {
+        ServerState::Stopped
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_party_that_is_still_starting_calls_it_off() {
+    let (settings, secrets) = stores("stop-while-starting");
+    let bus = Arc::new(RecordingEventBus::default());
+    let server = Arc::new(GatedServer::default());
+    let session = PartySession::new(
+        settings,
+        Arc::clone(&secrets),
+        Arc::clone(&server) as Arc<dyn ServerController>,
+        Arc::new(DiscordNotifier::new(secrets)),
+        Arc::clone(&bus) as Arc<dyn EventBus>,
+        Arc::new(NullControl),
+        players_from(&Arc::new(FakeLauncher::new())),
+    );
+
+    let starting = async {
+        tokio::time::timeout(Duration::from_secs(40), session.start_hosting())
+            .await
+            .expect("the start never finished")
+    };
+    let stopping = async {
+        while !matches!(session.state().await, SessionState::Starting { .. }) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let stopped = session.stop_hosting();
+        tokio::pin!(stopped);
+        // Wherever the start is — waiting for the network, or for the server
+        // — it has to hear the stop rather than carry on.
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut stopped).await;
+        server.release.notify_one();
+        match early {
+            Ok(stopped) => stopped,
+            Err(_) => stopped.await,
+        }
+    };
+    let (started, stopped) = tokio::join!(starting, stopping);
+
+    stopped.expect("the stop succeeds");
+    let error = started.expect_err("the start was called off");
+    if error.kind().starts_with("endpoint_") {
+        // No network here: the endpoint failed before the stop arrived, and
+        // the race this is about never happened.
+        eprintln!("skipped: {error}");
+        return;
+    }
+    assert_eq!(error.kind(), "cancelled", "{error}");
+    assert!(matches!(session.state().await, SessionState::Idle));
+    assert!(
+        !bus.events().iter().any(|event| matches!(
+            event,
+            AppEvent::SessionChanged {
+                state: SessionState::Hosting(_)
+            }
+        )),
+        "the party never went live"
+    );
+    assert!(
+        server.stops.load(Ordering::SeqCst) >= server.starts.load(Ordering::SeqCst),
+        "nothing is left running"
+    );
+}

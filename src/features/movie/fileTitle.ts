@@ -25,7 +25,27 @@ const TAIL = new RegExp(
   "i",
 );
 
-const EXTENSION = /\.(mkv|mp4|avi|m4v|mov|wmv|flv|webm|ts|m2ts|mpg|mpeg)$/i;
+/**
+ * What counts as a video file: the tail stripped from a release name here, and
+ * the filter on the watch card's file picker, so the two never disagree about
+ * what a movie looks like.
+ */
+export const VIDEO_EXTENSIONS = [
+  "mkv",
+  "mp4",
+  "avi",
+  "m4v",
+  "mov",
+  "wmv",
+  "flv",
+  "webm",
+  "ts",
+  "m2ts",
+  "mpg",
+  "mpeg",
+];
+
+const EXTENSION = new RegExp(`\\.(${VIDEO_EXTENSIONS.join("|")})$`, "i");
 
 export function titleFromFileName(fileName: string): string {
   // A path, if the monitor reported one — only the last segment is the name.

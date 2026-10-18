@@ -46,13 +46,10 @@ const debUrl = `https://github.com/mertemr/syncparty/releases/download/v${versio
 /**
  * One definition, rendered into both files.
  *
- * `syncplay` is a hard dependency because it is the client the guest half
- * launches, and `pyside6`/`shiboken6` come with it because Arch ships them as
- * optdepends — a bare `pacman -S syncplay` installs a client with no GUI.
- *
- * A player has to be named too: Arch lists `mpv` and `vlc` as optdepends of
- * `syncplay`, so neither is guaranteed. `mpv` is the hard one because the app
- * prefers it; `vlc` stays optional.
+ * `mpv` is the one runtime dependency syncparty does not ship: the server and
+ * the client that keeps it in step are both inside the binary. It is a hard
+ * dependency for the same reason it is one in the `.deb` — a guest without a
+ * player has nothing to join with.
  */
 const pkg = {
   pkgname: "syncparty-bin",
@@ -62,19 +59,8 @@ const pkg = {
   arch: ["x86_64"],
   url: "https://github.com/mertemr/syncparty",
   license: ["MIT"],
-  depends: [
-    "webkit2gtk-4.1",
-    "gtk3",
-    "libayatana-appindicator",
-    "syncplay",
-    "pyside6",
-    "shiboken6",
-    "mpv",
-  ],
-  optdepends: [
-    "vlc: alternative to mpv",
-    "gnome-keyring: keep secrets in the keyring instead of a file",
-  ],
+  depends: ["webkit2gtk-4.1", "gtk3", "libayatana-appindicator", "mpv"],
+  optdepends: ["gnome-keyring: keep secrets in the keyring instead of a file"],
   provides: ["syncparty"],
   conflicts: ["syncparty"],
   options: ["!strip", "!debug"],
@@ -112,9 +98,9 @@ ${array("sha256sums", pkg.sha256sums)}
 package() {
   # The .deb already lays out /usr exactly as this package should: the binary,
   # the .desktop file (carrying MimeType=x-scheme-handler/syncparty, which is
-  # what makes invite links work), the icons, and the bundled Syncplay server
-  # under /usr/lib/syncparty. Unpacking it wholesale keeps Arch and Debian on
-  # a byte-identical install rather than re-deriving the layout here.
+  # what makes invite links work) and the icons. Unpacking it wholesale keeps
+  # Arch and Debian on a byte-identical install rather than re-deriving the
+  # layout here.
   #
   # Two passes: the outer archive is \`ar\`, and data.tar.* inside it holds the
   # tree. bsdtar reads both and works out the compression on its own.

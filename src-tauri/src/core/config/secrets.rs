@@ -4,7 +4,8 @@
 //! next to the script and passed it on the command line, where any local
 //! process could read it out of the process table. Everything sensitive now
 //! lives in Windows Credential Manager, the macOS Keychain, or the Secret
-//! Service on Linux, and reaches the server through environment variables.
+//! Service on Linux, and reaches the server and the sync client in memory —
+//! both run inside syncparty, so no secret is ever on a command line.
 //!
 //! Linux is the reason for the fallback. Secret Service is a daemon
 //! (gnome-keyring, kwallet, KeePassXC) and a machine running a minimal window
@@ -34,7 +35,7 @@ const SERVICE: &str = "syncparty";
 /// renaming one orphans the old entry — add a migration instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretKey {
-    /// Password clients must supply to reach the Syncplay server.
+    /// Password clients must supply to reach the sync server.
     ServerPassword,
     /// Salt that keeps room operator passwords valid across restarts.
     ServerSalt,
@@ -106,6 +107,16 @@ impl SecretStore {
         };
 
         Self { backend, file }
+    }
+
+    /// A store that never touches the OS keychain, for tests: one that did
+    /// would read and overwrite the real secrets of whoever runs them.
+    #[cfg(test)]
+    pub(crate) fn in_file(paths: AppPaths) -> Self {
+        Self {
+            backend: StorageBackend::File,
+            file: FileStore::new(paths.secrets_file()),
+        }
     }
 
     pub fn backend(&self) -> StorageBackend {

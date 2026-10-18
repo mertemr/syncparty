@@ -4,6 +4,9 @@ version = "0.8.0"
 description = "Synchronised movie nights, peer to peer"
 authors = ["Taha Çeken", "Mert Emir <48881002+mertemr@users.noreply.github.com>"]
 edition = "2021"
+# What the locked dependencies need — iroh 1.0 asks for 1.91 — so an older
+# distribution toolchain is told so up front rather than deep in a build.
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/mertemr/syncparty"
 
@@ -39,6 +42,9 @@ tokio = { version = "1", features = [
     "process",
     "fs",
 ] }
+# For `CancellationToken` alone: how an app that is exiting calls off a watch
+# that is still connecting, or still starting mpv.
+tokio-util = "0.7"
 async-trait = "0.1"
 futures = "0.3"
 thiserror = "2"
@@ -57,12 +63,10 @@ keyring = { version = "3", features = [
 ] }
 base64 = "0.23"
 md-5 = "0.10"
-# Controlled-room names hash the salt and password through `sha1` and `sha2`.
+# Controlled-room names hash the salt and password through `sha1` and `sha2`
+# (`core::syncplay::server::auth`), the way Syncplay's server derives them.
 # Same RustCrypto family as md-5, so the `Digest` usage matches.
 sha1 = "0.10"
-# `sha2` also verifies the pinned Syncplay source archive after download. The
-# tarball is fetched over TLS from GitHub, but TLS only proves who served the
-# bytes, not that they are the bytes this release was tested against.
 sha2 = "0.10"
 # rustls rather than the platform TLS stack, so the same certificate
 # behaviour ships on Windows and macOS.
@@ -81,8 +85,6 @@ ts-rs = "12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 which = "8"
 getrandom = "0.4"
-flate2 = "1"
-tar = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"

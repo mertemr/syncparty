@@ -12,6 +12,7 @@ use crate::core::deps::{DependencyId, PreflightReport};
 use crate::core::movie_vote::MovieVoteSnapshot;
 use crate::core::session::SessionState;
 use crate::core::syncplay::RoomSnapshot;
+use crate::core::watch::WatchState;
 
 /// Everything the frontend can be told about. Tagged so TypeScript gets a
 /// discriminated union it can exhaustively match on.
@@ -38,10 +39,13 @@ pub enum AppEvent {
     /// The session state machine advanced.
     SessionChanged { state: SessionState },
 
-    /// Live room contents, pushed by the monitor rather than polled.
+    /// Live room contents, pushed rather than polled. One source at a time:
+    /// the room monitor on a host that has it on, otherwise this machine's
+    /// own sync client — a guest's always, a host's while it is watching.
     RoomUpdated { snapshot: RoomSnapshot },
 
-    /// A line the Syncplay server wrote to stdout or stderr.
+    /// A line of the sync server's diagnostics: who joined, who left, what
+    /// failed.
     ServerLog { line: String, is_error: bool },
 
     /// The app was opened through a `syncparty://` link. The UI switches to
@@ -58,6 +62,11 @@ pub enum AppEvent {
     /// `RoomUpdated`. `None` once there is no active vote (cancelled, or
     /// never started).
     MovieVoteChanged { snapshot: Option<MovieVoteSnapshot> },
+
+    /// This machine's own watching changed — connected, reconnecting, a file
+    /// opened, the player closed. Always the whole state, like
+    /// `RoomUpdated`; `None` once nothing is being watched here.
+    WatchChanged { state: Option<WatchState> },
 }
 
 /// Publishes events to whoever is listening. Implemented by the Tauri bridge

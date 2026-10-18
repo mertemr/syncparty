@@ -10,6 +10,7 @@ export type DependencyStatus = { "state": "missing" } | { "state": "installed",
 version: string | null, path: string | null, } | { "state": "unusable", path: string, 
 /**
  * The last line the program printed before giving up — the part that
- * names the problem, without the traceback around it.
+ * names the problem, without the traceback around it — or, for a
+ * program that runs fine but is something else, what it says it is.
  */
 reason: string, };

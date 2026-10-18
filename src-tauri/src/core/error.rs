@@ -14,6 +14,11 @@ pub enum SyncPartyError {
     #[error("{0} is not installed")]
     DependencyMissing(String),
 
+    /// A location the user chose for a dependency that does not hold it, or
+    /// holds something that cannot be used. The message is the whole reason.
+    #[error("{0}")]
+    InvalidLocation(String),
+
     #[error("could not install {name}: {reason}")]
     InstallFailed { name: String, reason: String },
 
@@ -32,10 +37,10 @@ pub enum SyncPartyError {
     )]
     EndpointOffline,
 
-    #[error("the Syncplay server is not running")]
+    #[error("the sync server is not running")]
     ServerNotRunning,
 
-    #[error("the Syncplay server is already running")]
+    #[error("the sync server is already running")]
     ServerAlreadyRunning,
 
     #[error("not currently in a party")]
@@ -44,7 +49,7 @@ pub enum SyncPartyError {
     #[error("TMDB is not configured — add an API key in Settings")]
     MovieProviderNotConfigured,
 
-    #[error("the Syncplay server failed to start: {0}")]
+    #[error("the sync server failed to start: {0}")]
     ServerStartFailed(String),
 
     #[error("the invite code is not valid: {0}")]
@@ -62,6 +67,28 @@ pub enum SyncPartyError {
          ask them to check syncparty is still running, then try again."
     )]
     PartyUnreachable { host: String, reason: String },
+
+    /// mpv could not be started, stopped answering, or refused a command.
+    #[error("the player failed: {0}")]
+    PlayerFailed(String),
+
+    /// The sync server turned this client away — almost always a password
+    /// that does not match, which means an invite from an older party.
+    #[error("the party did not let this machine in: {0}")]
+    SyncRejected(String),
+
+    /// The sync server could not be reached or stopped answering.
+    #[error("could not connect to the party: {0}")]
+    SyncFailed(String),
+
+    #[error("nothing is being watched on this machine")]
+    NotWatching,
+
+    /// The user called the operation off before it finished — stopped a
+    /// party that was still starting, or left one that was still being
+    /// joined. Not a failure, so the UI says nothing about it.
+    #[error("called off before it finished")]
+    Cancelled,
 
     #[error("{command} exited with status {status}: {stderr}")]
     CommandFailed {
@@ -92,6 +119,7 @@ impl SyncPartyError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::DependencyMissing(_) => "dependency_missing",
+            Self::InvalidLocation(_) => "invalid_location",
             Self::InstallFailed { .. } => "install_failed",
             Self::InstallUnsupported { .. } => "install_unsupported",
             Self::EndpointBindFailed(_) => "endpoint_bind_failed",
@@ -104,6 +132,11 @@ impl SyncPartyError {
             Self::InvalidInvite(_) => "invalid_invite",
             Self::MonitorFailed(_) => "monitor_failed",
             Self::PartyUnreachable { .. } => "party_unreachable",
+            Self::PlayerFailed(_) => "player_failed",
+            Self::SyncRejected(_) => "sync_rejected",
+            Self::SyncFailed(_) => "sync_failed",
+            Self::NotWatching => "not_watching",
+            Self::Cancelled => "cancelled",
             Self::CommandFailed { .. } => "command_failed",
             Self::Config(_) => "config",
             Self::Secret(_) => "secret",
@@ -138,8 +171,14 @@ impl From<serde_json::Error> for SyncPartyError {
     }
 }
 
+/// The URL comes off before anything is turned into text. Every request
+/// syncparty makes carries a secret in it — the Discord webhook token is part
+/// of the path, the TMDB key is a query parameter — and reqwest names the URL
+/// in its message, which would carry the secret into the failure banner, the
+/// event stream and the logs.
 impl From<reqwest::Error> for SyncPartyError {
     fn from(value: reqwest::Error) -> Self {
+        let value = value.without_url();
         let mut message = value.to_string();
         let mut source = std::error::Error::source(&value);
         while let Some(err) = source {
@@ -184,5 +223,22 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("handshake timed out"), "{message}");
         assert_eq!(error.kind(), "party_unreachable");
+    }
+
+    /// A request that fails says why, never where it was going — the where
+    /// is a webhook token or an API key.
+    #[tokio::test]
+    async fn a_failed_request_does_not_repeat_the_secret_in_its_url() {
+        // Port 1 on loopback refuses at once, so this needs no network.
+        let error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/api/webhooks/42/hunter2-token?api_key=hunter2-key")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+
+        let message = SyncPartyError::from(error).to_string();
+
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(!message.contains("127.0.0.1:1/"), "{message}");
     }
 }

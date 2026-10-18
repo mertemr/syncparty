@@ -12,7 +12,7 @@
 //! host could not know. An iroh endpoint id has no such problem: it is the
 //! address everywhere, from every network, and it does not change when the
 //! host's connection does. The port went the same way, since guests reach the
-//! Syncplay server through the host's tunnel rather than by dialling it.
+//! sync server through the host's tunnel rather than by dialling it.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

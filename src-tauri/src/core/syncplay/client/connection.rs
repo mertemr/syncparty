@@ -46,6 +46,11 @@ pub(super) enum Command {
 /// upstream's 16 KiB, so a big room list is never mistaken for an attack.
 const MAX_LINE_LENGTH: usize = 1 << 20;
 
+/// How many lines from the server may wait to be handled. Bounded so that a
+/// server sending faster than the client can keep up is slowed down by TCP
+/// rather than buffered without limit in this process.
+const INBOUND_CAPACITY: usize = 256;
+
 /// Backoff stops doubling after this many attempts.
 const MAX_BACKOFF_EXPONENT: u32 = 5;
 
@@ -61,7 +66,7 @@ enum Inbound {
 /// One TCP connection: a reader task and a writer task, both ended when this
 /// is dropped, which is what closes the socket.
 struct Link {
-    inbound: mpsc::UnboundedReceiver<Inbound>,
+    inbound: mpsc::Receiver<Inbound>,
     outbound: mpsc::UnboundedSender<String>,
     tasks: [JoinHandle<()>; 2],
     /// When the server last sent a `State` — or when the connection opened,
@@ -76,7 +81,7 @@ impl Link {
         let _ = stream.set_nodelay(true);
         let (read, write) = stream.into_split();
 
-        let (inbound_sender, inbound) = mpsc::unbounded_channel();
+        let (inbound_sender, inbound) = mpsc::channel(INBOUND_CAPACITY);
         let (outbound, outbound_receiver) = mpsc::unbounded_channel();
         let reader = tokio::spawn(read_lines(read, inbound_sender.clone()));
         let writer = tokio::spawn(write_lines(
@@ -586,7 +591,7 @@ async fn sleep_until(deadline: Option<Instant>) {
 
 /// Splits the stream into lines, accepting a bare `\n` as well as upstream's
 /// `\r\n`, and reports how it ended.
-async fn read_lines(read: OwnedReadHalf, inbound: mpsc::UnboundedSender<Inbound>) {
+async fn read_lines(read: OwnedReadHalf, inbound: mpsc::Sender<Inbound>) {
     let mut reader = BufReader::new(read);
     let mut line = Vec::new();
 
@@ -621,18 +626,18 @@ async fn read_lines(read: OwnedReadHalf, inbound: mpsc::UnboundedSender<Inbound>
         let text = String::from_utf8_lossy(&line);
         let text = text.strip_suffix('\r').unwrap_or(&text).to_owned();
         line.clear();
-        if inbound.send(Inbound::Line(text)).is_err() {
+        if inbound.send(Inbound::Line(text)).await.is_err() {
             return;
         }
     };
 
-    let _ = inbound.send(Inbound::Closed(reason));
+    let _ = inbound.send(Inbound::Closed(reason)).await;
 }
 
 async fn write_lines(
     mut write: OwnedWriteHalf,
     mut outbound: mpsc::UnboundedReceiver<String>,
-    inbound: mpsc::UnboundedSender<Inbound>,
+    inbound: mpsc::Sender<Inbound>,
     timeout: Duration,
 ) {
     while let Some(line) = outbound.recv().await {
@@ -642,7 +647,7 @@ async fn write_lines(
             Err(_) => "the server stopped reading".to_owned(),
         };
 
-        let _ = inbound.send(Inbound::Closed(reason));
+        let _ = inbound.send(Inbound::Closed(reason)).await;
         return;
     }
 }

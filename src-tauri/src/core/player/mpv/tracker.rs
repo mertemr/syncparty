@@ -93,6 +93,9 @@ pub(super) enum Effect {
 struct Expected<T> {
     value: T,
     deadline: Instant,
+    /// mpv has accepted the command, so the value has been set — even if this
+    /// client never hears it, because something set it again first.
+    accepted: bool,
 }
 
 struct ExpectedSeek {
@@ -249,6 +252,7 @@ impl Tracker {
         self.pauses.push(Expected {
             value: paused,
             deadline: now + PAUSE_PATIENCE,
+            accepted: false,
         });
         true
     }
@@ -260,6 +264,7 @@ impl Tracker {
         self.speeds.push(Expected {
             value: speed,
             deadline: now + SPEED_PATIENCE,
+            accepted: false,
         });
         true
     }
@@ -332,6 +337,15 @@ impl Tracker {
             Effect::None => {}
             Effect::Pause(paused) => {
                 if accepted {
+                    // Replies come in order, so this answers the oldest
+                    // command for this value still waiting on one.
+                    if let Some(expected) = self
+                        .pauses
+                        .iter_mut()
+                        .find(|expected| expected.value == paused && !expected.accepted)
+                    {
+                        expected.accepted = true;
+                    }
                     self.mirror(now, |snapshot| snapshot.paused = paused);
                 } else {
                     withdraw(&mut self.pauses, |value| *value == paused);
@@ -421,8 +435,30 @@ impl Tracker {
     /// Lets expectations and held events run out. Called at
     /// [`Tracker::next_deadline`].
     pub(super) fn on_tick(&mut self, now: Instant) {
-        if expire(&mut self.pauses, now) && self.pauses.is_empty() {
-            let reported = self.reported.paused;
+        // A change of ours mpv accepted and never reported, with mpv still
+        // saying the opposite: within the time mpv takes to tell this client
+        // anything, somebody set it back — the room resumed and the user
+        // paused in the same instant — and mpv, which reports only the latest
+        // value, had nothing new to say. Ours did happen and theirs is a
+        // change too. At the end of the file mpv accepts an unpause and does
+        // nothing, which is the one time silence means just that.
+        let reported = self.reported.paused;
+        let overtaken = self.pauses.iter().rposition(|expected| {
+            expected.deadline <= now && expected.accepted && expected.value != reported
+        });
+        let overtaken = overtaken.filter(|_| !self.snapshot.eof_reached);
+        if let Some(index) = overtaken {
+            let ours = self.pauses[index].value;
+            self.pauses.drain(..=index);
+            self.events.push(PlayerEvent::PauseChanged {
+                paused: ours,
+                origin: Origin::Ours,
+            });
+            self.external_pause(reported, now);
+        }
+
+        let expired = expire(&mut self.pauses, now);
+        if (expired || overtaken.is_some()) && self.pauses.is_empty() {
             self.mirror(now, |snapshot| snapshot.paused = reported);
         }
         if expire(&mut self.speeds, now) && self.speeds.is_empty() {
@@ -574,6 +610,29 @@ impl Tracker {
             return;
         }
 
+        // mpv tells a client only the latest value of what it observes. A
+        // value that contradicts a change of ours mpv has already accepted
+        // means something set it again before this client heard about ours —
+        // the user pausing in the same instant the room resumed, typically.
+        // Ours did happen, and what is reported now is somebody else's, even
+        // though it matches the last value this client was told.
+        let changed = match self
+            .pauses
+            .iter()
+            .rposition(|expected| expected.accepted && expected.value != paused)
+        {
+            Some(index) => {
+                let ours = self.pauses[index].value;
+                self.pauses.drain(..=index);
+                self.events.push(PlayerEvent::PauseChanged {
+                    paused: ours,
+                    origin: Origin::Ours,
+                });
+                true
+            }
+            None => changed,
+        };
+
         // While something syncparty asked for is still due, the mirror keeps
         // showing it; mpv applied that command after whatever this was.
         if self.pauses.is_empty() {
@@ -583,6 +642,12 @@ impl Tracker {
             return;
         }
 
+        self.external_pause(paused, now);
+    }
+
+    /// A pause change that was not syncparty's. A pause is held a moment
+    /// first, in case it is the end of the file arriving in the other order.
+    fn external_pause(&mut self, paused: bool, now: Instant) {
         if paused {
             match self.eof {
                 Eof::AwaitingPause(_) => self.end_of_file(),
@@ -1084,6 +1149,73 @@ mod tests {
 
         assert!(tracker.snapshot().paused);
         assert!(events(&mut tracker).is_empty());
+    }
+
+    /// mpv reports only the latest value. A resume of ours that it accepted,
+    /// overtaken by the user pausing before this client heard of the resume,
+    /// arrives as "paused" — the value this client last saw — and is still
+    /// two changes: ours, then the user's.
+    #[test]
+    fn a_change_of_ours_overtaken_before_it_was_reported_is_still_two_changes() {
+        let at = Instant::now();
+        let mut tracker = loaded(at, 10.0);
+
+        assert!(tracker.expect_pause(false, at));
+        tracker.on_reply(Effect::Pause(false), Some(&Value::Null), at);
+        let overtaken = at + Duration::from_millis(5);
+        property(&mut tracker, "pause", json!(true), overtaken);
+
+        assert_eq!(
+            events(&mut tracker),
+            [PlayerEvent::PauseChanged {
+                paused: false,
+                origin: Origin::Ours
+            }]
+        );
+        assert!(tracker.snapshot().paused, "the mirror follows mpv at once");
+
+        // The user's pause, held a moment in case it is the end of the file.
+        tracker.on_tick(overtaken + EOF_PAUSE_HOLD + Duration::from_millis(1));
+        assert_eq!(
+            events(&mut tracker),
+            [PlayerEvent::PauseChanged {
+                paused: true,
+                origin: Origin::External
+            }]
+        );
+    }
+
+    /// The same race, closer still: the user's pause lands before mpv has
+    /// told this client anything, so the value it last reported never
+    /// changed and no event comes at all. An accepted resume running out
+    /// against a paused mpv, away from the end of the file, is that race.
+    #[test]
+    fn a_change_of_ours_overtaken_without_a_word_from_mpv_is_still_two_changes() {
+        let at = Instant::now();
+        let mut tracker = loaded(at, 10.0);
+
+        assert!(tracker.expect_pause(false, at));
+        tracker.on_reply(Effect::Pause(false), Some(&Value::Null), at);
+        let later = at + PAUSE_PATIENCE + Duration::from_millis(1);
+        tracker.on_tick(later);
+
+        assert_eq!(
+            events(&mut tracker),
+            [PlayerEvent::PauseChanged {
+                paused: false,
+                origin: Origin::Ours
+            }]
+        );
+        assert!(tracker.snapshot().paused);
+
+        tracker.on_tick(later + EOF_PAUSE_HOLD + Duration::from_millis(1));
+        assert_eq!(
+            events(&mut tracker),
+            [PlayerEvent::PauseChanged {
+                paused: true,
+                origin: Origin::External
+            }]
+        );
     }
 
     #[test]

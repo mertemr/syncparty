@@ -226,10 +226,12 @@ async fn real_mpv_pauses_seeks_and_changes_speed_on_our_word_and_says_so_as_ours
     assert!(skipped.is_empty(), "{skipped:?}");
 
     player.seek(10.0).await.expect("sought");
-    assert_eq!(
-        player.snapshot().time_pos,
-        Some(10.0),
-        "mirrored when accepted"
+    // The target, or just past it: the film is playing, and on a busy machine
+    // mpv's first report after the seek can land before this looks.
+    let mirrored = player.snapshot().time_pos.expect("mirrored when accepted");
+    assert!(
+        near(mirrored, 10.0, 0.05),
+        "mirrored when accepted: {mirrored}"
     );
     let (position, skipped) = wait_for(&mut events, SOON, |event| match event {
         PlayerEvent::Seeked { position, origin } => Some((*position, *origin)),
@@ -494,8 +496,20 @@ async fn real_mpv_reports_a_users_pause_before_our_resume_that_follows_it() {
     }
     player.set_paused(false).await.expect("resumed again");
 
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Waited for rather than slept on: the held pause is let go after the
+    // end-of-file hold, and on a busy machine that is later than any fixed
+    // pause a test could pick. A little quiet afterwards catches anything
+    // extra arriving behind the three expected.
     let mut pauses = Vec::new();
+    let deadline = Instant::now() + SOON;
+    while pauses.len() < 3 && Instant::now() < deadline {
+        if let Ok(Some(PlayerEvent::PauseChanged { paused, origin })) =
+            tokio::time::timeout(Duration::from_millis(50), events.recv()).await
+        {
+            pauses.push((paused, origin));
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
     while let Ok(event) = events.try_recv() {
         if let PlayerEvent::PauseChanged { paused, origin } = event {
             pauses.push((paused, origin));

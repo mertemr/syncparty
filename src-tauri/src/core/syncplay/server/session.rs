@@ -556,6 +556,13 @@ impl Session {
             Some(file) => {
                 let mut wire = value.clone();
                 wire["name"] = json!(file.name);
+                match (&file.size, wire.as_object_mut()) {
+                    (Some(size), _) => wire["size"] = size.clone(),
+                    (None, Some(object)) => {
+                        object.remove("size");
+                    }
+                    (None, None) => {}
+                }
                 wire
             }
             None => json!({}),
@@ -891,8 +898,29 @@ fn opened_file(value: &Value) -> Option<OpenFile> {
     Some(OpenFile {
         name: truncate(name, ServerFeatures::supported().max_filename_length),
         duration: value["duration"].as_f64(),
-        size: value.get("size").cloned(),
+        size: plausible_size(value.get("size")),
     })
+}
+
+/// The longest text kept as a file size. Clients send a byte count, or a
+/// short hash of one when they keep sizes private.
+const MAX_SIZE_TEXT: usize = 64;
+
+/// A file size worth repeating.
+///
+/// The server never reads it, but it does repeat it — to the room on every
+/// change and to every newcomer in every `List`. Anything that is not
+/// plausibly a size is dropped rather than carried, or a few guests sending
+/// sixteen kilobytes each could make that `List` too long for a client to
+/// accept, and keep every newcomer bouncing off the room.
+fn plausible_size(value: Option<&Value>) -> Option<Value> {
+    match value? {
+        Value::Number(size) => Some(Value::Number(size.clone())),
+        Value::String(size) if size.chars().count() <= MAX_SIZE_TEXT => {
+            Some(Value::String(size.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// Cut to the length the greeting claims, by characters rather than bytes.
@@ -1557,6 +1585,42 @@ mod tests {
 
         let list = read_until(&mut ahmet, "Film.mkv").await;
         assert!(list.contains("7200"), "got {list}");
+    }
+
+    /// A size is repeated to every newcomer, so only something that could be
+    /// one is kept: a number, or a short hash.
+    #[tokio::test]
+    async fn a_size_that_cannot_be_one_is_not_repeated() {
+        let (mut ahmet, _mehmet) = two_in_a_room().await;
+        let padding = "x".repeat(10_000);
+
+        write_line(
+            &mut ahmet,
+            &format!(
+                r#"{{"Set":{{"file":{{"name":"Film.mkv","duration":7200,"size":"{padding}"}}}}}}"#
+            ),
+        )
+        .await;
+        let announced = read_until(&mut ahmet, "Film.mkv").await;
+        assert!(
+            !announced.contains(&padding),
+            "relayed: {} bytes",
+            announced.len()
+        );
+
+        write_line(&mut ahmet, r#"{"List":null}"#).await;
+        let list = read_until(&mut ahmet, r#""List""#).await;
+        assert!(list.contains("Film.mkv"));
+        assert!(!list.contains(&padding), "listed: {} bytes", list.len());
+
+        write_line(
+            &mut ahmet,
+            r#"{"Set":{"file":{"name":"Film.mkv","duration":7200,"size":734003200}}}"#,
+        )
+        .await;
+        write_line(&mut ahmet, r#"{"List":null}"#).await;
+        let list = read_until(&mut ahmet, "734003200").await;
+        assert!(list.contains(r#""size":734003200"#), "got {list}");
     }
 
     /// `{}` is how a client says it closed its file. Stored as a file with no

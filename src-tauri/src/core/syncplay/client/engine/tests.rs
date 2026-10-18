@@ -123,6 +123,13 @@ fn only_state(step: &Step) -> &ClientState {
     states[0]
 }
 
+/// Whether anything a step sent would pause the room.
+fn pauses(step: &Step) -> bool {
+    states(step)
+        .iter()
+        .any(|state| state.playstate.is_some_and(|playstate| playstate.paused))
+}
+
 fn playstate(step: &Step) -> Option<ClientPlaystate> {
     only_state(step).playstate
 }
@@ -1353,6 +1360,44 @@ fn a_joiner_whose_file_ends_before_the_room_neither_rewinds_nor_pauses_it() {
         // frame would drag everyone else back to it.
         assert!(playstate.position > 6000.0, "{state:?}");
         assert_eq!(state.ignoring_on_the_fly, (None, None), "{state:?}");
+    }
+}
+
+/// A copy that runs out by playing — a shorter cut than everyone else's —
+/// pauses the room once, the way the end of any film does. Somebody pressing
+/// play after that means the room plays on past it: mpv ignores the unpause
+/// on its last frame, and this client has nothing to say about that.
+#[test]
+fn a_copy_that_ran_out_pauses_the_room_once_and_not_on_every_play() {
+    let mut session = Session::watching_film(110.0, false, 120.0);
+    session.set_ready_echo("alice", true);
+
+    session.after(8750);
+    let ended = session.poll_ended();
+    assert_eq!(playstate(&ended).map(|state| state.paused), Some(true));
+    session.receive(with_ignoring(
+        state_value(120.0, true, None, Some("alice")),
+        Some(1),
+        Some(1),
+    ));
+
+    for round in 0..3u64 {
+        session.after(1000);
+        let unpaused = session.receive(with_ignoring(
+            state_value(120.0, false, None, Some("bob")),
+            Some(2 + round),
+            None,
+        ));
+        assert!(!pauses(&unpaused), "round {round}: {unpaused:?}");
+
+        for _ in 0..15 {
+            session.after(100);
+            let polled = session.poll_ended();
+            assert!(
+                !pauses(&polled),
+                "round {round}: the room was paused again: {polled:?}"
+            );
+        }
     }
 }
 

@@ -166,9 +166,10 @@ pub(crate) struct Engine {
     speed_changed: bool,
     behind_first_detected: Option<Instant>,
     position_before_last_seek: f64,
-    /// The last seek this client gave the player was to the end of its file
-    /// or beyond. mpv parks on the last frame there, paused, and ignores any
-    /// unpause, so nothing it reports from there is the user's doing.
+    /// The player sits on the last frame of its file — sent there by a seek
+    /// to the end or beyond, or run out by playing. mpv parks there, paused,
+    /// and ignores any unpause, so nothing it reports from there is the
+    /// user's doing.
     parked_at_the_end: bool,
 
     // Readiness and the room list.
@@ -692,6 +693,15 @@ impl Engine {
             self.send_state(Some(local), seeked, None, true, epoch, &mut step);
         }
 
+        // A file that ran out by playing now sits on its last frame, where mpv
+        // ignores every unpause. Its end has reached the room — just now, or
+        // already if the room was paused — so from here on it is parked, as
+        // if a seek had sent it there. Otherwise a shorter copy would pause
+        // the room again every time somebody pressed play.
+        if at_the_end && snapshot.eof_reached && self.last_global_update.is_some() {
+            self.parked_at_the_end = true;
+        }
+
         step
     }
 
@@ -708,7 +718,8 @@ impl Engine {
     ///   opened. mpv swaps files without closing the old one first, so the
     ///   new file is on screen, at its start, before its load is reported —
     ///   upstream stops believing the player the moment the swap begins;
-    /// - while it is parked on the last frame by a seek past the end.
+    /// - while it is parked on the last frame, by a seek past the end or by
+    ///   having run out.
     fn reported(&mut self, snapshot: &PlayerSnapshot, now: Instant) -> (bool, f64) {
         let room = (self.global_paused_now(), self.global_position_at(now));
         let Some(file) = self.file.as_ref() else {

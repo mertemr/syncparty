@@ -1191,10 +1191,14 @@ mod tests {
         assert!(user.render_state(&heartbeat(), false, now).is_some());
     }
 
-    /// Upstream clears both even when it sends nothing, and the client waits
-    /// for an echo that is never coming.
+    /// Upstream clears the stamp even when it sends nothing, and the client's
+    /// next round trip goes unmeasured.
+    ///
+    /// The client counter in the same report is another matter: it crossed
+    /// the force in flight, and the client forgot it the moment the force
+    /// arrived, so echoing it now would acknowledge a later change instead.
     #[test]
-    fn a_held_back_heartbeat_keeps_the_echo_and_the_stamp_for_the_next_state() {
+    fn a_held_back_heartbeat_keeps_the_stamp_but_not_a_stale_echo() {
         let (mut user, _inbound) = listening_user();
         let now = Instant::now();
         user.render_state(&heartbeat(), true, now).expect("forced");
@@ -1207,7 +1211,7 @@ mod tests {
         let next = user
             .render_state(&heartbeat(), false, after(now, 0.25))
             .expect("the gate is open again");
-        assert_eq!(envelope(&next), Some((None, Some(4))));
+        assert_eq!(envelope(&next), None);
         assert!(close(client_latency(&next).expect("stamp"), 1000.25));
     }
 

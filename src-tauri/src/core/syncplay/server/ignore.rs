@@ -25,8 +25,17 @@ impl IgnoreGate {
         // Only an actual value replaces the stored one. A message that carries
         // no client half is silent about it rather than cancelling an echo
         // that has not gone out yet.
+        //
+        // And only while no force is in flight. A report that arrives with one
+        // unacknowledged was sent before the client saw it, and the client
+        // forgets its own counter the moment it does. Echoing that counter
+        // later would acknowledge whatever change the client has made since
+        // under the same number — and that change would then be undone by a
+        // state from before it.
         if let Some(value) = client_value {
-            self.client = value;
+            if self.server == 0 {
+                self.client = value;
+            }
         }
     }
 
@@ -107,5 +116,34 @@ mod tests {
     #[test]
     fn a_quiet_gate_attaches_nothing() {
         assert_eq!(IgnoreGate::default().take_envelope(), None);
+    }
+
+    #[test]
+    fn a_client_counter_sent_before_the_client_saw_a_force_is_never_echoed() {
+        let mut gate = IgnoreGate::default();
+        gate.on_forced_send();
+
+        // Crossed in flight with the force: the client had not seen it yet.
+        gate.observe(None, Some(1));
+        assert!(!gate.accepts_updates());
+
+        // The client acknowledges the force, which also wiped its counter.
+        gate.observe(Some(1), None);
+
+        assert_eq!(
+            gate.take_envelope(),
+            None,
+            "a stale echo would acknowledge the client's next change"
+        );
+    }
+
+    #[test]
+    fn a_change_sent_with_the_acknowledgement_is_still_echoed() {
+        let mut gate = IgnoreGate::default();
+        gate.on_forced_send();
+
+        gate.observe(Some(1), Some(1));
+
+        assert_eq!(gate.take_envelope(), Some((None, Some(1))));
     }
 }

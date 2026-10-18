@@ -20,7 +20,7 @@
  *                      who installed syncparty and clicked a link meets; the
  *                      resume fails for want of mpv and the setup strip comes
  *                      to the guest screen
- *   ?dev=unusable      the mpv location points at something that is not mpv
+ *   ?dev=unusable      the mpv found is too old for syncparty to drive
  *   ?dev=mismatch      the room is watching different files
  *   ?dev=guest         start as a guest rather than a host
  *   ?dev=watching      a guest already in a party, playing, with the room
@@ -107,12 +107,14 @@ const missing = new Set(
 );
 
 /**
- * The mpv location the user once chose now holds VLC — what a machine
- * upgraded from a build that supported both is left with. Detection runs it,
- * sees it is something else, and the row offers to forget the location.
+ * The mpv found is older than the driver accepts — a distribution that has
+ * fallen behind. It is there and it runs, so the row says why it cannot be
+ * used instead of offering to install what is already installed. (A VLC
+ * saved under the mpv key by an older build would also land here, but the
+ * real backend forgets that one at startup.)
  */
 const notMpv = scenario === "unusable";
-if (notMpv) overrides.mpv = "/usr/bin/vlc";
+if (notMpv) overrides.mpv = "/usr/bin/mpv";
 
 function preflight(): PreflightReport {
   return {
@@ -126,7 +128,7 @@ function preflight(): PreflightReport {
             ? {
                 state: "unusable",
                 path: overrides.mpv,
-                reason: "VLC media player 3.0.21 Vetinari (revision 3.0.21-0-gdd8bfdbabe8)",
+                reason: "mpv 0.32.0 is too old: syncparty needs 0.33 or newer",
               }
             : missing.has("mpv")
               ? { state: "missing" }

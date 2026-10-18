@@ -97,7 +97,7 @@ fn is_mpv_net(executable: &Path) -> bool {
 ///
 /// An app launched from Finder gets a minimal `PATH` without Homebrew in it,
 /// so mpv's own helpers there — `yt-dlp`, mostly — would not be found.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(super) fn child_path(current: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
     let mut directories: Vec<std::path::PathBuf> = current
         .as_deref()
@@ -202,6 +202,9 @@ mod tests {
         }
     }
 
+    // Unix only, like the `PATH` it builds: Windows separates entries with
+    // `;`, and no Windows mpv is started with this.
+    #[cfg(unix)]
     #[test]
     fn homebrew_is_added_to_the_path_once() {
         let path = child_path(Some("/usr/bin:/bin:/usr/local/bin".into())).expect("path");

@@ -202,9 +202,12 @@ mod tests {
 
     use super::*;
 
+    /// Under `/tmp` rather than the temporary directory: on macOS that is a
+    /// deep `/var/folders/…` path, and one more folder of the test's own on
+    /// top of it is enough to leave no room for the socket — which is exactly
+    /// why `/tmp` is one of the bases the real thing falls back to.
     fn scratch(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("syncparty-endpoint-{label}-{}", std::process::id()));
+        let dir = PathBuf::from("/tmp").join(format!("spe-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir

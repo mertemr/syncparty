@@ -42,7 +42,7 @@ needs Syncplay installed.
 | 🍎 macOS (Intel) | [`.dmg`](https://github.com/mertemr/syncparty/releases/latest) |
 | 🐧 Debian / Ubuntu | [`.deb`](https://github.com/mertemr/syncparty/releases/latest) |
 | 🐧 Fedora / openSUSE | [`.rpm`](https://github.com/mertemr/syncparty/releases/latest) |
-| 🐧 Arch | [`syncparty-bin`](https://aur.archlinux.org/packages/syncparty-bin) |
+| 🐧 Arch | [`PKGBUILD`](packaging/arch/PKGBUILD) — `makepkg -si` |
 | 🐧 Any other desktop Linux | [`.AppImage`](https://github.com/mertemr/syncparty/releases/latest) |
 
 Every link lands on the same page — the
@@ -53,9 +53,20 @@ place.
 
 On Debian or Ubuntu that is `sudo apt install ./syncparty_*.deb`; on Fedora or
 openSUSE, `sudo dnf install ./syncparty-*.rpm` or `sudo zypper install
-./syncparty-*.rpm`; on Arch, `syncparty-bin` from the AUR. The AppImage needs
-no install step — mark it executable and run it. Any other distribution
-builds from source — [`docs/building.md`](docs/building.md).
+./syncparty-*.rpm`. The AppImage needs no install step — mark it executable
+and run it. Any other distribution builds from source —
+[`docs/building.md`](docs/building.md).
+
+Arch is not on the AUR yet, so the package is built from this repository:
+
+```bash
+git clone https://github.com/mertemr/syncparty.git
+cd syncparty/packaging/arch
+makepkg -si
+```
+
+That builds `syncparty-git` from the tip of `main` and installs it through
+pacman, dependencies included.
 
 The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will
 both warn on first run. Updates are still verified: they are cryptographically
@@ -71,7 +82,7 @@ Homebrew only has a prebuilt mpv for Apple silicon on recent macOS releases —
 Sequoia and newer at the time of writing — so on an Intel Mac, or on an older
 macOS, it compiles mpv instead, which takes a while. The `.deb` declares it as
 a hard dependency, so apt has already put it in place before the app opens;
-`syncparty-bin` does the same on Arch. The `.rpm` only recommends it — an RPM
+`syncparty-git` does the same on Arch. The `.rpm` only recommends it — an RPM
 can land on a system whose repositories carry no mpv, and a hard dependency
 would make the package refuse to install there — and the AppImage carries no
 package-manager dependencies at all. Both fall back to the first-launch check,
@@ -277,6 +288,7 @@ src-tauri/
     session/             the host/guest state machine
     update.rs            whether this build may update itself
   packaging/             .desktop template and post-install script (.deb, .rpm)
+  packaging/arch/        PKGBUILD for building the Arch package
 scripts/                 version bump, AUR rendering
 ```
 

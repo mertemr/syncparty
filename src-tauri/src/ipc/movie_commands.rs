@@ -6,8 +6,8 @@ use tauri::State;
 use crate::core::config::AppSettings;
 use crate::core::error::Result;
 use crate::core::movie::{
-    DiscoverFilter, Genre, MovieDetails, MovieProvider, MovieSummary, PartyLogEntry,
-    SessionHistoryEntry, UserMovie, WatchedMovie,
+    Genre, MovieDetails, MovieProvider, MovieSummary, PartyLogEntry, SessionHistoryEntry,
+    UserMovie, WatchedMovie,
 };
 use crate::core::movie_vote::{MovieCandidate, MovieVoteSnapshot, ParticipationStatus};
 use crate::core::session::SessionState;
@@ -113,19 +113,6 @@ pub async fn get_top_rated_movies(
     state
         .tmdb
         .top_rated_movies(&language, page.unwrap_or(1))
-        .await
-}
-
-#[tauri::command]
-pub async fn discover_movies(
-    state: State<'_, AppState>,
-    filter: DiscoverFilter,
-    page: Option<u32>,
-) -> Result<Vec<MovieSummary>> {
-    let language = app_language(&state.settings.get());
-    state
-        .tmdb
-        .discover_movies(&filter, &language, page.unwrap_or(1))
         .await
 }
 

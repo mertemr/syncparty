@@ -802,7 +802,6 @@ const COMMANDS: Record<string, (args: Args) => unknown | Promise<unknown>> = {
       [...MOVIES].sort((a, b) => b.rating - a.rating),
       Number(page ?? 1),
     ),
-  discover_movies: ({ page }) => paginate(MOVIES, Number(page ?? 1)),
   get_genres: () => GENRES,
 
   get_movie_details: ({ tmdbId }): MovieDetails => {

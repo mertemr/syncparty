@@ -97,7 +97,6 @@ pub fn run() {
             movie_commands::get_now_playing_movies,
             movie_commands::get_upcoming_movies,
             movie_commands::get_top_rated_movies,
-            movie_commands::discover_movies,
             movie_commands::get_genres,
             movie_commands::get_movie_details,
             movie_commands::start_movie_vote,

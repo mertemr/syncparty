@@ -14,9 +14,7 @@ use serde::Deserialize;
 use crate::core::config::{SecretKey, SecretStore};
 use crate::core::error::{Result, SyncPartyError};
 
-use super::{
-    DiscoverFilter, Genre, MovieDetails, MovieProvider, MovieSummary, MovieVideo, WatchProvider,
-};
+use super::{Genre, MovieDetails, MovieProvider, MovieSummary, MovieVideo, WatchProvider};
 
 const BASE_URL: &str = "https://api.themoviedb.org/3";
 const IMAGE_BASE: &str = "https://image.tmdb.org/t/p/w500";
@@ -196,33 +194,6 @@ impl MovieProvider for TmdbClient {
 
     async fn top_rated_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>> {
         self.list("/movie/top_rated", language, page).await
-    }
-
-    async fn discover_movies(
-        &self,
-        filter: &DiscoverFilter,
-        language: &str,
-        page: u32,
-    ) -> Result<Vec<MovieSummary>> {
-        let mut query = vec![
-            ("language".to_owned(), language.to_owned()),
-            ("page".to_owned(), page.to_string()),
-        ];
-        if let Some(genre) = filter.genre_id {
-            query.push(("with_genres".to_owned(), genre.to_string()));
-        }
-        if let Some(year) = filter.year {
-            query.push(("primary_release_year".to_owned(), year.to_string()));
-        }
-        if let Some(sort_by) = &filter.sort_by {
-            query.push(("sort_by".to_owned(), sort_by.clone()));
-        }
-        if let Some(min_rating) = filter.min_rating {
-            query.push(("vote_average.gte".to_owned(), min_rating.to_string()));
-        }
-
-        let raw: RawPage<RawMovieSummary> = self.get("/discover/movie", &query).await?;
-        Ok(raw.results.into_iter().map(MovieSummary::from).collect())
     }
 
     async fn genres(&self, language: &str) -> Result<Vec<Genre>> {

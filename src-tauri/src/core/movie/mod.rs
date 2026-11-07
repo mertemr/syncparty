@@ -84,19 +84,6 @@ pub struct MovieDetails {
     pub watch_link: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "camelCase")]
-pub struct DiscoverFilter {
-    pub genre_id: Option<i32>,
-    pub year: Option<i32>,
-    /// A TMDB `sort_by` value verbatim (e.g. `"popularity.desc"`) — passed
-    /// straight through rather than modelled, since the set TMDB accepts
-    /// changes independently of this app.
-    pub sort_by: Option<String>,
-    pub min_rating: Option<f64>,
-}
-
 #[async_trait]
 pub trait MovieProvider: Send + Sync {
     async fn search_movies(
@@ -109,12 +96,6 @@ pub trait MovieProvider: Send + Sync {
     async fn now_playing_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>>;
     async fn upcoming_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>>;
     async fn top_rated_movies(&self, language: &str, page: u32) -> Result<Vec<MovieSummary>>;
-    async fn discover_movies(
-        &self,
-        filter: &DiscoverFilter,
-        language: &str,
-        page: u32,
-    ) -> Result<Vec<MovieSummary>>;
     async fn genres(&self, language: &str) -> Result<Vec<Genre>>;
     async fn movie_details(&self, tmdb_id: i64, language: &str) -> Result<MovieDetails>;
 }

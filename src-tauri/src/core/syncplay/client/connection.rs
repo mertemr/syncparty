@@ -37,7 +37,6 @@ use super::{ClientConfig, ClientStatus, ConnectionState};
 /// What the [`super::SyncClient`] handle asks of the task.
 pub(super) enum Command {
     Attach(Arc<dyn Player>, PlayerEvents),
-    Detach,
     SetReady(bool),
     Stop,
 }
@@ -369,7 +368,6 @@ impl Driver {
                     .attach(&snapshot, Instant::now(), epoch_seconds());
                 self.execute(step).await;
             }
-            Command::Detach => self.detach(),
             Command::SetReady(ready) => {
                 let step = self.engine.set_ready(ready);
                 self.execute(step).await;

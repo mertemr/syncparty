@@ -203,12 +203,6 @@ impl SyncClient {
         let _ = self.commands.send(Command::Attach(player, events));
     }
 
-    /// Forgets the player. The connection stays up and reports no playstate
-    /// until another one is attached.
-    pub fn detach_player(&self) {
-        let _ = self.commands.send(Command::Detach);
-    }
-
     /// The user's own readiness toggle.
     pub fn set_ready(&self, ready: bool) {
         let _ = self.commands.send(Command::SetReady(ready));

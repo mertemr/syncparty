@@ -15,7 +15,6 @@ import type { AppMode } from "@/shared/types/AppMode";
 import type { AppSettings } from "@/shared/types/AppSettings";
 import type { DependencyId } from "@/shared/types/DependencyId";
 import type { DiagnosticsReport } from "@/shared/types/DiagnosticsReport";
-import type { DiscoverFilter } from "@/shared/types/DiscoverFilter";
 import type { Genre } from "@/shared/types/Genre";
 import type { HostingInfo } from "@/shared/types/HostingInfo";
 import type { Invite } from "@/shared/types/Invite";
@@ -227,8 +226,6 @@ export const ipc = {
     invoke<MovieSummary[]>("get_upcoming_movies", { page }),
   getTopRatedMovies: (page?: number) =>
     invoke<MovieSummary[]>("get_top_rated_movies", { page }),
-  discoverMovies: (filter: DiscoverFilter, page?: number) =>
-    invoke<MovieSummary[]>("discover_movies", { filter, page }),
   getGenres: () => invoke<Genre[]>("get_genres"),
   getMovieDetails: (tmdbId: bigint) =>
     invoke<MovieDetails>("get_movie_details", { tmdbId }),

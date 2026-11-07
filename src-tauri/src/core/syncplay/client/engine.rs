@@ -900,10 +900,14 @@ impl Engine {
     /// The first state applied on this connection brings the player to the
     /// room outright, rather than steering it there.
     ///
-    /// Upstream has this branch but never reaches it. Here it runs on every
-    /// new connection and every new player, so it skips a seek the player
-    /// does not need — a reconnect in the middle of a film should not jump —
-    /// and announces nothing, because nobody did anything.
+    /// Upstream reaches this branch too — `_lastGlobalUpdate` starts as
+    /// `None` and goes back to it on a protocol timeout and on a retry reset
+    /// — but its `_initPlayerState` does nothing at all until a file is open,
+    /// and it falls through to the seek and pause branches afterwards. This
+    /// one returns instead, and runs on every new connection and every new
+    /// player, so it skips a seek the player does not need — a reconnect in
+    /// the middle of a film should not jump — and announces nothing, because
+    /// nobody did anything.
     fn init_player_state(
         &mut self,
         position: f64,

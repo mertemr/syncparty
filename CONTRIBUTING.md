@@ -36,9 +36,11 @@ A few things that trip people up the first time:
 
 ## Getting set up
 
-You need [Rust](https://rustup.rs), Node 22+, pnpm, and the
+You need [Rust](https://rustup.rs) 1.91 or newer — the floor `Cargo.toml`
+declares, which the locked iroh needs — Node 22+, pnpm, mpv, and the
 [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your
 platform (MSVC Build Tools on Windows, Xcode command line tools on macOS).
+[`docs/building.md`](docs/building.md) has the package names per distribution.
 
 ```bash
 pnpm install
@@ -74,8 +76,8 @@ nothing, or a test that lost its `#[ignore]`, still ends in `test result: ok.
 
 CI runs the formatting, lint and test steps on Linux, `cargo test` again on
 Windows and macOS, and the frontend tests and build on Linux. One more Linux
-job, Backend (native client + mpv), installs mpv and runs the two commands
-above, and fails either one that runs no test.
+job, Backend (native client + mpv), installs mpv and runs the three commands
+above, and fails any one of them that runs no test.
 
 Run cargo from `src-tauri`, not from the repository root with
 `--manifest-path`. Cargo looks for `.cargo/config.toml` relative to the working
